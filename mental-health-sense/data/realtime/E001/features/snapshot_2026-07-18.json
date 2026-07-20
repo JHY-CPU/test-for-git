@@ -1,0 +1,15 @@
+{
+  "date": "2026-07-18",
+  "elder_id": "E001",
+  "timestamp": "2026-07-18T13:16:18.860551",
+  "acoustic_data": {
+    "sad_ratio": 0.2083,
+    "avg_speed": 4.29,
+    "avg_pitch": 209.8,
+    "distress_events": 5
+  },
+  "statistics": {
+    "n_utterances": 24,
+    "total_duration": 72.0
+  }
+}

@@ -1,0 +1,73 @@
+# ===== 全局配置 =====
+project:
+  name: "mental-health-sense"
+  version: "1.0.0"
+
+# ===== 数据路径 =====
+paths:
+  raw_data: "./data/raw/"
+  features: "./data/features/"
+  baselines: "./data/baselines/"
+  logs: "./data/logs/"
+
+# ===== GRU 模型参数 =====
+gru:
+  feature_dim: 10  # 已移除时间编码，现在只有10维健康特征
+  hidden_dim: 16
+  num_layers: 1
+  window: 7
+  dropout: 0.2
+
+# ===== 训练参数 =====
+training:
+  initial:
+    epochs: 150
+    lr: 0.001
+  finetune:
+    epochs: 50
+    lr: 0.0003
+    recent_days: 30
+    residual_merge_alpha: 0.3
+
+# ===== EWMA 参数 =====
+ewma:
+  alpha: 0.05
+  min_samples_for_dynamic: 20
+
+# ===== 风险判定阈值 =====
+risk:
+  sigma_multiplier: 2.5
+  # 异常分数阈值（用于判定等级）
+  anomaly_score_thresholds:
+    high_spike: 1.5      # 单日高峰值阈值（触发关注级别）
+    sustained_avg: 1.0   # 连续期平均值阈值（配合连续天数判定提醒级别）
+  consecutive:
+    attention: 1
+    warning: 3
+    severe: 5
+  # 冷启动观察期（训练后多少天内不触发报警，仅记录）
+  cold_start_observation_days: 7
+
+# ===== 调度 =====
+scheduler:
+  daily_time: "02:00"
+  weekly_day: 6
+  weekly_time: "03:00"
+
+# ===== 预警推送 =====
+alert:
+  level_1:
+    action: "log_only"
+    notify: false
+  level_2:
+    action: "push_notification"
+    notify: ["children"]
+  level_3:
+    action: "force_notification"
+    notify: ["children", "community_worker"]
+
+# ===== LLM 周报 =====
+report:
+  model: "claude-sonnet-5"
+  max_tokens: 400
+  template: "weekly_report_v1"

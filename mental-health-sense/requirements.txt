@@ -1,0 +1,39 @@
+# Core
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Deep Learning
+torch>=2.0.0  # CPU-only is sufficient
+
+# Persistence
+joblib>=1.3.0
+
+# Scheduling
+APScheduler>=3.10.0
+
+# Configuration
+PyYAML>=6.0
+
+# LLM API (for weekly report)
+anthropic>=0.30.0  # Claude API
+
+# Logging & Monitoring
+loguru>=0.7.0
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# 实时监测模块依赖
+# Audio processing
+funasr>=1.0.0  # SenseVoice模型
+modelscope>=1.9.0  # 模型下载
+pyaudio>=0.2.13  # 麦克风采集 (Windows需要: pip install pipwin && pipwin install pyaudio)
+scipy>=1.11.0  # 音频处理
+
+# Video/RTSP (optional)
+opencv-python>=4.8.0  # RTSP流处理
+
+# Optional: MQTT for message queue (future use)
+# paho-mqtt>=1.6.0

@@ -1,0 +1,198 @@
+# 实时监测配置文件
+# 用于配置实时心理健康监测系统的各项参数
+
+# 系统配置
+system:
+  # 推理设备
+  device: "cuda:0"  # cuda:0, cuda:1, cpu
+
+  # 日志级别
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+
+  # 输出目录
+  output_dir: "./data/realtime"
+
+# 音频采集配置
+audio:
+  # 采样率（Hz）
+  sample_rate: 16000
+
+  # 音频分段时长（秒）
+  chunk_duration: 10
+
+  # 队列缓冲区大小
+  buffer_size: 100
+
+  # 麦克风设备索引（null=默认设备）
+  microphone_device_index: null
+
+# SenseVoice模型配置
+sensevoice:
+  # 模型缓存目录
+  model_cache_dir: "./funasr_models"
+
+  # 批处理大小
+  batch_size: 15
+
+  # 语言
+  language: "zh"
+
+  # VAD配置
+  vad:
+    max_single_segment_time: 10000  # 毫秒
+
+# 特征聚合配置
+aggregator:
+  # 时间窗口（小时）
+  window_hours: 24
+
+  # 短期窗口（用于急性风险检测）
+  short_window_hours: 1
+
+# 风险判定配置
+risk:
+  # 风险检查间隔（秒）
+  check_interval: 3600  # 1小时
+
+  # 简化规则阈值（不依赖GRU模型）
+  simple_rules:
+    # 抑郁风险
+    depression:
+      # 严重 (level 3)
+      critical:
+        sad_ratio: 0.25
+        avg_speed: 3.5
+        distress_events: 5
+      # 提醒 (level 2)
+      warning:
+        sad_ratio: 0.20
+        avg_speed: 3.8
+        distress_events: 3
+      # 关注 (level 1)
+      attention:
+        sad_ratio: 0.15
+        distress_events: 2
+
+    # 睡眠问题（需要额外传感器数据）
+    sleep_problem:
+      enabled: false
+
+    # 社交孤独（需要额外传感器数据）
+    social_isolation:
+      enabled: false
+
+  # GRU模型判定（完整模式）
+  gru_model:
+    enabled: false  # 是否启用GRU模型
+    model_dir: "./data/baselines"  # 模型目录
+    use_ewma: true  # 是否使用EWMA动态阈值
+
+# 数据保存配置
+storage:
+  # 特征保存间隔（秒）
+  save_interval: 1800  # 30分钟
+
+  # 是否保存原始音频
+  save_audio: false
+
+  # 是否保存推理结果
+  save_inference_results: true
+
+  # 数据保留时长（天）
+  retention_days: 90
+
+# 预警配置
+alert:
+  # 预警推送方式
+  methods:
+    # 日志记录
+    log:
+      enabled: true
+
+    # 文件记录
+    file:
+      enabled: true
+      path: "./data/realtime/{elder_id}/alerts"
+
+    # App推送（需要实现）
+    app_push:
+      enabled: false
+      api_endpoint: "https://api.example.com/push"
+      api_key: "YOUR_API_KEY"
+
+    # 短信通知（需要实现）
+    sms:
+      enabled: false
+      api_endpoint: "https://sms.example.com/send"
+      api_key: "YOUR_API_KEY"
+
+    # 社区平台（需要实现）
+    community:
+      enabled: false
+      api_endpoint: "https://community.example.com/alert"
+      api_key: "YOUR_API_KEY"
+
+  # 预警规则
+  rules:
+    # level 1 (关注): 仅记录，不推送
+    level_1:
+      log: true
+      push: false
+
+    # level 2 (提醒): 推送给子女
+    level_2:
+      log: true
+      push: true
+      targets: ["app"]
+
+    # level 3 (严重): 推送给子女+社区
+    level_3:
+      log: true
+      push: true
+      targets: ["app", "sms", "community"]
+      force_ring: true  # 强制响铃
+
+# 多老人配置
+elders:
+  # 示例：老人E001
+  E001:
+    name: "张大爷"
+    age: 75
+    # 个性化阈值（覆盖全局配置）
+    risk_thresholds:
+      depression:
+        critical:
+          sad_ratio: 0.22  # 张大爷baseline较低，降低阈值
+    # 联系人
+    contacts:
+      - name: "张小明"
+        relation: "儿子"
+        phone: "138****1234"
+        app_user_id: "user_001"
+
+  # 可以添加更多老人配置
+  # E002:
+  #   name: "李大妈"
+  #   ...
+
+# 性能优化
+performance:
+  # 线程数
+  num_threads: 4
+
+  # 是否启用模型量化
+  quantize: false
+
+  # 内存限制（MB）
+  max_memory_mb: 2048
+
+# 调试配置
+debug:
+  # 是否启用调试模式
+  enabled: false
+
+  # 是否打印详细日志
+  verbose: false
+
+  # 是否保存中间结果
+  save_intermediate: false

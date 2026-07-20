@@ -1,0 +1,12 @@
+{
+  "test_time": "2026-07-18 13:01:25",
+  "features": {
+    "sad_ratio": 0.3333,
+    "avg_speed": 4.05,
+    "avg_pitch": 204.2,
+    "distress_events": 6,
+    "n_utterances": 18,
+    "total_duration": 54.0
+  },
+  "risk_level": "严重"
+}

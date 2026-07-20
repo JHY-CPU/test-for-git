@@ -1,0 +1,69 @@
+{
+  "demo_time": "2026-07-18 13:04:05",
+  "elder_id": "E001",
+  "features_24h": {
+    "sad_ratio": 0.3333,
+    "avg_speed": 4.0,
+    "avg_pitch": 203.1,
+    "distress_events": 15,
+    "n_utterances": 45,
+    "total_duration": 135.0
+  },
+  "features_4h": {
+    "sad_ratio": 0.0909,
+    "avg_speed": 3.99,
+    "avg_pitch": 204.4,
+    "distress_events": 1,
+    "n_utterances": 11,
+    "total_duration": 33.0
+  },
+  "risk_level": 1,
+  "risk_type": "Depression - Attention",
+  "scenarios": [
+    {
+      "time": "06:00",
+      "activity": "Morning",
+      "emotion": "neutral"
+    },
+    {
+      "time": "08:00",
+      "activity": "Breakfast",
+      "emotion": "happy"
+    },
+    {
+      "time": "10:00",
+      "activity": "Watching TV",
+      "emotion": "neutral"
+    },
+    {
+      "time": "12:00",
+      "activity": "Lunch",
+      "emotion": "neutral"
+    },
+    {
+      "time": "14:00",
+      "activity": "Afternoon",
+      "emotion": "sad"
+    },
+    {
+      "time": "16:00",
+      "activity": "Late PM",
+      "emotion": "sad"
+    },
+    {
+      "time": "18:00",
+      "activity": "Dinner",
+      "emotion": "sad"
+    },
+    {
+      "time": "20:00",
+      "activity": "Evening",
+      "emotion": "neutral"
+    },
+    {
+      "time": "22:00",
+      "activity": "Bedtime",
+      "emotion": "neutral"
+    }
+  ]
+}
