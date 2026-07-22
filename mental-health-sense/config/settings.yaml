@@ -23,11 +23,28 @@ training:
   initial:
     epochs: 150
     lr: 0.001
+    patience: 20             # early-stopping：连续N轮loss无改善则提前停止（防小样本过拟合）
   finetune:
     epochs: 50
     lr: 0.0003
     recent_days: 30
     residual_merge_alpha: 0.3
+    exclude_deviation_days: true  # 微调只用被判为正常(is_deviation=False)的天，防基线被异常期污染
+
+# ===== 训练数据健康门禁 =====
+# 冷启动前对建档期数据做MAD离群筛查，剔除可疑异常天，防止GRU把异常学成正常基线
+data_health:
+  z_threshold: 3.5           # modified z-score阈值，超过视为该特征离群
+  min_bad_features: 2        # 一天中离群特征数达到此值则整天判为离群
+  max_outlier_ratio: 0.5     # 离群天占比超过此值则拒绝建档（数据整体异常，建议顺延）
+
+# ===== 冷启动兜底 =====
+# GRU基线就绪前，用滑动均值/标准差做基础离群检测，消除头两周监测盲区
+cold_start:
+  fallback_enabled: true
+  fallback_min_days: 5       # 至少积累N天有效数据才启用兜底
+  fallback_lookback: 14      # 滑动基线回看窗口（天）
+  fallback_sigma: 3.0        # 加权z-score超过此值判为偏离（比GRU轨更保守，减少误报）
 
 # ===== EWMA 参数 =====
 ewma:

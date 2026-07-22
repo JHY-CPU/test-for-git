@@ -69,6 +69,7 @@ def train_initial_baseline(
     window = gru_cfg.get("window", 7)
     epochs = train_cfg.get("epochs", 150)
     lr = train_cfg.get("lr", 0.001)
+    patience = train_cfg.get("patience", 20)
     hidden_dim = gru_cfg.get("hidden_dim", 16)
     num_layers = gru_cfg.get("num_layers", 1)
     dropout = gru_cfg.get("dropout", 0.2)
@@ -84,11 +85,45 @@ def train_initial_baseline(
         )
 
     from src.baseline.scaler_utils import FULL_FEATURE_NAMES
-    data = valid_df[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)[:14]  # (14, 12)
+    data = valid_df[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)[:14]  # (14, 10)
 
     logger.info(f"  └─ 加载 {len(data)} 天特征数据")
 
-    # 2. 拟合Scaler
+    # 1b. 训练数据健康门禁（防止 GRU "学坏"）
+    # 建档期若混入异常态，GRU 会把异常学成正常基线。先做 MAD 离群筛查，
+    # 剔除可疑异常天后再训练；若整体离群比例过高则拒绝建档，建议顺延。
+    from src.baseline.data_health import detect_outlier_days, describe_outlier_days
+
+    health_cfg = config.get("data_health", {})
+    z_threshold = health_cfg.get("z_threshold", 3.5)
+    min_bad_features = health_cfg.get("min_bad_features", 2)
+    max_outlier_ratio = health_cfg.get("max_outlier_ratio", 0.5)
+
+    health_report = detect_outlier_days(data, z_threshold, min_bad_features)
+    if health_report["outlier_day_indices"]:
+        for line in describe_outlier_days(data, health_report):
+            logger.warning(f"  └─ 建档期离群天: {line}")
+
+        if health_report["outlier_ratio"] > max_outlier_ratio:
+            raise ValueError(
+                f"建档期数据离群比例过高（{health_report['outlier_ratio']:.0%} > "
+                f"{max_outlier_ratio:.0%}），数据整体异常，建议顺延建档而非用脏数据建立基线"
+            )
+
+        keep_mask = np.ones(len(data), dtype=bool)
+        keep_mask[health_report["outlier_day_indices"]] = False
+        removed = len(data) - int(keep_mask.sum())
+        data = data[keep_mask]
+        logger.info(
+            f"  └─ 健康门禁：剔除 {removed} 个离群天，剩余 {len(data)} 天用于训练"
+        )
+
+    if len(data) < window + 1:
+        raise ValueError(
+            f"剔除离群天后有效数据不足（{len(data)}天 < {window + 1}天），建议顺延建档"
+        )
+
+    # 2. 拟合Scaler（在清洗后的数据上拟合，避免归一化基准被异常天带偏）
     scaler = StandardScaler()
     scaler = fit_scaler(scaler, data)
     data_norm = scaler.transform(data)  # (14, 12)
@@ -121,8 +156,15 @@ def train_initial_baseline(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
+    # early-stopping：冷启动样本极少（14天仅约7个窗口样本），高 epoch 易过拟合。
+    # 连续 patience 轮 loss 无改善则提前停止，并回滚到最优权重。
+    import copy
+
     model.train()
     best_loss = float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+    epochs_no_improve = 0
+    stopped_epoch = epochs
     for epoch in range(epochs):
         pred = model(X)
         loss = loss_fn(pred, y)
@@ -131,13 +173,29 @@ def train_initial_baseline(
         loss.backward()
         optimizer.step()
 
-        if loss.item() < best_loss:
-            best_loss = loss.item()
+        cur_loss = loss.item()
+        if cur_loss < best_loss - 1e-6:
+            best_loss = cur_loss
+            best_state = copy.deepcopy(model.state_dict())
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
         if (epoch + 1) % 30 == 0:
-            logger.debug(f"  └─ Epoch {epoch + 1}/{epochs}, Loss: {loss.item():.6f}")
+            logger.debug(f"  └─ Epoch {epoch + 1}/{epochs}, Loss: {cur_loss:.6f}")
 
-    logger.info(f"  └─ GRU训练完成: best_loss={best_loss:.6f}, params={model.count_parameters()}")
+        if patience and epochs_no_improve >= patience:
+            stopped_epoch = epoch + 1
+            logger.info(f"  └─ early-stopping：连续{patience}轮无改善，第{stopped_epoch}轮停止")
+            break
+
+    # 回滚到最优权重（避免停止时正好在一个抖动高点）
+    model.load_state_dict(best_state)
+
+    logger.info(
+        f"  └─ GRU训练完成: best_loss={best_loss:.6f}, "
+        f"epochs={stopped_epoch}/{epochs}, params={model.count_parameters()}"
+    )
 
     # 5. 计算残差统计
     model.eval()
@@ -217,13 +275,35 @@ def weekly_retrain(
     lr = train_cfg.get("lr", 0.0003)
     recent_days = train_cfg.get("recent_days", 30)
     merge_alpha = train_cfg.get("residual_merge_alpha", 0.3)
+    exclude_deviation = train_cfg.get("exclude_deviation_days", True)
 
-    # 1. 取最近N天特征
+    # 1. 取最近N天有效特征（带日期，用于剔除已判定为偏离的异常天）
+    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
     try:
-        recent = get_recent_vectors(elder_id, days=recent_days)
+        df = load_features_csv(elder_id)
     except Exception:
         logger.warning(f"  └─ 无法获取最近数据，跳过微调")
         return
+
+    df = df[df["data_quality"] == "valid"].sort_values("date")
+    df_recent = df.tail(recent_days).copy()
+
+    # 剔除异常天：若某天已被 daily_inference 判为 is_deviation=True，
+    # 说明处于异常态，纳入微调会把异常学成正常基线，故排除。
+    if exclude_deviation:
+        from src.utils.io import load_daily_results
+        results = load_daily_results(elder_id, n_days=max(recent_days * 2, 60))
+        deviation_dates = {
+            r["date"] for r in results if r.get("is_deviation", False)
+        }
+        if deviation_dates:
+            before = len(df_recent)
+            df_recent = df_recent[~df_recent["date"].isin(deviation_dates)]
+            excluded = before - len(df_recent)
+            if excluded:
+                logger.info(f"  └─ 微调剔除 {excluded} 个偏离天（防基线被异常期污染）")
+
+    recent = df_recent[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)
 
     if len(recent) < 14:
         logger.warning(f"  └─ 有效数据不足14天（{len(recent)}天），跳过微调")
@@ -292,7 +372,14 @@ def weekly_retrain(
 
     merged_stats = {"mean": merged_mean, "std": merged_std}
 
-    # 7. 保存
+    # 7. 保存（覆盖前先备份上一版模型，便于微调把模型搞坏时回滚）
+    import shutil
+    baseline_dir = get_baseline_dir(elder_id)
+    cur_model = baseline_dir / "gru.pth"
+    if cur_model.exists():
+        shutil.copy2(cur_model, baseline_dir / "gru.prev.pth")
+        logger.info(f"  └─ 已备份上一版模型: gru.prev.pth")
+
     save_gru_model(model, elder_id, "gru.pth")
     save_residual_stats(merged_stats, elder_id)
 

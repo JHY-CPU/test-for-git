@@ -64,7 +64,11 @@ def save_daily_features(
     row["missing_count"] = missing_count
     row["data_quality"] = data_quality
 
-    df_row = pd.DataFrame([row])
+    # 固定列顺序（与 generate_simulation_data.py 一致）。
+    # 追加模式 header=False 只写值不写列名，必须显式对齐列顺序，
+    # 否则 dict 插入顺序（date 在末尾）会与既有表头（date 在首列）错位，污染 CSV。
+    cols = ["date"] + FULL_FEATURE_NAMES + ["missing_count", "data_quality"]
+    df_row = pd.DataFrame([row])[cols]
 
     if filepath.exists():
         df_row.to_csv(filepath, mode="a", header=False, index=False)

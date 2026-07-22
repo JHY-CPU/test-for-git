@@ -118,6 +118,12 @@ def run_daily_pipeline(
             from src.baseline.inference import daily_inference
             inference_result = daily_inference(elder_id, date_str, config)
 
+            # GRU 基线尚未就绪（冷启动期）：用滑动均值兜底，消除头两周监测盲区
+            if inference_result.get("status") == "cold_start":
+                fb = _cold_start_fallback(elder_id, date_str, filled_vec, config)
+                if fb is not None:
+                    inference_result = fb
+
             if inference_result.get("status") == "success":
                 # 6. 风险判定
                 from src.risk.judge import quick_judge
@@ -158,6 +164,97 @@ def _get_recent_quality(elder_id: str, n_days: int = 5) -> list[str]:
         return recent["data_quality"].tolist()
     except Exception:
         return []
+
+
+def _cold_start_fallback(
+    elder_id: str,
+    date_str: str,
+    today_vec,
+    config: dict | None = None,
+) -> dict | None:
+    """
+    冷启动兜底：GRU 基线就绪前，用滑动均值/标准差做基础离群检测。
+
+    消除建档期（默认前 14 天）+ 观察期的监测盲区。一旦 GRU 基线就绪，
+    daily_inference 不再返回 cold_start，本函数也就不会被调用。
+
+    Args:
+        elder_id: 老人ID
+        date_str: 今日日期
+        today_vec: (10,) 今日已填充的特征向量
+        config: 全局配置
+
+    Returns:
+        与 daily_inference 结构兼容的结果字典（status="cold_start_fallback"），
+        数据不足以兜底时返回 None。
+    """
+    if config is None:
+        from src.utils.io import load_config
+        config = load_config()
+
+    cs_cfg = config.get("cold_start", {})
+    if not cs_cfg.get("fallback_enabled", True):
+        return None
+
+    min_days = cs_cfg.get("fallback_min_days", 5)
+    lookback = cs_cfg.get("fallback_lookback", 14)
+    sigma = cs_cfg.get("fallback_sigma", 3.0)
+
+    import numpy as np
+    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.utils.io import get_feature_weight_array, save_daily_result
+
+    # 取今天之前的历史有效特征作为滑动基线
+    try:
+        df = load_features_csv(elder_id)
+    except Exception:
+        return None
+
+    df = df[(df["data_quality"] == "valid") & (df["date"] < date_str)].sort_values("date")
+    df = df.tail(lookback)
+
+    if len(df) < min_days:
+        logger.info(f"  └─ 冷启动兜底：历史有效数据不足（{len(df)}/{min_days}天），暂不检测")
+        return None
+
+    history = df[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)
+    weights = get_feature_weight_array()
+
+    from src.baseline.cold_start_fallback import fallback_deviation_check
+    fb = fallback_deviation_check(history, today_vec, weights, sigma=sigma)
+
+    # 统计连续偏离天数（复用 daily_inference 的日志）
+    from src.utils.io import load_daily_results
+    recent_results = load_daily_results(elder_id, n_days=7)
+    consecutive = 0
+    for day_result in reversed(recent_results):
+        if day_result.get("is_deviation", False):
+            consecutive += 1
+        else:
+            break
+
+    result = {
+        "elder_id": elder_id,
+        "date": date_str,
+        "anomaly_score": fb["anomaly_score"],
+        "static_threshold": fb["threshold"],
+        "ewma_threshold": fb["threshold"],
+        "dynamic_threshold": fb["threshold"],
+        "is_deviation": fb["is_deviation"],
+        "feature_residuals": fb["feature_z"],
+        "consecutive_deviation_days": consecutive + (1 if fb["is_deviation"] else 0),
+        "data_quality": "valid",
+        "status": "cold_start_fallback",
+        "in_observation_period": True,
+    }
+    save_daily_result(elder_id, date_str, result)
+
+    logger.info(
+        f"  └─ 冷启动兜底检测: score={fb['anomaly_score']:.4f}, "
+        f"threshold={fb['threshold']:.2f}, deviation={fb['is_deviation']} "
+        f"(滑动基线 n={len(history)})"
+    )
+    return result
 
 
 def _load_raw_and_aggregate(elder_id: str, date_str: str):
