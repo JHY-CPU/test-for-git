@@ -5,7 +5,8 @@
 ## 系统特点
 
 - **单人系统**：面向单一老人的连续监测与趋势预警
-- **双轨架构**：实时轨（快速响应）+ 每日轨（深度分析）
+- **双轨架构**：实时轨（语音采集前端）+ 每日轨（趋势分析 + 统一预警出口）
+- **克制预警**：实时轨不做主动报警，预警统一由每日趋势轨在连续偏离后发出，避免过度敏感打扰家人
 - **个人化基线**：为该老人独立建模（PersonalBaselineGRU + EWMA动态阈值），"自己和自己比"
 - **多传感器融合**：睡眠雷达 + PIR/IPC + 拾音器 + SenseVoice语音情感分析
 - **趋势判定**：连续3-5天偏离才触发预警，避免单日波动误报
@@ -85,10 +86,10 @@ mental-health-sense/
 │   │       ├── microphone.py        # 麦克风适配器
 │   │       └── sensevoice.py        # SenseVoice模型适配器
 │   │
-│   ├── realtime/                    # 实时监测系统
+│   ├── realtime/                    # 实时语音采集前端（不做报警）
 │   │   ├── audio_stream.py          # 音频流抽象（麦克风/RTSP/文件）
 │   │   ├── sensevoice_engine.py     # SenseVoice推理 + 24小时聚合器
-│   │   └── monitor.py               # RealtimeMonitor主控制器
+│   │   └── monitor.py               # RealtimeMonitor：语音采集前端（提取声学特征）
 │   │
 │   ├── risk/                        # 风险判定层
 │   │   ├── rules.py                 # 3种风险类型（抑郁/睡眠/社交）
@@ -145,10 +146,10 @@ mental-health-sense/
 
 | 轨道 | 频率 | 功能 | 判定依据 |
 |------|------|------|----------|
-| **实时轨** | 持续采集，每小时评估 | 快速响应急性风险 | 简化规则（阈值判定） |
-| **每日轨** | 每日02:00 | 深度趋势分析 | GRU预测 + EWMA动态阈值 |
+| **实时轨** | 持续采集 | 语音**采集前端**（提取声学特征，不做报警） | —— |
+| **每日轨** | 每日02:00 | 深度趋势分析 + **统一预警出口** | GRU预测 + EWMA动态阈值 |
 
-**核心理念**：实时轨捕捉突发情绪崩溃，每日轨确认长期趋势，形成双重保障。
+**核心理念**：实时轨只负责持续采集语音特征，**不做实时主动报警**；所有心理风险预警统一由每日趋势轨在累积数据上判定后发出。这样既保留了语音这一路输入，又避免实时轨因单点波动过度敏感、频繁打扰家人。
 
 ### 数据流架构
 
@@ -157,20 +158,20 @@ mental-health-sense/
 │                       统一系统                                │
 └─────────────────────────────────────────────────────────────┘
 
-【实时轨】                           【每日轨】
+【实时轨：采集前端】                 【每日轨：分析 + 预警出口】
 音频输入（麦克风/RTSP/文件）          每天凌晨02:00触发
     ↓                                    ↓
 SenseVoice实时推理                   UnifiedDataManager
     ↓                                获取昨日声学特征
 24小时滑动窗口聚合                       ↓
     ↓                                + 睡眠雷达数据
-每小时风险检查                         + PIR/IPC活动数据
-（简化规则，快速响应）                 + 拾音器社交数据
-    ↓                                    ↓
-Level 1/2/3预警                     10维特征向量
-    ↓                                    ↓
-UnifiedDataManager                   GRU模型预测
-保存特征快照                            ↓
+UnifiedDataManager                   + PIR/IPC活动数据
+保存特征快照                          + 拾音器社交数据
+（不做实时报警）                         ↓
+    │                                10维特征向量
+    │                                    ↓
+    └──── 声学特征汇入 ─────────────►  GRU模型预测
+                                        ↓
                                     加权残差计算
                                         ↓
                                     EWMA动态阈值判定
@@ -181,7 +182,7 @@ UnifiedDataManager                   GRU模型预测
                                         ↓
                                     Level 0/1/2/3判定
                                         ↓
-                                    预警推送
+                                    预警推送（统一出口）
 ```
 
 ### 四级风险（全部基于趋势）
@@ -345,16 +346,16 @@ python scripts/run_daily_pipeline.py --date 2026-08-15
 python scripts/run_daily_pipeline.py --date 2026-08-15 --elder E001
 ```
 
-### 2. 仅使用实时系统（快速响应）
+### 2. 仅运行实时采集前端（不做报警）
 
-适用场景：需要即时监测，暂不使用GRU深度分析
+适用场景：单独运行语音采集，持续抽取声学特征存为快照。实时轨**不做主动报警**，
+预警需配合每日趋势轨。
 
 ```bash
 # 使用麦克风实时采集
 python scripts/start_realtime_monitor.py \
     --elder-id E001 \
-    --microphone \
-    --risk-check-interval 3600  # 每小时检查一次
+    --microphone
 
 # 使用RTSP摄像头
 python scripts/start_realtime_monitor.py \
@@ -369,7 +370,7 @@ python scripts/start_realtime_monitor.py \
 
 ### 3. 使用统一系统（推荐）
 
-适用场景：生产环境，实时轨 + 每日轨双重保障
+适用场景：生产环境，实时轨采集 + 每日轨趋势分析
 
 ```bash
 # 启动统一系统
@@ -379,10 +380,10 @@ python scripts/start_unified_system.py \
     --daily-time 02:00
 
 # 效果：
-# - 实时系统24小时采集语音
-# - 每小时自动风险检查
-# - 每天凌晨2点自动执行GRU推理
+# - 实时系统24小时采集语音特征（不做实时报警）
+# - 每天凌晨2点自动执行GRU趋势推理
 # - 实时数据自动流入每日系统
+# - 所有预警统一由每日趋势轨发出
 ```
 
 ### 4. 运行演示（无需硬件）
@@ -538,30 +539,12 @@ sensevoice:
 
 aggregator:
   window_hours: 24         # 24小时聚合窗口
-  short_window_hours: 1    # 急性风险检测短窗口
 
-risk:
-  check_interval: 3600     # 风险检查间隔（秒）
-  simple_rules:            # 简化规则阈值（不依赖GRU模型）
-    depression:
-      critical:            # Level 3
-        sad_ratio: 0.25
-        avg_speed: 3.5
-        distress_events: 5
-      warning:             # Level 2
-        sad_ratio: 0.20
-        avg_speed: 3.8
-        distress_events: 3
-      attention:           # Level 1
-        sad_ratio: 0.15
-        distress_events: 2
-    sleep_problem:
-      enabled: false       # 需额外传感器数据，默认关闭
-    social_isolation:
-      enabled: false       # 需额外传感器数据，默认关闭
-  gru_model:
-    enabled: false         # 实时轨默认仅用简化规则
-    use_ewma: true
+# ⚠️ risk 段已停用：实时轨不再做主动报警，此段配置当前不被代码读取，
+# 仅作历史参考保留。所有预警统一由每日趋势轨发出（见 settings.yaml 的 risk 段）。
+# risk:
+#   check_interval: 3600
+#   simple_rules: { ... }
 ```
 
 ---
@@ -661,4 +644,4 @@ MIT
 ---
 
 **最后更新**：2026-07-22  
-**项目版本**：v1.2（单人系统）
+**项目版本**：v1.3（单人系统；实时轨降级为采集前端，预警统一由每日趋势轨发出）

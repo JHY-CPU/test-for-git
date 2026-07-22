@@ -1,7 +1,12 @@
 """
-统一调度器 - 整合实时监测与每日推理
+统一调度器 - 整合实时采集与每日趋势推理
 
-将实时监测和每日推理整合为一个统一的系统
+将实时语音采集与每日趋势推理整合为一个系统：
+    - 实时轨仅作**语音采集前端**，持续抽取声学特征供每日轨使用
+    - 每日轨（GRU + EWMA + 连续偏离判定）在累积数据上做趋势预警
+
+设计说明：实时轨**不做主动报警**。所有心理风险预警统一由每日趋势轨发出，
+避免实时轨因单点波动过度敏感、频繁打扰家人。
 """
 
 import time
@@ -18,9 +23,9 @@ class UnifiedScheduler:
     """统一调度器
 
     职责：
-        1. 管理实时音频采集和推理
-        2. 定时触发每日推理（使用实时累积的数据）
-        3. 协调实时预警和每日预警
+        1. 管理实时音频采集和推理（仅采集语音特征，不做实时报警）
+        2. 定时触发每日趋势推理（使用实时累积的数据）
+        3. 预警统一由每日趋势轨发出
     """
 
     def __init__(
@@ -50,17 +55,12 @@ class UnifiedScheduler:
         # 启动音频流
         self.audio_stream.start()
 
-        # 启动实时处理线程
+        # 启动实时采集线程（仅采集语音特征，不做实时报警）
         realtime_thread = threading.Thread(target=self._realtime_loop, daemon=True)
         realtime_thread.start()
         self._threads.append(realtime_thread)
 
-        # 启动实时风险检查线程
-        risk_thread = threading.Thread(target=self._risk_check_loop, daemon=True)
-        risk_thread.start()
-        self._threads.append(risk_thread)
-
-        # 启动每日调度线程
+        # 启动每日调度线程（预警统一由每日趋势轨发出）
         daily_thread = threading.Thread(target=self._daily_schedule_loop, daemon=True)
         daily_thread.start()
         self._threads.append(daily_thread)
@@ -105,27 +105,6 @@ class UnifiedScheduler:
             except Exception as e:
                 print(f"[实时轨] 处理异常: {e}")
                 time.sleep(1)
-
-    def _risk_check_loop(self):
-        """实时风险检查循环（每小时）"""
-        print("[实时轨] 启动风险检查...")
-
-        while not self._stop_event.is_set():
-            try:
-                # 等待1小时
-                time.sleep(3600)
-
-                # 获取当前24小时特征
-                features = self.data_manager.get_current_features()
-
-                # 简化风险判定
-                risk_level = self._quick_risk_assessment(features)
-
-                if risk_level > 0:
-                    self._trigger_realtime_alert(risk_level, features)
-
-            except Exception as e:
-                print(f"[实时轨] 风险检查异常: {e}")
 
     def _daily_schedule_loop(self):
         """每日推理调度循环（每天凌晨2点）"""
@@ -193,32 +172,6 @@ class UnifiedScheduler:
 
         except Exception as e:
             print(f"[每日轨] 推理失败: {e}")
-
-    def _quick_risk_assessment(self, features: dict) -> int:
-        """快速风险评估（实时系统用）"""
-        sad_ratio = features.get("sad_ratio", 0)
-        avg_speed = features.get("avg_speed", 4.0)
-        distress_events = features.get("distress_events", 0)
-
-        # 简化判定
-        if sad_ratio > 0.30 and avg_speed < 3.5 and distress_events > 5:
-            return 3  # 严重
-        elif sad_ratio > 0.25 and avg_speed < 3.8:
-            return 2  # 提醒
-        elif sad_ratio > 0.20 or distress_events > 3:
-            return 1  # 关注
-        else:
-            return 0  # 正常
-
-    def _trigger_realtime_alert(self, risk_level: int, features: dict):
-        """触发实时预警"""
-        risk_names = ["正常", "关注", "提醒", "严重"]
-        print(f"\n[实时预警] 风险等级: {risk_names[risk_level]} (Level {risk_level})")
-        print(f"  - 悲伤占比: {features['sad_ratio']:.3f}")
-        print(f"  - 平均语速: {features['avg_speed']:.2f}")
-        print(f"  - 痛苦事件: {features['distress_events']}")
-
-        # TODO: 推送到App/短信
 
     def _get_sleep_data(self, date: str) -> dict:
         """获取睡眠数据（TODO: 对接睡眠雷达）"""

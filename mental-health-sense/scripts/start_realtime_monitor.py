@@ -65,12 +65,6 @@ def main():
         help="音频分段时长（秒），默认: 10",
     )
     parser.add_argument(
-        "--risk-check-interval",
-        type=int,
-        default=3600,
-        help="风险检查间隔（秒），默认: 3600（1小时）",
-    )
-    parser.add_argument(
         "--save-interval",
         type=int,
         default=1800,
@@ -126,7 +120,6 @@ def main():
         sys.exit(1)
 
     print(f"音频分段: {args.chunk_duration} 秒")
-    print(f"风险检查: 每 {args.risk_check_interval} 秒")
     print(f"特征保存: 每 {args.save_interval} 秒")
     print(f"输出目录: {args.output_dir}")
     print(f"GPU设备: {args.gpu}")
@@ -138,7 +131,6 @@ def main():
             elder_id=args.elder_id,
             audio_stream=audio_stream,
             output_dir=args.output_dir,
-            risk_check_interval=args.risk_check_interval,
             save_interval=args.save_interval,
         )
     except Exception as e:
