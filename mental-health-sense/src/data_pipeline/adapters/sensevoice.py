@@ -40,7 +40,7 @@ class SenseVoiceAdapter(SensorAdapter):
     拾音器 + SenseVoice → 声学/语义特征
 
     输入：音频流 → SenseVoice 推理结果
-    输出：{"sad_ratio", "avg_speed", "avg_pitch", "distress_events"}
+    输出：{"sad_ratio", "avg_speed", "pitch_variability", "distress_events"}
 
     Usage:
         # 开发/测试阶段
@@ -56,10 +56,10 @@ class SenseVoiceAdapter(SensorAdapter):
     """
 
     FEATURE_NAMES = [
-        "sad_ratio",        # 悲伤标签占比 [0, 1]
-        "avg_speed",        # 平均语速（音节/秒）
-        "avg_pitch",        # 平均基频 F0 (Hz)
-        "distress_events",  # 叹气/哭声等非言语痛苦声音频次
+        "sad_ratio",          # 悲伤标签占比 [0, 1]
+        "avg_speed",          # 平均语速（音节/秒）
+        "pitch_variability",  # 基频变异性 F0标准差 (Hz)，语调单调性
+        "distress_events",    # 叹气/哭声等非言语痛苦声音频次
     ]
 
     # SenseVoice 情感标签映射
@@ -112,7 +112,7 @@ class SenseVoiceAdapter(SensorAdapter):
             {
                 "sad_ratio": 0.05,
                 "avg_speed": 4.2,
-                "avg_pitch": 218.0,
+                "pitch_variability": 28.0,
                 "distress_events": 1,
             }
         """
@@ -182,17 +182,19 @@ class SenseVoiceAdapter(SensorAdapter):
 
         avg_speed = max(1.0, min(avg_speed, 8.0))
 
-        # ===== 平均基频 =====
-        if n_utterances > 0:
+        # ===== 基频变异性（F0标准差）=====
+        # 文献依据：抑郁表现为语调平淡单调，F0变异性下降（而非均值下降）
+        # 参考 SD F0 与抑郁严重度相关（PubMed 38089742）
+        if n_utterances >= 2:
             pitches = [
                 utt.get("pitch_mean", 200.0) for utt in utterances
                 if utt.get("pitch_mean") is not None
             ]
-            avg_pitch = np.mean(pitches) if pitches else 200.0
+            pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
         else:
-            avg_pitch = 200.0
+            pitch_variability = 25.0
 
-        avg_pitch = max(80.0, min(400.0, float(avg_pitch)))
+        pitch_variability = max(0.0, min(150.0, float(pitch_variability)))
 
         # ===== 痛苦事件频次 =====
         distress_events = len(non_verbal_events)
@@ -207,7 +209,7 @@ class SenseVoiceAdapter(SensorAdapter):
         return {
             "sad_ratio": round(float(sad_ratio), 4),
             "avg_speed": round(float(avg_speed), 2),
-            "avg_pitch": round(float(avg_pitch), 1),
+            "pitch_variability": round(float(pitch_variability), 1),
             "distress_events": int(distress_events),
         }
 
@@ -224,6 +226,6 @@ class SenseVoiceAdapter(SensorAdapter):
         return {
             "sad_ratio": round(float(sad_ratio), 4),
             "avg_speed": round(max(2.0, min(6.0, 4.2 + noise.normal(0, 0.4))), 2),
-            "avg_pitch": round(max(150, min(300, 215 + noise.normal(0, 15))), 1),
+            "pitch_variability": round(max(5.0, min(60.0, 30 + noise.normal(0, 5))), 1),
             "distress_events": distress,
         }

@@ -229,10 +229,10 @@ class SenseVoiceEngine:
 
         Returns:
             {
-                "sad_ratio": float,       # 悲伤占比 [0, 1]
-                "avg_speed": float,       # 平均语速 (字/秒)
-                "avg_pitch": float,       # 平均基频 (Hz)
-                "distress_events": int,   # 痛苦事件次数
+                "sad_ratio": float,          # 悲伤占比 [0, 1]
+                "avg_speed": float,          # 平均语速 (字/秒)
+                "pitch_variability": float,  # 基频变异性 F0标准差 (Hz)
+                "distress_events": int,      # 痛苦事件次数
             }
         """
         utterances = result.get("utterances", [])
@@ -242,7 +242,7 @@ class SenseVoiceEngine:
             return {
                 "sad_ratio": 0.05,
                 "avg_speed": 4.0,
-                "avg_pitch": 200.0,
+                "pitch_variability": 25.0,
                 "distress_events": 0,
             }
 
@@ -264,10 +264,10 @@ class SenseVoiceEngine:
         avg_speed = np.mean(speeds) if speeds else 4.0
         avg_speed = max(1.0, min(8.0, float(avg_speed)))
 
-        # 3. 平均基频
+        # 3. 基频变异性（F0标准差，语调单调性）
         pitches = [utt.get("pitch_mean", 200.0) for utt in utterances]
-        avg_pitch = np.mean(pitches) if pitches else 200.0
-        avg_pitch = max(80.0, min(400.0, float(avg_pitch)))
+        pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
+        pitch_variability = max(0.0, min(150.0, pitch_variability))
 
         # 4. 痛苦事件（简单检测：悲伤/愤怒/恐惧情绪）
         distress_emotions = {"sad", "angry", "fearful"}
@@ -278,7 +278,7 @@ class SenseVoiceEngine:
         return {
             "sad_ratio": round(sad_ratio, 4),
             "avg_speed": round(avg_speed, 2),
-            "avg_pitch": round(avg_pitch, 1),
+            "pitch_variability": round(pitch_variability, 1),
             "distress_events": distress_events,
         }
 
@@ -327,7 +327,7 @@ class RealtimeFeatureAggregator:
             {
                 "sad_ratio": float,
                 "avg_speed": float,
-                "avg_pitch": float,
+                "pitch_variability": float,
                 "distress_events": int,
                 "n_utterances": int,
                 "total_duration": float,
@@ -337,7 +337,7 @@ class RealtimeFeatureAggregator:
             return {
                 "sad_ratio": 0.05,
                 "avg_speed": 4.0,
-                "avg_pitch": 200.0,
+                "pitch_variability": 25.0,
                 "distress_events": 0,
                 "n_utterances": 0,
                 "total_duration": 0.0,
@@ -362,9 +362,9 @@ class RealtimeFeatureAggregator:
         speeds = [utt.get("speech_rate", 4.0) for utt in utterances]
         avg_speed = float(np.mean(speeds)) if speeds else 4.0
 
-        # 3. 平均基频
+        # 3. 基频变异性（F0标准差）
         pitches = [utt.get("pitch_mean", 200.0) for utt in utterances]
-        avg_pitch = float(np.mean(pitches)) if pitches else 200.0
+        pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
 
         # 4. 痛苦事件
         distress_emotions = {"sad", "angry", "fearful"}
@@ -375,7 +375,7 @@ class RealtimeFeatureAggregator:
         return {
             "sad_ratio": round(sad_ratio, 4),
             "avg_speed": round(avg_speed, 2),
-            "avg_pitch": round(avg_pitch, 1),
+            "pitch_variability": round(pitch_variability, 1),
             "distress_events": distress_events,
             "n_utterances": n_utterances,
             "total_duration": round(total_weight, 1),
@@ -412,7 +412,7 @@ class RealtimeFeatureAggregator:
         avg_speed = float(np.mean(speeds)) if speeds else 4.0
 
         pitches = [utt.get("pitch_mean", 200.0) for utt in recent_utterances]
-        avg_pitch = float(np.mean(pitches)) if pitches else 200.0
+        pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
 
         distress_emotions = {"sad", "angry", "fearful"}
         distress_events = sum(
@@ -422,7 +422,7 @@ class RealtimeFeatureAggregator:
         return {
             "sad_ratio": round(sad_ratio, 4),
             "avg_speed": round(avg_speed, 2),
-            "avg_pitch": round(avg_pitch, 1),
+            "pitch_variability": round(pitch_variability, 1),
             "distress_events": distress_events,
             "n_utterances": n_utterances,
             "total_duration": round(total_weight, 1),

@@ -163,7 +163,7 @@ class UnifiedScheduler:
         print(f"[每日轨] 声学特征（来自实时系统）:")
         print(f"  - sad_ratio: {acoustic_data['sad_ratio']:.3f}")
         print(f"  - avg_speed: {acoustic_data['avg_speed']:.2f}")
-        print(f"  - avg_pitch: {acoustic_data['avg_pitch']:.1f}")
+        print(f"  - pitch_variability: {acoustic_data['pitch_variability']:.1f}")
         print(f"  - distress_events: {acoustic_data['distress_events']}")
 
         # 2. 获取其他传感器数据（TODO: 对接其他传感器）

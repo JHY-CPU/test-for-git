@@ -87,7 +87,7 @@ def simulate_24h_monitoring():
     print(f"  总时长: {features['total_duration']:.1f} 秒")
     print(f"  悲伤占比: {features['sad_ratio']:.3f} ({features['sad_ratio']*100:.1f}%)")
     print(f"  平均语速: {features['avg_speed']:.2f} 字/秒")
-    print(f"  平均基频: {features['avg_pitch']:.1f} Hz")
+    print(f"  基频变异性: {features['pitch_variability']:.1f} Hz")
     print(f"  痛苦事件: {features['distress_events']} 次")
 
     # 分析最近4小时（晚上时段）

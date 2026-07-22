@@ -2,7 +2,7 @@
 风险类型判定规则
 
 三种风险类型（全部基于趋势检测）：
-    - 抑郁风险：sad_ratio↑ + avg_speed↓ + avg_pitch↓ + distress_events↑
+    - 抑郁风险：sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑
     - 睡眠问题：sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓
     - 社交孤独：social_turns↓ + daily_activity↓ + sad_ratio↑
 
@@ -43,12 +43,12 @@ def _load_risk_rules() -> dict[str, RiskRule]:
     return {
         "depression": RiskRule(
             name="抑郁风险",
-            features=["sad_ratio", "avg_speed", "avg_pitch", "distress_events"],
+            features=["sad_ratio", "avg_speed", "pitch_variability", "distress_events"],
             directions=["up", "down", "down", "up"],
             weights=[
                 weights["sad_ratio"],
                 weights["avg_speed"],
-                weights["avg_pitch"],
+                weights["pitch_variability"],
                 weights["distress_events"],
             ],
             threshold_ratio=2.0,

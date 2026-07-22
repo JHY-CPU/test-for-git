@@ -2,7 +2,7 @@
   "_comment": "特征权重配置 - 用于加权残差计算和风险类型判定",
   "sad_ratio": 2.5,
   "avg_speed": 2.0,
-  "avg_pitch": 1.5,
+  "pitch_variability": 1.5,
   "distress_events": 2.0,
   "sleep_efficiency": 2.5,
   "deep_sleep_ratio": 2.0,

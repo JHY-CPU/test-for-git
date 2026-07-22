@@ -5,7 +5,7 @@
     - 睡眠雷达（非接触式）→ sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
     - PIR传感器 + IPC骨骼追踪 → daily_activity, space_entropy
     - 拾音设备 + 智能音箱 → social_turns, speech_duration_ratio
-    - SenseVoice模型 → sad_ratio, avg_speed, avg_pitch, distress_events
+    - SenseVoice模型 → sad_ratio, avg_speed, pitch_variability, distress_events
 
 输出：每日一行12维特征向量（10维健康特征 + 2维时间编码）
 """
@@ -136,7 +136,7 @@ def aggregate_acoustic_features(acoustic_data: dict | None) -> dict:
         acoustic_data: 声学数据字典，包含:
             - sad_ratio: 悲伤标签占比
             - avg_speed: 平均语速（音节/秒）
-            - avg_pitch: 平均基频F0
+            - pitch_variability: 基频变异性（F0标准差）
             - distress_events: 叹气/哭声频次
 
     Returns:
@@ -145,7 +145,7 @@ def aggregate_acoustic_features(acoustic_data: dict | None) -> dict:
     features = {
         "sad_ratio": None,
         "avg_speed": None,
-        "avg_pitch": None,
+        "pitch_variability": None,
         "distress_events": None,
     }
 
@@ -190,7 +190,7 @@ def aggregate_daily_features(
 
     # 2. 按 FULL_FEATURE_NAMES 顺序合并（10维健康特征）
     all_features = {}
-    all_features.update(acoustic_feats)   # sad_ratio, avg_speed, avg_pitch, distress_events
+    all_features.update(acoustic_feats)   # sad_ratio, avg_speed, pitch_variability, distress_events
     all_features.update(sleep_feats)      # sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
     all_features.update(activity_feats)   # daily_activity
     all_features.update(social_feats)     # social_turns

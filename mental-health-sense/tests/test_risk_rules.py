@@ -74,10 +74,10 @@ class TestClassifyRiskType:
         from src.baseline.scaler_utils import FULL_FEATURE_NAMES
 
         feature_residuals = {name: 0.0 for name in FULL_FEATURE_NAMES}
-        # sad_ratio↑ + avg_speed↓ + avg_pitch↓ + distress_events↑
+        # sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑
         feature_residuals["sad_ratio"] = 3.0
         feature_residuals["avg_speed"] = -3.0
-        feature_residuals["avg_pitch"] = -2.5
+        feature_residuals["pitch_variability"] = -2.5
         feature_residuals["distress_events"] = 2.5
 
         consecutive = {"depression": 3}
@@ -119,7 +119,7 @@ class TestClassifyRiskType:
         assert len(importance) == 4
         assert "sad_ratio" in importance
         assert "avg_speed" in importance
-        assert "avg_pitch" in importance
+        assert "pitch_variability" in importance
         assert "distress_events" in importance
 
         total = sum(importance.values())

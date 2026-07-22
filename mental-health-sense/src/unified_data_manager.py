@@ -63,7 +63,7 @@ class UnifiedDataManager:
             {
                 "sad_ratio": float,
                 "avg_speed": float,
-                "avg_pitch": float,
+                "pitch_variability": float,
                 "distress_events": int,
             }
         """
@@ -74,7 +74,7 @@ class UnifiedDataManager:
             return {
                 "sad_ratio": features["sad_ratio"],
                 "avg_speed": features["avg_speed"],
-                "avg_pitch": features["avg_pitch"],
+                "pitch_variability": features["pitch_variability"],
                 "distress_events": features["distress_events"],
             }
 
@@ -89,7 +89,7 @@ class UnifiedDataManager:
         return {
             "sad_ratio": 0.05,
             "avg_speed": 4.0,
-            "avg_pitch": 200.0,
+            "pitch_variability": 25.0,
             "distress_events": 0,
         }
 
@@ -105,7 +105,7 @@ class UnifiedDataManager:
             "acoustic_data": {
                 "sad_ratio": features["sad_ratio"],
                 "avg_speed": features["avg_speed"],
-                "avg_pitch": features["avg_pitch"],
+                "pitch_variability": features["pitch_variability"],
                 "distress_events": features["distress_events"],
             },
             "statistics": {

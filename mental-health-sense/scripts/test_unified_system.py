@@ -70,7 +70,7 @@ def test_unified_data_manager():
     acoustic = manager.get_daily_acoustic_data(today)
     print(f"  - sad_ratio: {acoustic['sad_ratio']:.3f}")
     print(f"  - avg_speed: {acoustic['avg_speed']:.2f}")
-    print(f"  - avg_pitch: {acoustic['avg_pitch']:.1f}")
+    print(f"  - pitch_variability: {acoustic['pitch_variability']:.1f}")
     print(f"  - distress_events: {acoustic['distress_events']}")
 
     # 测试7天历史数据

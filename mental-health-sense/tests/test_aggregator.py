@@ -104,7 +104,7 @@ class TestAggregateDaily:
             acoustic_data={
                 "sad_ratio": 0.05,
                 "avg_speed": 4.2,
-                "avg_pitch": 220.0,
+                "pitch_variability": 30.0,
                 "distress_events": 0,
             },
         )
@@ -131,7 +131,7 @@ class TestAggregateDaily:
             activity_data={"daily_activity": 5000},
             social_data={"social_turns": 30},
             acoustic_data={"sad_ratio": 0.05, "avg_speed": 4.2},
-            # avg_pitch 和 distress_events 缺失（仅2个<3个）
+            # pitch_variability 和 distress_events 缺失（仅2个<3个）
         )
         assert vec.shape == (10,), f"Expected (10,), got {vec.shape}"
         # 有NaN（缺失的特征）
@@ -164,7 +164,7 @@ class TestAggregateDaily:
             acoustic_data={
                 "sad_ratio": 0.05,
                 "avg_speed": 4.2,
-                "avg_pitch": 220.0,
+                "pitch_variability": 30.0,
                 "distress_events": 0,
             },
         )
