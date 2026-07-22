@@ -1,11 +1,10 @@
 """
-每周定时任务：趋势轨
+每周定时任务：趋势轨（单人系统）
 
-每周日凌晨 03:00 执行：
-    1. 遍历所有老人
-    2. 每周微调（GRU模型更新）
-    3. 生成周报（LLM或规则模板）
-    4. 保存周报到文件
+每周日凌晨 03:00 对被监测的老人执行：
+    1. 每周微调（GRU模型更新）
+    2. 生成周报（LLM或规则模板）
+    3. 保存周报到文件
 """
 
 from datetime import datetime, timedelta
@@ -83,41 +82,6 @@ def run_weekly_pipeline(
         "report_path": report_path,
         "risk_label": risk_label,
     }
-
-
-def run_weekly_batch(
-    elder_ids: list[str],
-    config: dict | None = None,
-) -> list[dict]:
-    """
-    批量执行每周管线。
-
-    Args:
-        elder_ids: 老人ID列表
-        config: 配置
-
-    Returns:
-        每位老人的执行结果
-    """
-    logger.info(f"批量每周管道: {len(elder_ids)}位老人")
-
-    results = []
-    for elder_id in elder_ids:
-        try:
-            result = run_weekly_pipeline(elder_id, config)
-            results.append(result)
-        except Exception as e:
-            logger.error(f"每周管道失败: elder_id={elder_id}, error={e}")
-            results.append({
-                "elder_id": elder_id,
-                "status": "error",
-                "error": str(e),
-            })
-
-    success_count = sum(1 for r in results if r.get("retrain_status") == "success")
-    logger.info(f"批量完成: {success_count}/{len(elder_ids)}")
-
-    return results
 
 
 def _extract_risk_label(report_text: str) -> str:

@@ -1,5 +1,5 @@
 """
-Scaler管理工具：每位老人独立维护StandardScaler
+Scaler管理工具：为被监测的老人独立维护StandardScaler
 
 确保归一化基准稳定，训练后不重新拟合（防止数据漂移带来的隐藏误差）。
 
@@ -17,7 +17,7 @@ from sklearn.preprocessing import StandardScaler
 FEATURE_NAMES = [
     "sad_ratio",            # 悲伤标签占比
     "avg_speed",            # 平均语速
-    "avg_pitch",            # 平均基频
+    "pitch_variability",    # 基频变异性（F0标准差，语调单调性↓）
     "distress_events",      # 叹气/哭声频次
     "sleep_efficiency",     # 睡眠效率
     "deep_sleep_ratio",     # 深睡占比

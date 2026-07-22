@@ -1,8 +1,9 @@
 """
-50天模拟数据生成器
+50天模拟数据生成器（单人系统）
 
-生成5位老人的模拟传感器数据，用于端到端测试。
-每位老人有不同的基线特征和注入异常模式。
+为唯一被监测的老人生成模拟传感器数据，用于端到端测试与演示。
+生成的数据落在 data/features/{ELDER_ID}/ 和 data/raw/*/{ELDER_ID}/ 下，
+与真实数据入口路径一致——接入真实老人数据时按同样目录结构放入即可。
 
 Usage:
     python scripts/generate_simulation_data.py
@@ -22,14 +23,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.baseline.scaler_utils import FULL_FEATURE_NAMES
 
 
-# ===== 老人配置 =====
+# ===== 被监测老人 ID（单人系统）=====
+# 系统只分析这一位老人。接入真实数据时可沿用此 ID，或改成你自己的编号，
+# 只需保证 data/features/{ELDER_ID}/、data/raw/*/{ELDER_ID}/ 目录名一致。
+ELDER_ID = "E001"
+
+
+# ===== 老人配置（单人）=====
+# 保留一段注入异常，用于演示"连续偏离才触发预警"的趋势检测能力。
 ELDER_CONFIGS = {
-    "E001": {
-        "name": "活跃开朗型",
+    ELDER_ID: {
+        "name": "示例老人",
         "baseline": {
             "sad_ratio": (0.05, 0.02),
             "avg_speed": (4.5, 0.3),
-            "avg_pitch": (220, 15),
+            "pitch_variability": (32, 4),
             "distress_events": (0.1, 0.2),
             "sleep_efficiency": (0.88, 0.04),
             "deep_sleep_ratio": (0.30, 0.03),
@@ -44,100 +52,17 @@ ELDER_CONFIGS = {
             "features": {
                 "sad_ratio": 0.20,
                 "avg_speed": 2.5,
+                "pitch_variability": 12.0,
                 "distress_events": 3.0,
             },
         },
-        "description": "Day 25-30 注入抑郁特征（sad_ratio↑ + avg_speed↓ + distress_events↑）",
-    },
-    "E002": {
-        "name": "安静规律型",
-        "baseline": {
-            "sad_ratio": (0.03, 0.02),
-            "avg_speed": (3.8, 0.2),
-            "avg_pitch": (200, 10),
-            "distress_events": (0.05, 0.1),
-            "sleep_efficiency": (0.92, 0.03),
-            "deep_sleep_ratio": (0.35, 0.03),
-            "sfi": (3.0, 0.8),
-            "hrv_rmssd": (55, 5),
-            "daily_activity": (4000, 500),
-            "social_turns": (20, 4),
-        },
-        "anomaly": {
-            "start_day": 20,
-            "end_day": 20,
-            "features": {"distress_events": 15.0},
-        },
-        "description": "Day 20 distress_events 飙升（趋势检测：单日不触发，连续才报警）",
-    },
-    "E003": {
-        "name": "正常波动型",
-        "baseline": {
-            "sad_ratio": (0.04, 0.03),
-            "avg_speed": (4.2, 0.4),
-            "avg_pitch": (210, 15),
-            "distress_events": (0.1, 0.2),
-            "sleep_efficiency": (0.85, 0.06),
-            "deep_sleep_ratio": (0.28, 0.04),
-            "sfi": (4.5, 1.2),
-            "hrv_rmssd": (48, 6),
-            "daily_activity": (5000, 1000),
-            "social_turns": (30, 8),
-        },
-        "anomaly": None,
-        "description": "无反常态，仅自然波动",
-    },
-    "E004": {
-        "name": "设备故障型",
-        "baseline": {
-            "sad_ratio": (0.06, 0.03),
-            "avg_speed": (4.0, 0.3),
-            "avg_pitch": (215, 12),
-            "distress_events": (0.15, 0.3),
-            "sleep_efficiency": (0.82, 0.05),
-            "deep_sleep_ratio": (0.25, 0.04),
-            "sfi": (5.5, 1.5),
-            "hrv_rmssd": (42, 5),
-            "daily_activity": (4500, 700),
-            "social_turns": (25, 5),
-        },
-        "anomaly": {
-            "start_day": 10,
-            "end_day": 12,
-            "type": "missing_data",
-        },
-        "description": "Day 10-12 连续数据缺失，触发设备离线告警",
-    },
-    "E005": {
-        "name": "缓慢衰退型",
-        "baseline": {
-            "sad_ratio": (0.04, 0.02),
-            "avg_speed": (4.3, 0.3),
-            "avg_pitch": (205, 12),
-            "distress_events": (0.1, 0.2),
-            "sleep_efficiency": (0.86, 0.04),
-            "deep_sleep_ratio": (0.30, 0.03),
-            "sfi": (4.0, 1.0),
-            "hrv_rmssd": (50, 5),
-            "daily_activity": (5500, 800),
-            "social_turns": (30, 5),
-        },
-        "anomaly": {
-            "start_day": 30,
-            "end_day": 50,
-            "type": "drift",
-            "drift_features": {
-                "social_turns": -0.5,
-                "daily_activity": -50,
-            },
-        },
-        "description": "Day 30 起社交互动和活动量持续下降",
+        "description": "Day 25-30 注入抑郁特征（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），用于演示连续偏离触发预警",
     },
 }
 
 # 特征列表（10维健康特征）
 HEALTH_FEATURES = [
-    "sad_ratio", "avg_speed", "avg_pitch", "distress_events",
+    "sad_ratio", "avg_speed", "pitch_variability", "distress_events",
     "sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd",
     "daily_activity", "social_turns",
 ]
@@ -198,7 +123,7 @@ def generate_daily_vector(
 
             # 约束范围
             if not missing_mask[i]:
-                if feat not in ("avg_pitch", "hrv_rmssd", "sfi"):
+                if feat not in ("hrv_rmssd", "sfi"):
                     value = max(0.0, value)
                 if feat in ("sad_ratio", "sleep_efficiency", "deep_sleep_ratio"):
                     value = min(max(value, 0.0), 1.0)
@@ -220,7 +145,7 @@ def generate_all_data(
     start_date: str = "2026-07-01",
 ):
     """
-    生成所有老人的50天特征数据。
+    生成被监测老人的50天特征数据。
 
     数据存储结构：
         data/features/{elder_id}/features.csv
@@ -234,7 +159,7 @@ def generate_all_data(
 
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
 
-    print(f"生成模拟数据: {len(ELDER_CONFIGS)}位老人, {n_days}天")
+    print(f"生成模拟数据: 老人 {ELDER_ID}, {n_days}天")
     print(f"起始日期: {start_date}")
     print(f"输出目录: {output_dir}")
 
@@ -311,7 +236,7 @@ def generate_all_data(
     print(f"\n老人配置已保存: {config_path}")
 
     print(f"\n{'=' * 50}")
-    print("✅ 全部模拟数据生成完成！")
+    print("模拟数据生成完成。")
 
 
 def _generate_raw_data(
@@ -363,7 +288,7 @@ def _generate_raw_data(
     acoustic_data = {
         "sad_ratio": float(health_vec[0]) if not np.isnan(health_vec[0]) else None,
         "avg_speed": float(health_vec[1]) if not np.isnan(health_vec[1]) else None,
-        "avg_pitch": float(health_vec[2]) if not np.isnan(health_vec[2]) else None,
+        "pitch_variability": float(health_vec[2]) if not np.isnan(health_vec[2]) else None,
         "distress_events": float(health_vec[3]) if not np.isnan(health_vec[3]) else None,
         "timestamp": f"{date_str}T23:59:59",
     }

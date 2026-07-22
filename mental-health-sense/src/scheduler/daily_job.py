@@ -1,14 +1,13 @@
 """
-每日定时任务：常态轨
+每日定时任务：常态轨（单人系统）
 
-每日凌晨 02:00 执行：
-    1. 遍历所有老人
-    2. 聚合昨日传感器数据 → 特征向量
-    3. 缺失值处理 + 数据校验
-    4. 保存特征到CSV
-    5. 每日推理（GRU预测 → 残差 → EWM A更新）
-    6. 风险判定
-    7. 如果偏离，记录预警
+每日凌晨 02:00 对被监测的老人执行：
+    1. 聚合昨日传感器数据 → 特征向量
+    2. 缺失值处理 + 数据校验
+    3. 保存特征到CSV
+    4. 每日推理（GRU预测 → 残差 → EWMA更新）
+    5. 风险判定
+    6. 如果偏离，记录预警
 """
 
 from datetime import datetime, timedelta
@@ -148,38 +147,6 @@ def run_daily_pipeline(
         "risk_result": risk_result,
         "status": status,
     }
-
-
-def run_daily_batch(
-    elder_ids: list[str],
-    date_str: str | None = None,
-    config: dict | None = None,
-) -> list[dict]:
-    """
-    批量执行每日管线（按顺序遍历所有老人）。
-
-    Args:
-        elder_ids: 老人ID列表
-        date_str: 日期
-        config: 配置
-
-    Returns:
-        每位老人的执行结果
-    """
-    if date_str is None:
-        date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    logger.info(f"批量每日管道: {len(elder_ids)}位老人 @ {date_str}")
-
-    results = []
-    for elder_id in elder_ids:
-        result = run_daily_pipeline(elder_id, date_str, config=config)
-        results.append(result)
-
-    success_count = sum(1 for r in results if r["status"] == "success")
-    logger.info(f"批量完成: {success_count}/{len(elder_ids)}")
-
-    return results
 
 
 def _get_recent_quality(elder_id: str, n_days: int = 5) -> list[str]:

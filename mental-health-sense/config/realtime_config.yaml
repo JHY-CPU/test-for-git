@@ -152,28 +152,22 @@ alert:
       targets: ["app", "sms", "community"]
       force_ring: true  # 强制响铃
 
-# 多老人配置
-elders:
-  # 示例：老人E001
-  E001:
-    name: "张大爷"
-    age: 75
-    # 个性化阈值（覆盖全局配置）
-    risk_thresholds:
-      depression:
-        critical:
-          sad_ratio: 0.22  # 张大爷baseline较低，降低阈值
-    # 联系人
-    contacts:
-      - name: "张小明"
-        relation: "儿子"
-        phone: "138****1234"
-        app_user_id: "user_001"
-
-  # 可以添加更多老人配置
-  # E002:
-  #   name: "李大妈"
-  #   ...
+# 被监测老人配置（单人系统）
+elder:
+  id: "E001"
+  name: "张大爷"
+  age: 75
+  # 个性化阈值（覆盖全局配置）
+  risk_thresholds:
+    depression:
+      critical:
+        sad_ratio: 0.22  # 该老人baseline较低，降低阈值
+  # 联系人
+  contacts:
+    - name: "张小明"
+      relation: "儿子"
+      phone: "138****1234"
+      app_user_id: "user_001"
 
 # 性能优化
 performance:

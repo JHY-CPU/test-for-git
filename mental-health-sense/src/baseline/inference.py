@@ -225,34 +225,3 @@ def daily_inference(
     )
 
     return result
-
-
-def bulk_daily_inference(
-    elder_ids: list[str],
-    today_date: str,
-    config: dict | None = None,
-) -> dict[str, dict]:
-    """
-    批量每日推理（遍历所有老人）。
-
-    Args:
-        elder_ids: 老人ID列表
-        today_date: 日期
-        config: 配置
-
-    Returns:
-        {elder_id: result_dict}
-    """
-    results = {}
-    for elder_id in elder_ids:
-        try:
-            results[elder_id] = daily_inference(elder_id, today_date, config)
-        except Exception as e:
-            logger.error(f"推理失败: elder_id={elder_id}, error={e}")
-            results[elder_id] = {
-                "elder_id": elder_id,
-                "date": today_date,
-                "status": "error",
-                "error": str(e),
-            }
-    return results

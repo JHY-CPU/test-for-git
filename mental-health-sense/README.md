@@ -1,11 +1,12 @@
 # 心理健康连续感知与趋势预警系统
 
-> 面向居家老人的日常心理健康**趋势预警**系统。通过"自己和自己比"的个人化基线方法检测心理状态偏离，**不进行临床诊断**。
+> 面向**单个**居家老人的日常心理健康**趋势预警**系统。通过"自己和自己比"的个人化基线方法检测心理状态偏离，**不进行临床诊断**。
 
 ## 系统特点
 
+- **单人系统**：面向单一老人的连续监测与趋势预警
 - **双轨架构**：实时轨（快速响应）+ 每日轨（深度分析）
-- **个人化基线**：每位老人独立建模（PersonalBaselineGRU + EWMA动态阈值）
+- **个人化基线**：为该老人独立建模（PersonalBaselineGRU + EWMA动态阈值），"自己和自己比"
 - **多传感器融合**：睡眠雷达 + PIR/IPC + 拾音器 + SenseVoice语音情感分析
 - **趋势判定**：连续3-5天偏离才触发预警，避免单日波动误报
 - **统一数据流**：实时系统作为采集前端，每日系统读取累积数据
@@ -18,7 +19,7 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 生成模拟数据（5位老人 × 50天）
+# 2. 生成模拟数据（1位老人 × 50天）
 python scripts/generate_simulation_data.py
 
 # 3. 冷启动训练（Day 14）
@@ -44,20 +45,18 @@ mental-health-sense/
 │
 ├── data/                            # 数据目录
 │   ├── raw/                         # 原始传感器数据（JSON）
-│   │   ├── acoustic/                # SenseVoice输出（sad_ratio、avg_speed等）
+│   │   ├── acoustic/                # SenseVoice输出（sad_ratio、avg_speed、pitch_variability等）
 │   │   ├── sleep/                   # 睡眠雷达数据
 │   │   ├── activity/                # PIR + IPC活动数据
 │   │   └── social/                  # 拾音器 + 智能音箱数据
 │   ├── features/                    # 聚合后的每日特征向量（CSV）
-│   │   ├── E001/features.csv        # 10维健康特征（含遗留time编码列，模型不使用）
-│   │   └── E002/ ... E005/
-│   ├── baselines/                   # 每位老人的个人基线模型
-│   │   ├── E001/
-│   │   │   ├── gru.pth              # 训练好的GRU模型
-│   │   │   ├── scaler.pkl           # StandardScaler（归一化）
-│   │   │   ├── residual_stats.pkl   # 训练残差统计（均值、标准差）
-│   │   │   └── ewma.pkl             # EWMA累积基线
-│   │   └── E002/ ... E005/
+│   │   └── E001/features.csv        # 10维健康特征（含遗留time编码列，模型不使用）
+│   ├── baselines/                   # 该老人的个人基线模型
+│   │   └── E001/
+│   │       ├── gru.pth              # 训练好的GRU模型
+│   │       ├── scaler.pkl           # StandardScaler（归一化）
+│   │       ├── residual_stats.pkl   # 训练残差统计（均值、标准差）
+│   │       └── ewma.pkl             # EWMA累积基线
 │   ├── logs/                        # 推理日志和周报
 │   │   ├── daily_inference/         # 每日GRU推理结果（JSON）
 │   │   └── weekly_reports/          # LLM生成的周报
@@ -113,8 +112,8 @@ mental-health-sense/
 │   └── unified_scheduler.py         # 统一系统调度器
 │
 ├── scripts/                         # 可执行脚本
-│   ├── generate_simulation_data.py  # 生成50天模拟数据
-│   ├── train_all_baselines.py       # 批量冷启动训练
+│   ├── generate_simulation_data.py  # 生成50天模拟数据（单人）
+│   ├── train_all_baselines.py       # 冷启动训练
 │   ├── run_daily_pipeline.py        # 手动触发每日推理
 │   ├── start_realtime_monitor.py    # 启动实时监测
 │   ├── start_unified_system.py      # 启动统一系统（生产环境）
@@ -198,9 +197,101 @@ UnifiedDataManager                   GRU模型预测
 
 | 类型 | 特征信号 | 连续天数要求 |
 |------|----------|--------------|
-| **抑郁风险** | sad_ratio↑ + avg_speed↓ + avg_pitch↓ + distress_events↑ | 3天 |
+| **抑郁风险** | sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑ | 3天 |
 | **睡眠问题** | sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓ | 3天 |
 | **社交孤独** | social_turns↓ + daily_activity↓ + sad_ratio↑ | 5天 |
+
+---
+
+## 算法原理：从生理信号到心理风险的映射
+
+系统**不使用分类器直接判断心理疾病**，而是通过"个人化基线偏离 + 加权规则匹配 + 连续趋势确认"三层机制实现映射，刻意回避临床诊断。
+
+### 第一层：多传感器 → 10 维特征向量
+
+四路传感器每日聚合成一条特征记录：
+
+```
+睡眠雷达 ──────────► sleep_efficiency / deep_sleep_ratio / sfi / hrv_rmssd
+PIR + IPC ─────────► daily_activity
+拾音器 + 智能音箱 ──► social_turns
+SenseVoice 语音 ───► sad_ratio / avg_speed / pitch_variability / distress_events
+```
+
+### 第二层：GRU 个人基线 → 加权残差异常分数
+
+核心思路：**"自己和自己比"，不设群体阈值**。
+
+1. 用过去 7 天特征喂给该老人**专属 GRU**，预测"今天正常情况下应该是什么样"
+2. `残差 = |预测值 - 实际值|`（归一化空间下，量纲统一）
+3. 按 `feature_weights.json` 加权求平均，得单一 `anomaly_score`：
+
+```
+anomaly_score = Σ(residual[i] × weight[i]) / Σweight
+```
+
+4. 与 EWMA 动态阈值比较：`anomaly_score > 阈值` → 当日 `is_deviation = True`
+
+> **为什么不要求 GRU 预测准确？** 系统用的是异常检测逻辑，不是回归预测。GRU 只需稳定复现正常态——在正常日残差小、在异常日残差大，即为成功。哪怕 GRU 对某特征有系统性偏差，只要偏差稳定，就不会误报。
+
+### 第三层：偏离方向匹配 → 心理问题类型
+
+`src/risk/rules.py` 对每种风险类型检查**方向性**（而非只看绝对值大小）：
+
+| 风险类型 | 判定逻辑 |
+|---------|---------|
+| 抑郁风险 | sad_ratio **向上**超标 AND avg_speed **向下**超标 AND pitch_variability **向下**超标 AND distress_events **向上**超标 |
+| 睡眠问题 | sleep_efficiency/deep_sleep_ratio/hrv_rmssd **向下**超标 AND sfi **向上**超标 |
+| 社交孤独 | social_turns/daily_activity **向下**超标 AND sad_ratio **向上**超标 |
+
+激活条件（三者同时满足）：
+- 至少 1 个特征方向性超标
+- 加权综合分 > 1.0
+- **连续达标天数 ≥ 阈值**（抑郁/睡眠 3 天，社交孤独 5 天）
+
+### 防误报机制
+
+| 机制 | 作用 |
+|-----|------|
+| 个人化基线 | 避免用群体平均误判个体差异（误报率降低 4–6×） |
+| EWMA 动态阈值取 min | 防止老人缓慢衰退后系统"习以为常"变迟钝 |
+| 连续天数门槛 | 单日波动不触发（消融实验：误报率从 3.2 → 0.4 次/天） |
+| 冷启动观察期 | 训练后 7 天仅记录不报警，等待基线稳定 |
+
+---
+
+## 特征设计与科学依据
+
+10 个特征覆盖抑郁的三条公认通路：**精神运动迟滞**、**自主神经失调**、**行为退缩**。
+
+### 语音特征（SenseVoice 提取）
+
+| 特征 | 异常方向 | 文献支撑 | 备注 |
+|-----|---------|---------|------|
+| `avg_speed` 语速 | ↓ | **强**。老年抑郁系统综述明确 "slower speech rate"，精神运动迟滞标志 | 证据充分 |
+| `pitch_variability` 基频变异性（F0 标准差） | ↓ | **中强**。抑郁表现为语调平淡单调，SD F0 与抑郁严重度显著相关；均值无显著差异 | 使用变异性而非均值，是本系统相较同类研究的改进点 |
+| `sad_ratio` 悲伤情感占比 | ↑ | **中**。语音情感与抑郁相关；SER 模型在老年嗓音上的泛化性仍存疑 | 方向正确，测量效度待验证 |
+| `distress_events` 痛苦声频次 | ↑ | **中**。叹气/哭声作为行为观察有临床依据，量化标准尚无共识 | 方向合理 |
+
+> **特别说明**：早期版本使用 `avg_pitch`（平均基频），文献复核后发现与抑郁相关的是**基频变异性**而非均值（一项经典研究显示均值在抑郁组与好转组之间无显著差异）。当前版本已更正为 `pitch_variability`。
+
+### 睡眠特征（非接触睡眠雷达）
+
+| 特征 | 异常方向 | 文献支撑 |
+|-----|---------|---------|
+| `sleep_efficiency` 睡眠效率 | ↓ | 强。睡眠障碍是抑郁诊断标准之一，证据极充分 |
+| `deep_sleep_ratio` 深睡占比 | ↓ | 强。抑郁与慢波睡眠减少高度相关 |
+| `sfi` 睡眠碎片化指数 | ↑ | 强。碎片化睡眠是老年抑郁和痴呆的早期信号 |
+| `hrv_rmssd` 心率变异性 | ↓ | **强**。多篇 meta 分析确认抑郁患者 RMSSD、HF-HRV 显著降低，反映迷走神经活性下降 |
+
+> **测量效度提示**：上述指标的**金标准是 PSG（多导睡眠图）**，本系统使用非接触雷达估算。雷达能否精确复现 PSG 级别的 RMSSD 和深睡分期，需要额外的设备验证实验。特征**选择**有据，特征**测量**精度需实测。
+
+### 行为特征
+
+| 特征 | 异常方向 | 文献支撑 |
+|-----|---------|---------|
+| `daily_activity` 日间活动量 | ↓ | 强。体动计记录（actigraphy）研究支持活动量下降与抑郁相关 |
+| `social_turns` 对话轮次 | ↓ | **强**（权重最高 = 3.0）。社交退缩是抑郁和老年孤独的核心行为标志 |
 
 ---
 
@@ -219,15 +310,18 @@ UnifiedDataManager                   GRU模型预测
 
 ---
 
-## 模拟老人档案
+## 模拟数据档案
 
-| ID | 类型 | 注入异常 | 验证目标 |
-|------|---------|----------|----------|
-| E001 | 活跃开朗 | Day 25-30 抑郁特征注入 | 连续偏离 → 3级预警（抑郁风险） |
-| E002 | 安静规律 | Day 20 急性危机事件（哭声） | 趋势检测：单日不触发，连续才报警 |
-| E003 | 正常波动 | 无 | 0误报 |
-| E004 | 设备故障 | Day 10-12 数据缺失 | 离线告警 |
-| E005 | 缓慢衰退 | Day 30起社交下降 | 渐进式2级预警（社交孤独） |
+本系统为**单人系统**，只分析一位老人（默认 ID `E001`）。`generate_simulation_data.py`
+为该老人生成 50 天模拟数据，其中注入一段异常，用于端到端验证趋势检测能力：
+
+| ID | 注入异常 | 验证目标 |
+|------|----------|----------|
+| E001 | Day 25-30 抑郁特征注入（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑） | 连续偏离 → 逐级升到3级预警（抑郁风险） |
+
+> 接入真实老人数据时，可沿用 `E001` 这个 ID，或在 `generate_simulation_data.py` 的
+> `ELDER_ID` 处改成你自己的编号——它只是 `data/features/{ID}/`、`data/raw/*/{ID}/`
+> 目录名的一部分。真实数据按同样的目录结构与 JSON 格式放入即可，无需改动核心代码。
 
 ---
 
@@ -244,11 +338,11 @@ python scripts/generate_simulation_data.py
 # 训练基线模型（Day 14）
 python scripts/train_all_baselines.py
 
-# 每日推理
+# 每日推理（默认老人 E001）
 python scripts/run_daily_pipeline.py --date 2026-08-15
 
-# 批量推理（所有老人）
-python scripts/run_daily_pipeline.py --date 2026-08-15 --all-elders
+# 指定老人 ID（如接入真实数据时使用了其它编号）
+python scripts/run_daily_pipeline.py --date 2026-08-15 --elder E001
 ```
 
 ### 2. 仅使用实时系统（快速响应）
@@ -324,7 +418,7 @@ python scripts/test_unified_system.py
 |--------|------|------|
 | sad_ratio | SenseVoice | 悲伤标签占比 [0, 1] |
 | avg_speed | SenseVoice | 平均语速（字/秒） |
-| avg_pitch | SenseVoice | 平均基频 F0 (Hz) |
+| pitch_variability | SenseVoice | 基频变异性 F0标准差 (Hz)，反映语调单调性（↓=平淡） |
 | distress_events | SenseVoice | 叹气/哭声等非言语痛苦声音频次 |
 | sleep_efficiency | 睡眠雷达 | 睡眠效率 [0, 1] |
 | deep_sleep_ratio | 睡眠雷达 | 深睡占比 [0, 1] |
@@ -347,7 +441,7 @@ python scripts/test_unified_system.py
   "feature_residuals": {
     "sad_ratio": 0.5688,
     "avg_speed": 0.5944,
-    "avg_pitch": 0.3076,
+    "pitch_variability": 0.3076,
     "distress_events": 1.4551,
     "sleep_efficiency": 1.3203,
     "deep_sleep_ratio": 1.174,
@@ -377,7 +471,7 @@ python scripts/test_unified_system.py
   "acoustic_data": {
     "sad_ratio": 0.22,
     "avg_speed": 3.8,
-    "avg_pitch": 195.0,
+    "pitch_variability": 14.0,
     "distress_events": 6
   },
   "n_utterances": 45,
@@ -557,7 +651,6 @@ RuntimeError: CUDA out of memory
 - [ ] 环境音分析（异常声音检测：跌倒、呼救）
 - [ ] 睡眠监测（夜间呼吸音分析）
 - [ ] Web监控面板
-- [ ] 多老人并发监测
 
 ---
 
@@ -567,5 +660,5 @@ MIT
 
 ---
 
-**最后更新**：2026-07-20  
-**项目版本**：v1.0
+**最后更新**：2026-07-22  
+**项目版本**：v1.2（单人系统）

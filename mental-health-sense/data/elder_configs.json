@@ -1,22 +1,6 @@
 {
   "E001": {
-    "name": "活跃开朗型",
-    "description": "Day 25-30 注入情绪低落异常"
-  },
-  "E002": {
-    "name": "安静规律型",
-    "description": "Day 20 急性危机事件（哭声）"
-  },
-  "E003": {
-    "name": "正常波动型",
-    "description": "无反常态，仅自然波动"
-  },
-  "E004": {
-    "name": "设备故障型",
-    "description": "Day 10-12 连续数据缺失，触发设备离线告警"
-  },
-  "E005": {
-    "name": "缓慢衰退型",
-    "description": "Day 30 起社交互动和活动量持续下降"
+    "name": "示例老人",
+    "description": "Day 25-30 注入抑郁特征（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），用于演示连续偏离触发预警"
   }
 }

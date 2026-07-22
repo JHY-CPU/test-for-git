@@ -21,9 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 class TestEndToEndSimulation:
     """
-    端到端模拟运行测试
+    端到端模拟运行测试（单人系统）
 
-    模拟5位老人50天的数据，验证全流程正确性。
+    模拟被监测老人50天的数据，验证全流程正确性。
     """
 
     @pytest.fixture
@@ -31,13 +31,13 @@ class TestEndToEndSimulation:
         """设置模拟环境（使用临时目录）"""
         import src.utils.io as io_mod
 
-        # 模拟5位老人
+        # 被监测老人：Day25-30 注入抑郁特征，用于验证趋势检测
         elder_configs = {
-            "E001": {  # 活跃开朗型 - Day25-30注入抑郁特征
+            "E001": {
                 "baseline": {
                     "sad_ratio": (0.05, 0.02),
                     "avg_speed": (4.5, 0.3),
-                    "avg_pitch": (220, 15),
+                    "pitch_variability": (32, 4),
                     "distress_events": (0.1, 0.2),
                     "sleep_efficiency": (0.88, 0.04),
                     "deep_sleep_ratio": (0.30, 0.03),
@@ -52,85 +52,8 @@ class TestEndToEndSimulation:
                     "features": {
                         "sad_ratio": 0.20,
                         "avg_speed": 2.5,
+                        "pitch_variability": 12.0,
                         "distress_events": 3.0,
-                    },
-                },
-            },
-            "E002": {  # 安静规律型 - Day20 distress_events飙升（趋势检测）
-                "baseline": {
-                    "sad_ratio": (0.03, 0.02),
-                    "avg_speed": (3.8, 0.2),
-                    "avg_pitch": (200, 10),
-                    "distress_events": (0.05, 0.1),
-                    "sleep_efficiency": (0.92, 0.03),
-                    "deep_sleep_ratio": (0.35, 0.03),
-                    "sfi": (3.0, 0.8),
-                    "hrv_rmssd": (55, 5),
-                    "daily_activity": (4000, 500),
-                    "social_turns": (20, 4),
-                },
-                "anomaly": {
-                    "start_day": 20,
-                    "end_day": 20,  # 单日急性事件
-                    "features": {
-                        "distress_events": 15.0,
-                    },
-                },
-            },
-            "E003": {  # 正常波动型 - 无反常态
-                "baseline": {
-                    "sad_ratio": (0.04, 0.03),
-                    "avg_speed": (4.2, 0.4),
-                    "avg_pitch": (210, 15),
-                    "distress_events": (0.1, 0.2),
-                    "sleep_efficiency": (0.85, 0.06),
-                    "deep_sleep_ratio": (0.28, 0.04),
-                    "sfi": (4.5, 1.2),
-                    "hrv_rmssd": (48, 6),
-                    "daily_activity": (5000, 1000),
-                    "social_turns": (30, 8),
-                },
-                "anomaly": None,  # 无异常
-            },
-            "E004": {  # 设备故障型 - Day10-12连续缺失
-                "baseline": {
-                    "sad_ratio": (0.06, 0.03),
-                    "avg_speed": (4.0, 0.3),
-                    "avg_pitch": (215, 12),
-                    "distress_events": (0.15, 0.3),
-                    "sleep_efficiency": (0.82, 0.05),
-                    "deep_sleep_ratio": (0.25, 0.04),
-                    "sfi": (5.5, 1.5),
-                    "hrv_rmssd": (42, 5),
-                    "daily_activity": (4500, 700),
-                    "social_turns": (25, 5),
-                },
-                "anomaly": {
-                    "start_day": 10,
-                    "end_day": 12,
-                    "type": "missing_data",  # 连续数据缺失
-                },
-            },
-            "E005": {  # 缓慢衰退型 - Day30起社交持续下降
-                "baseline": {
-                    "sad_ratio": (0.04, 0.02),
-                    "avg_speed": (4.3, 0.3),
-                    "avg_pitch": (205, 12),
-                    "distress_events": (0.1, 0.2),
-                    "sleep_efficiency": (0.86, 0.04),
-                    "deep_sleep_ratio": (0.30, 0.03),
-                    "sfi": (4.0, 1.0),
-                    "hrv_rmssd": (50, 5),
-                    "daily_activity": (5500, 800),
-                    "social_turns": (30, 5),
-                },
-                "anomaly": {
-                    "start_day": 30,
-                    "end_day": 50,
-                    "type": "drift",
-                    "drift_features": {
-                        "social_turns": -0.5,     # 每天递减
-                        "daily_activity": -50,
                     },
                 },
             },
@@ -139,7 +62,7 @@ class TestEndToEndSimulation:
         return {
             "elders": elder_configs,
             "features": [
-                "sad_ratio", "avg_speed", "avg_pitch", "distress_events",
+                "sad_ratio", "avg_speed", "pitch_variability", "distress_events",
                 "sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd",
                 "daily_activity", "social_turns",
             ],
@@ -187,7 +110,7 @@ class TestEndToEndSimulation:
                             value = rng.normal(anomaly_val, abs(anomaly_val) * 0.3)
 
                 # 确保非负
-                if feat not in ("avg_pitch", "hrv_rmssd", "sfi"):
+                if feat not in ("hrv_rmssd", "sfi"):
                     value = max(0.0, value)
 
                 # 比例类特征限制在[0,1]
@@ -205,7 +128,7 @@ class TestEndToEndSimulation:
 
     def test_full_50_day_simulation(self, setup_simulation, tmp_path):
         """
-        模拟5位老人50天完整流程。
+        模拟被监测老人50天完整流程。
 
         验证点：
         1. 冷启动训练在Day14成功执行
@@ -249,11 +172,6 @@ class TestEndToEndSimulation:
                 anomaly_sad = np.nanmean(all_vectors[24:30, 0])
                 assert anomaly_sad > normal_sad, \
                     f"E001异常注入失败: normal={normal_sad:.3f}, anomaly={anomaly_sad:.3f}"
-
-            # 验证设备故障 (E004: Day10-12)
-            if elder_id == "E004":
-                nan_count_day10 = np.sum(np.isnan(all_vectors[9, :]))
-                assert nan_count_day10 > 0, "E004 Day10应有缺失数据"
 
         # 3. 验证EWMA正确性
         from src.baseline.ewma import CumulativeEWMABaseline
@@ -334,11 +252,10 @@ class TestEndToEndSimulation:
 
             # 验证数据可用性（10维，已移除时间编码）
             assert data.shape == (14, FULL_FEATURE_DIM)
-            # E004有设备故障注入，允许更多缺失；其他老人每个样本缺失不超过2个
-            if elder_id != "E004":
-                nan_per_row = np.isnan(data[:, :10]).sum(axis=1)
-                assert not np.any(nan_per_row > 2), \
-                    f"{elder_id}: 每样本缺失不超过2个，实际: {nan_per_row}"
+            # 正常数据每个样本缺失不超过2个
+            nan_per_row = np.isnan(data[:, :10]).sum(axis=1)
+            assert not np.any(nan_per_row > 2), \
+                f"{elder_id}: 每样本缺失不超过2个，实际: {nan_per_row}"
 
             # 验证数据方差（足够的变异性用于训练）
             for i in range(10):
@@ -347,13 +264,9 @@ class TestEndToEndSimulation:
 
     def test_risk_timeline_accuracy(self, setup_simulation):
         """验证风险触发时间线准确性"""
-        # 模拟5位老人的预期风险触发
+        # 被监测老人的预期风险触发时间线
         expected_triggers = {
             "E001": {"first_deviation_day": 25, "warning_day": 27, "severe_day": 29},
-            "E002": {"anomaly_day": 20},
-            "E003": {"no_alert": True},
-            "E004": {"offline_day": 12},
-            "E005": {"first_deviation_day": 30, "warning_day": 36},
         }
 
         # 验证E001触发逻辑
@@ -382,14 +295,14 @@ class TestEndToEndSimulation:
         r29 = judge_risk_level("E001", results[:29])
         assert r29["risk_level"] == 3, f"Day29应=3(严重), 实际={r29['risk_level']}"
 
-        # E003应始终无预警
-        e003_results = []
+        # 持续正常数据应始终无预警（0误报）
+        normal_results = []
         for day in range(1, 31):
-            e003_results.append({
+            normal_results.append({
                 "date": f"2026-08-{day:02d}",
                 "anomaly_score": 0.5,
                 "is_deviation": False,
             })
 
-        r_e003 = judge_risk_level("E003", e003_results)
-        assert r_e003["risk_level"] == 0, f"E003应始终正常, 实际={r_e003['risk_level']}"
+        r_normal = judge_risk_level("E001", normal_results)
+        assert r_normal["risk_level"] == 0, f"持续正常应无预警, 实际={r_normal['risk_level']}"
