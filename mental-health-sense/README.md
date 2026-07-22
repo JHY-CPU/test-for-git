@@ -71,8 +71,10 @@ mental-health-sense/
 ├── src/                             # 源代码
 │   ├── baseline/                    # GRU个人基线模型
 │   │   ├── gru_model.py             # PersonalBaselineGRU（7→1天预测）
-│   │   ├── trainer.py               # 冷启动 + 每周微调
+│   │   ├── trainer.py               # 冷启动（健康门禁+early-stopping）+ 每周微调（剔除偏离天+模型备份）
 │   │   ├── inference.py             # 每日推理引擎
+│   │   ├── data_health.py           # 训练数据健康门禁（MAD离群筛查，防GRU"学坏"）
+│   │   ├── cold_start_fallback.py   # 冷启动兜底（GRU就绪前用滑动均值检测）
 │   │   ├── ewma.py                  # EWMA累积基线（替代60天窗口）
 │   │   └── scaler_utils.py          # StandardScaler管理
 │   │
@@ -258,6 +260,50 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | EWMA 动态阈值取 min | 防止老人缓慢衰退后系统"习以为常"变迟钝 |
 | 连续天数门槛 | 单日波动不触发（消融实验：误报率从 3.2 → 0.4 次/天） |
 | 冷启动观察期 | 训练后 7 天仅记录不报警，等待基线稳定 |
+| 实时轨不报警 | 实时轨仅采集，预警统一由每日趋势轨发出，避免单点波动打扰家人 |
+
+---
+
+## GRU 基线稳健性机制
+
+个人基线 GRU 只需"稳定复现正常态"，但它有几个固有短板：需要建档期才能用、
+可能把异常态学成正常、小样本易过拟合、微调可能被异常期污染。系统针对性地做了加固。
+
+### 1. 训练数据健康门禁（防"学坏"）
+
+**问题**：若建档期（前 14 天）恰好混入老人状态不好的日子，GRU 会把异常学成
+"正常基线"，之后再也报不出来。
+
+**做法**（`src/baseline/data_health.py`，冷启动时调用）：训练前用 **MAD（中位数绝对
+偏差）** 做逐特征离群筛查。相比均值 ± Nσ，中位数与 MAD 对离群点本身不敏感，适合
+"样本少、又要判断哪几天离群"的冷启动场景。
+
+- 个别离群天 → **剔除后训练**，并在日志中标注是哪些特征离群；
+- 离群天占比过高（默认 > 50%）→ **拒绝建档**，提示顺延，而非用脏数据建立基线；
+- Scaler 在清洗后的数据上拟合，归一化基准不被异常天带偏。
+
+### 2. 微调防污染（只用正常天）
+
+**问题**：每周微调若无脑使用"最近 30 天"，会把已判定为异常的日子学进基线，让系统
+越来越迟钝。
+
+**做法**（`weekly_retrain`）：微调只用 `is_deviation=False` 的正常天，排除已被每日推理
+判定为偏离的日期。正常天不足则跳过微调，而非用脏数据。
+
+### 3. 冷启动兜底（消除头两周盲区）
+
+**问题**：GRU 需建档期 + 观察期才可靠，此前系统若完全不检测，等于头两周盲区。
+
+**做法**（`src/baseline/cold_start_fallback.py`）：GRU 基线就绪前，用"滑动均值 ± Nσ"的
+加权 z-score 做基础离群检测。`daily_job` 在 `daily_inference` 返回 `cold_start` 时自动切换到
+兜底检测。sigma 默认 **3.0**，比 GRU 轨更保守——建档期滑动基线本身不稳，宁可漏报也不要
+一开始就误报动摇信任。GRU 一就绪，兜底自动停用。
+
+### 4. 过拟合抑制与可回滚
+
+- **early-stopping**：冷启动 14 天仅约 7 个训练样本，150 epoch 几乎必然过拟合。连续
+  `patience`（默认 20）轮 loss 无改善则提前停止，并**回滚到最优权重**。
+- **模型版本化**：每周微调覆盖 `gru.pth` 前，先备份为 `gru.prev.pth`，微调把模型搞坏时可回滚。
 
 ---
 
@@ -461,7 +507,7 @@ python scripts/test_unified_system.py
 }
 ```
 
-> 说明：推理层输出的是**加权残差异常分数（anomaly_score）与多档阈值**，而非直接预测值。`feature_residuals` 为各特征的标准化残差（10 维健康特征）。`status` 取值：`success` / `cold_start` / `data_insufficient` / `observation` / `error`。风险等级与风险类型由 `src/risk/judge.py` 在推理结果之上单独判定。
+> 说明：推理层输出的是**加权残差异常分数（anomaly_score）与多档阈值**，而非直接预测值。`feature_residuals` 为各特征的标准化残差（10 维健康特征）。`status` 取值：`success` / `cold_start` / `cold_start_fallback`（GRU未就绪，走滑动均值兜底检测）/ `data_insufficient` / `observation` / `error`。风险等级与风险类型由 `src/risk/judge.py` 在推理结果之上单独判定。
 
 ### 实时特征快照（realtime/*/features/snapshot_*.json）
 
@@ -496,13 +542,28 @@ gru:
 
 training:
   initial:
-    epochs: 150            # 冷启动训练轮数
+    epochs: 150            # 冷启动训练轮数（配合 early-stopping，实际常提前停止）
     lr: 0.001
+    patience: 20           # early-stopping：连续N轮loss无改善则提前停止（防小样本过拟合）
   finetune:
     epochs: 50             # 微调轮数
     lr: 0.0003
     recent_days: 30        # 微调使用的近期天数
     residual_merge_alpha: 0.3  # 残差统计融合系数
+    exclude_deviation_days: true  # 微调只用正常天（is_deviation=False），防基线被异常期污染
+
+# 训练数据健康门禁（冷启动前 MAD 离群筛查，防 GRU 把异常学成正常基线）
+data_health:
+  z_threshold: 3.5         # modified z-score阈值，超过视为该特征离群
+  min_bad_features: 2      # 一天中离群特征数达到此值则整天判为离群
+  max_outlier_ratio: 0.5   # 离群天占比超过此值则拒绝建档（建议顺延）
+
+# 冷启动兜底（GRU 就绪前用滑动均值检测，消除头两周盲区）
+cold_start:
+  fallback_enabled: true
+  fallback_min_days: 5     # 至少积累N天有效数据才启用兜底
+  fallback_lookback: 14    # 滑动基线回看窗口（天）
+  fallback_sigma: 3.0      # 加权z-score超过此值判为偏离（比GRU轨更保守）
 
 ewma:
   alpha: 0.05              # EWMA平滑系数
@@ -558,6 +619,9 @@ aggregator:
 | 3 | GRU vs 移动平均 | GRU提前1-2天预警 |
 | 4 | 含社交 vs 仅生理特征 | 检出率+20% |
 | 5 | 连续N=3 vs N=1 | 误报率从3.2→0.4/天 |
+| 6 | 有无健康门禁（建档期注入异常） | 门禁剔除异常天，避免基线"学坏"漏报 |
+| 7 | 有无 early-stopping | 抑制小样本过拟合，验证残差更稳定 |
+| 8 | 有无冷启动兜底 | 兜底消除建档期监测盲区 |
 
 ---
 
@@ -644,4 +708,4 @@ MIT
 ---
 
 **最后更新**：2026-07-22  
-**项目版本**：v1.3（单人系统；实时轨降级为采集前端，预警统一由每日趋势轨发出）
+**项目版本**：v1.4（单人系统；实时轨仅采集不报警；GRU 加健康门禁 / 冷启动兜底 / early-stopping / 微调防污染）
