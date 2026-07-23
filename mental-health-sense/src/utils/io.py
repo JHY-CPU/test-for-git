@@ -49,7 +49,7 @@ def save_daily_features(
     Args:
         elder_id: 老人ID
         date: 日期字符串 "YYYY-MM-DD"
-        feature_vector: (12,) 特征向量
+        feature_vector: (10,) 特征向量
         missing_count: 缺失特征计数
         data_quality: valid / insufficient / offline
     """
@@ -103,7 +103,7 @@ def get_feature_vectors(
         end_date: 结束日期 "YYYY-MM-DD"（含）
 
     Returns:
-        (n_days, 12) 特征矩阵
+        (n_days, 10) 特征矩阵
     """
     from src.baseline.scaler_utils import FULL_FEATURE_NAMES
 
@@ -122,7 +122,7 @@ def get_daily_vector(elder_id: str, date: str) -> np.ndarray:
     获取指定日期的单条特征向量。
 
     Returns:
-        (12,) numpy数组
+        (10,) numpy数组
     """
     vectors = get_feature_vectors(elder_id, date, date)
     return vectors[0]
@@ -137,7 +137,7 @@ def get_recent_vectors(elder_id: str, days: int = 30) -> np.ndarray:
         days: 最近天数
 
     Returns:
-        (n, 12) 特征矩阵
+        (n, 10) 特征矩阵
     """
     df = load_features_csv(elder_id)
     df = df.sort_values("date", ascending=False)
@@ -167,6 +167,23 @@ def load_gru_model(model_class, elder_id: str, filename: str = "gru.pth") -> Any
     model.load_state_dict(torch.load(filepath, weights_only=True))
     model.eval()
     return model
+
+
+def save_baseline_meta(elder_id: str, meta: dict) -> None:
+    """保存基线元信息（训练日期、训练时 EWMA 样本数等）到 baseline_meta.json"""
+    dir_path = get_baseline_dir(elder_id)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    with open(dir_path / "baseline_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def load_baseline_meta(elder_id: str) -> dict | None:
+    """加载基线元信息；不存在时返回 None（兼容旧基线）"""
+    filepath = get_baseline_dir(elder_id) / "baseline_meta.json"
+    if not filepath.exists():
+        return None
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def save_residual_stats(stats: dict, elder_id: str) -> None:
@@ -248,7 +265,7 @@ def get_feature_weight_array() -> np.ndarray:
     获取特征权重数组（与FULL_FEATURE_NAMES顺序一致）。
 
     Returns:
-        (12,) 权重数组
+        (10,) 权重数组
     """
     from src.baseline.scaler_utils import FULL_FEATURE_NAMES
     weights_dict = load_feature_weights()

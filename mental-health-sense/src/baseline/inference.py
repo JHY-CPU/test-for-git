@@ -139,8 +139,8 @@ def daily_inference(
         past_7 = past_7[-7:]
 
     # 3. 归一化
-    past_7_norm = transform_data(scaler, past_7)  # (7, 12)
-    today_norm = transform_data(scaler, today_vec)  # (12,)
+    past_7_norm = transform_data(scaler, past_7)  # (7, 10)
+    today_norm = transform_data(scaler, today_vec)  # (10,)
 
     # 4. GRU预测
     input_tensor = torch.tensor(
@@ -148,7 +148,7 @@ def daily_inference(
     )
     model.eval()
     with torch.no_grad():
-        pred_norm = model(input_tensor).numpy().flatten()  # (12,)
+        pred_norm = model(input_tensor).numpy().flatten()  # (10,)
 
     # 5. 计算加权残差
     residual = np.abs(pred_norm - today_norm)
@@ -192,9 +192,15 @@ def daily_inference(
             break
 
     # 10. 检查是否在冷启动观察期
-    # 判断标准：从训练日期（Day 14）开始，后续 cold_start_days 天内
-    # 假设训练后的第一天推理即开始计数
-    in_observation = ewma.n <= cold_start_days
+    # 训练已用建档期样本预热 EWMA（ewma.n≈window），因此不能直接用 ewma.n 判断
+    # 观察期——那样 n 一开始就 > cold_start_days，观察期形同虚设。
+    # 正确口径：训练后经过的推理次数 = 当前 ewma.n - 训练完成时的 ewma.n。
+    # 每次 daily_inference 恰好 update 一次 EWMA，所以该差值即"训练后天数"。
+    from src.utils.io import load_baseline_meta
+    meta = load_baseline_meta(elder_id)
+    ewma_n_at_train = meta.get("ewma_n_at_train", 0) if meta else 0
+    inferences_since_train = ewma.n - ewma_n_at_train  # 含今日这次
+    in_observation = inferences_since_train <= cold_start_days
     final_status = "observation" if in_observation else "success"
 
     result = {

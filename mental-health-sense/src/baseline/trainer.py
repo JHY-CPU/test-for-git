@@ -37,7 +37,7 @@ def train_initial_baseline(
     Day 14结束时调用，建立该老人的个人基线。
 
     步骤：
-        1. 读取前14天特征 → (14, 12)
+        1. 读取前14天特征 → (14, 10)
         2. StandardScaler.fit → scaler.pkl
         3. 构建7→1滑动窗口 → 7个训练样本
         4. 训练GRU (150 epoch)
@@ -126,15 +126,15 @@ def train_initial_baseline(
     # 2. 拟合Scaler（在清洗后的数据上拟合，避免归一化基准被异常天带偏）
     scaler = StandardScaler()
     scaler = fit_scaler(scaler, data)
-    data_norm = scaler.transform(data)  # (14, 12)
+    data_norm = scaler.transform(data)  # (14, 10)
 
     logger.info(f"  └─ Scaler拟合完成: mean={scaler.mean_[0]:.4f}, std={scaler.scale_[0]:.4f}")
 
     # 3. 构建滑动窗口样本
     X_list, y_list = [], []
     for i in range(window, len(data_norm)):
-        X_list.append(data_norm[i - window:i])  # (7, 12)
-        y_list.append(data_norm[i])              # (12,)
+        X_list.append(data_norm[i - window:i])  # (7, 10)
+        y_list.append(data_norm[i])              # (10,)
 
     if len(X_list) == 0:
         raise ValueError(
@@ -201,10 +201,10 @@ def train_initial_baseline(
     model.eval()
     with torch.no_grad():
         train_pred = model(X)
-        residuals = torch.abs(train_pred - y).numpy()  # (n_samples, 12)
+        residuals = torch.abs(train_pred - y).numpy()  # (n_samples, 10)
         residual_stats = {
-            "mean": residuals.mean(axis=0),  # (12,)
-            "std": residuals.std(axis=0),    # (12,)
+            "mean": residuals.mean(axis=0),  # (10,)
+            "std": residuals.std(axis=0),    # (10,)
         }
 
     logger.info(f"  └─ 残差统计: mean={residual_stats['mean'].mean():.4f}, "
@@ -235,6 +235,18 @@ def train_initial_baseline(
     save_scaler(scaler, get_baseline_dir(elder_id) / "scaler.pkl")
     save_residual_stats(residual_stats, elder_id)
     ewma.save(get_baseline_dir(elder_id) / "ewma.pkl")
+
+    # 记录基线元信息：训练完成时的 EWMA 样本数 + 训练日期。
+    # 观察期须以"训练后经过的推理天数"（ewma.n - ewma_n_at_train）判断，
+    # 不能直接用 ewma.n —— 训练已用建档期样本预热 EWMA（n≈7），
+    # 否则观察期会瞬间耗尽，形同虚设。
+    from datetime import datetime as _dt
+    from src.utils.io import save_baseline_meta
+    save_baseline_meta(elder_id, {
+        "ewma_n_at_train": ewma.n,
+        "train_date": _dt.now().strftime("%Y-%m-%d"),
+        "feature_dim": FULL_FEATURE_DIM,
+    })
 
     logger.info(f"  └─ 基线文件保存完成: {get_baseline_dir(elder_id)}")
 
@@ -316,7 +328,7 @@ def weekly_retrain(
     from src.utils.io import load_gru_model, load_residual_stats
 
     scaler = load_scaler(get_baseline_dir(elder_id) / "scaler.pkl")
-    data_norm = scaler.transform(recent)  # (n, 12)
+    data_norm = scaler.transform(recent)  # (n, 10)
 
     # 3. 加载现有模型
     model = load_gru_model(PersonalBaselineGRU, elder_id, "gru.pth")

@@ -118,7 +118,7 @@ def get_scaler_stats(scaler: StandardScaler) -> dict:
     获取scaler的统计信息（用于调试和监控）。
 
     Returns:
-        {"mean": [...], "scale": [...], "var": [...], "n_features": 12}
+        {"mean": [...], "scale": [...], "var": [...], "n_features": 10}
     """
     return {
         "mean": scaler.mean_.tolist() if hasattr(scaler, "mean_") else None,

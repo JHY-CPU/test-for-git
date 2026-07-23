@@ -1,5 +1,5 @@
 """
-数据聚合器：四维度传感器数据 → 12维特征向量
+数据聚合器：四维度传感器数据 → 10维特征向量
 
 数据来源：
     - 睡眠雷达（非接触式）→ sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
@@ -7,7 +7,7 @@
     - 拾音设备 + 智能音箱 → social_turns, speech_duration_ratio
     - SenseVoice模型 → sad_ratio, avg_speed, pitch_variability, distress_events
 
-输出：每日一行12维特征向量（10维健康特征 + 2维时间编码）
+输出：每日一行10维健康特征向量（时间编码已移除）
 """
 
 from datetime import datetime, timedelta

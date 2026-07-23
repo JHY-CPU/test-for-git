@@ -95,9 +95,14 @@ def judge_risk_level(
     max_anomaly = float(np.max(recent_scores))
 
     # 4. 判定等级
-    if consecutive_deviation >= severe_threshold:
+    # 严重级会触发社区网格员介入 + 强提醒，代价高，必须比"提醒"级更严格，
+    # 至少要满足同样的幅度门槛（avg_anomaly > sustained_avg）。否则长达数天、
+    # 但每天仅"擦线"越过动态阈值的低幅度偏离，会仅凭连续天数直接升到最高级，
+    # 与"提醒"级带幅度门槛的判定不一致，且过度打扰家人和社区。
+    sustained = avg_anomaly > sustained_avg_threshold
+    if consecutive_deviation >= severe_threshold and sustained:
         risk_level = 3
-    elif consecutive_deviation >= warn_threshold and avg_anomaly > sustained_avg_threshold:
+    elif consecutive_deviation >= warn_threshold and sustained:
         risk_level = 2
     elif consecutive_deviation >= attn_threshold or max_anomaly > high_spike_threshold:
         risk_level = 1

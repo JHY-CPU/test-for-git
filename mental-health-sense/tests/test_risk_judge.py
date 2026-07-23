@@ -93,3 +93,25 @@ class TestJudgeRiskLevel:
         ]
         result = judge_risk_level("E001", daily_results=results)
         assert result["risk_level"] == 0
+
+    def test_low_amplitude_streak_not_severe(self):
+        """连续5天但均为低幅度擦线偏离 → 不应升到严重级（幅度门槛）
+
+        回归测试：修复前 Level 3 仅凭连续天数触发，长期低幅度偏离会误升到
+        最高级并触发社区网格员介入。修复后严重级须同时满足 avg_anomaly 门槛。
+        """
+        results = [
+            self.make_result(f"2026-08-0{i}", 0.6, True)  # 均值 0.6 < 1.0 门槛
+            for i in range(1, 6)
+        ]
+        result = judge_risk_level("E001", daily_results=results)
+        assert result["risk_level"] < 3
+
+    def test_high_amplitude_streak_severe(self):
+        """连续5天且高幅度偏离 → 严重级（两个条件都满足）"""
+        results = [
+            self.make_result(f"2026-08-0{i}", 1.5, True)
+            for i in range(1, 6)
+        ]
+        result = judge_risk_level("E001", daily_results=results)
+        assert result["risk_level"] == 3

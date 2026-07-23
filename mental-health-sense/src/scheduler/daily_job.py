@@ -12,6 +12,8 @@
 
 from datetime import datetime, timedelta
 
+import numpy as np
+
 from src.data_pipeline.aggregator import (
     DataInsufficientError,
     aggregate_daily_features,
@@ -93,8 +95,10 @@ def run_daily_pipeline(
             prev_row = df[df["data_quality"] == "valid"].tail(1)
             if len(prev_row) > 0:
                 prev_vec = prev_row[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64).flatten()
-    except Exception:
-        pass
+    except Exception as e:
+        # 拿不到上一条有效特征时，前向填充退化为 imputer 的默认兜底。
+        # 不致命，但要记录——历史上这里曾因 np 未导入静默失效，掩盖了填充失败。
+        logger.warning(f"  └─ 前向填充基准获取失败，将使用默认填充: {e}")
 
     filled_vec, missing_count, missing_names = impute_missing(feature_vec, prev_vec)
 
@@ -200,7 +204,6 @@ def _cold_start_fallback(
     lookback = cs_cfg.get("fallback_lookback", 14)
     sigma = cs_cfg.get("fallback_sigma", 3.0)
 
-    import numpy as np
     from src.baseline.scaler_utils import FULL_FEATURE_NAMES
     from src.utils.io import get_feature_weight_array, save_daily_result
 

@@ -18,7 +18,7 @@ def validate_daily_data(
     校验每日数据质量。
 
     Args:
-        feature_vector: (12,) 特征向量
+        feature_vector: (10,) 特征向量
         missing_count: 当日无法填充的缺失特征数
         recent_quality: 最近数据质量记录（用于检测离线）
 

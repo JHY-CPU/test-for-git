@@ -95,7 +95,7 @@ def classify_risk_type(
 
     Args:
         feature_residuals: {feature_name: residual_value} 当日各特征的标准化残差
-        residual_stats: {"mean": np.ndarray(12,), "std": np.ndarray(12,)}
+        residual_stats: {"mean": np.ndarray(10,), "std": np.ndarray(10,)}
         consecutive_days: 各特征连续异常天数（可选）
         daily_results: 近7天推理结果（用于统计连续天数）
 
