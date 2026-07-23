@@ -3,7 +3,7 @@ Scaler管理工具：为被监测的老人独立维护StandardScaler
 
 确保归一化基准稳定，训练后不重新拟合（防止数据漂移带来的隐藏误差）。
 
-注意：时间编码特征已移除，现在仅使用10维健康特征。
+使用 10 维健康特征。
 """
 
 from pathlib import Path
@@ -27,11 +27,7 @@ FEATURE_NAMES = [
     "social_turns",         # 社交交互轮次
 ]
 
-# 时间编码已移除（权重为0且无季节性需求）
-TIME_FEATURES = []
-
-FULL_FEATURE_NAMES = FEATURE_NAMES + TIME_FEATURES
-FULL_FEATURE_DIM = len(FULL_FEATURE_NAMES)  # 10
+FEATURE_DIM = len(FEATURE_NAMES)  # 10
 
 
 def create_scaler() -> StandardScaler:
@@ -52,9 +48,9 @@ def fit_scaler(scaler: StandardScaler, data: np.ndarray) -> StandardScaler:
     """
     if data.ndim == 1:
         data = data.reshape(1, -1)
-    if data.shape[1] != FULL_FEATURE_DIM:
+    if data.shape[1] != FEATURE_DIM:
         raise ValueError(
-            f"Expected {FULL_FEATURE_DIM} features, got {data.shape[1]}"
+            f"Expected {FEATURE_DIM} features, got {data.shape[1]}"
         )
     return scaler.fit(data)
 
@@ -73,9 +69,9 @@ def transform_data(scaler: StandardScaler, data: np.ndarray) -> np.ndarray:
     was_1d = data.ndim == 1
     if was_1d:
         data = data.reshape(1, -1)
-    if data.shape[1] != FULL_FEATURE_DIM:
+    if data.shape[1] != FEATURE_DIM:
         raise ValueError(
-            f"Expected {FULL_FEATURE_DIM} features, got {data.shape[1]}"
+            f"Expected {FEATURE_DIM} features, got {data.shape[1]}"
         )
     result = scaler.transform(data)
     return result.flatten() if was_1d else result

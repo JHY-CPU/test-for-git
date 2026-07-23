@@ -20,7 +20,7 @@ import numpy as np
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+from src.baseline.scaler_utils import FEATURE_NAMES
 
 
 # ===== 被监测老人 ID（单人系统）=====
@@ -133,12 +133,6 @@ def generate_daily_vector(
     return vector
 
 
-def compute_time_features(day: int, year: int = 2026) -> tuple:
-    """计算时间编码 (day_sin, day_cos)"""
-    theta = 2 * np.pi * day / 365
-    return np.sin(theta), np.cos(theta)
-
-
 def generate_all_data(
     output_dir: str | Path,
     n_days: int = 50,
@@ -177,12 +171,8 @@ def generate_all_data(
             date_dt = start_dt + timedelta(days=day - 1)
             date_str = date_dt.strftime("%Y-%m-%d")
 
-            # 生成健康特征
+            # 生成健康特征（10维）
             health_vec = generate_daily_vector(day, config, seed=hash(elder_id) % 10000)
-            day_sin, day_cos = compute_time_features(day)
-
-            # 完整12维向量
-            full_vec = np.concatenate([health_vec, [day_sin, day_cos]])
 
             # 统计缺失
             missing_count = int(np.isnan(health_vec).sum())
@@ -199,8 +189,8 @@ def generate_all_data(
                 "missing_count": missing_count,
                 "data_quality": data_quality,
             }
-            for i, name in enumerate(FULL_FEATURE_NAMES):
-                row[name] = float(full_vec[i]) if not np.isnan(full_vec[i]) else ""
+            for i, name in enumerate(FEATURE_NAMES):
+                row[name] = float(health_vec[i]) if not np.isnan(health_vec[i]) else ""
 
             rows.append(row)
 
@@ -212,7 +202,7 @@ def generate_all_data(
         df = pd.DataFrame(rows)
 
         # 列顺序
-        cols = ["date"] + FULL_FEATURE_NAMES + ["missing_count", "data_quality"]
+        cols = ["date"] + FEATURE_NAMES + ["missing_count", "data_quality"]
         df = df[cols]
 
         csv_path = elder_features_dir / "features.csv"

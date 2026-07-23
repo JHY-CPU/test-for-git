@@ -82,6 +82,10 @@ class TestPersonalBaselineGRU:
 
     def test_overfit_small_data(self):
         """测试在小数据集上的过拟合能力（验证模型容量）"""
+        # 固定种子：本测试断言 loss<0.01，未设种子时随机初始化会让终值在
+        # 阈值附近抖动（曾观测到 0.0101 偶发越线），设种子使其确定可复现。
+        # seed=100 收敛到约 2e-5，留有充足余量。
+        torch.manual_seed(100)
         model = PersonalBaselineGRU(feature_dim=4, hidden_dim=4)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
         loss_fn = torch.nn.MSELoss()

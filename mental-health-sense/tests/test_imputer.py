@@ -70,10 +70,10 @@ class TestImputer:
 
     def test_time_features_never_missing(self):
         """验证10维向量中不含时间编码（时间编码已移除）"""
-        from src.baseline.scaler_utils import FULL_FEATURE_DIM, FULL_FEATURE_NAMES
-        assert FULL_FEATURE_DIM == 10
-        assert "day_sin" not in FULL_FEATURE_NAMES
-        assert "day_cos" not in FULL_FEATURE_NAMES
+        from src.baseline.scaler_utils import FEATURE_DIM, FEATURE_NAMES
+        assert FEATURE_DIM == 10
+        assert "day_sin" not in FEATURE_NAMES
+        assert "day_cos" not in FEATURE_NAMES
 
 
 class TestOfflineCheck:

@@ -91,10 +91,10 @@ def run_daily_pipeline(
     try:
         df = load_features_csv(elder_id)
         if len(df) > 0:
-            from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+            from src.baseline.scaler_utils import FEATURE_NAMES
             prev_row = df[df["data_quality"] == "valid"].tail(1)
             if len(prev_row) > 0:
-                prev_vec = prev_row[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64).flatten()
+                prev_vec = prev_row[FEATURE_NAMES].to_numpy(dtype=np.float64).flatten()
     except Exception as e:
         # 拿不到上一条有效特征时，前向填充退化为 imputer 的默认兜底。
         # 不致命，但要记录——历史上这里曾因 np 未导入静默失效，掩盖了填充失败。
@@ -204,7 +204,7 @@ def _cold_start_fallback(
     lookback = cs_cfg.get("fallback_lookback", 14)
     sigma = cs_cfg.get("fallback_sigma", 3.0)
 
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
     from src.utils.io import get_feature_weight_array, save_daily_result
 
     # 取今天之前的历史有效特征作为滑动基线
@@ -220,7 +220,7 @@ def _cold_start_fallback(
         logger.info(f"  └─ 冷启动兜底：历史有效数据不足（{len(df)}/{min_days}天），暂不检测")
         return None
 
-    history = df[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)
+    history = df[FEATURE_NAMES].to_numpy(dtype=np.float64)
     weights = get_feature_weight_array()
 
     from src.baseline.cold_start_fallback import fallback_deviation_check

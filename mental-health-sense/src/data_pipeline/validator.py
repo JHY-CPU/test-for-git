@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from src.baseline.scaler_utils import FULL_FEATURE_DIM
+from src.baseline.scaler_utils import FEATURE_DIM
 
 
 def validate_daily_data(
@@ -27,9 +27,9 @@ def validate_daily_data(
         "insufficient" - ≥3个特征缺失，当日标记为数据不足
         "offline" - 连续≥3天数据不足，触发设备离线
     """
-    if feature_vector.shape != (FULL_FEATURE_DIM,):
+    if feature_vector.shape != (FEATURE_DIM,):
         raise ValueError(
-            f"Expected shape ({FULL_FEATURE_DIM},), got {feature_vector.shape}"
+            f"Expected shape ({FEATURE_DIM},), got {feature_vector.shape}"
         )
 
     # 检查数据不足

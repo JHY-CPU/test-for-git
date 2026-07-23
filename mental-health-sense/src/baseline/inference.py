@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from src.baseline.gru_model import PersonalBaselineGRU
-from src.baseline.scaler_utils import FULL_FEATURE_DIM, transform_data
+from src.baseline.scaler_utils import FEATURE_DIM, transform_data
 from src.utils.io import (
     get_baseline_dir,
     get_daily_vector,
@@ -144,7 +144,7 @@ def daily_inference(
 
     # 4. GRU预测
     input_tensor = torch.tensor(
-        past_7_norm.reshape(1, 7, FULL_FEATURE_DIM), dtype=torch.float32
+        past_7_norm.reshape(1, 7, FEATURE_DIM), dtype=torch.float32
     )
     model.eval()
     with torch.no_grad():
@@ -177,9 +177,9 @@ def daily_inference(
     ewma.save(get_baseline_dir(elder_id) / "ewma.pkl")
 
     # 8. 构建特征残差字典（用于可解释性）
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
     feature_residuals = {}
-    for i, name in enumerate(FULL_FEATURE_NAMES):
+    for i, name in enumerate(FEATURE_NAMES):
         feature_residuals[name] = round(float(residual[i]), 4)
 
     # 9. 统计连续偏离天数

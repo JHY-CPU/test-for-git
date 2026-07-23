@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 
-from src.baseline.scaler_utils import FULL_FEATURE_DIM, FULL_FEATURE_NAMES
+from src.baseline.scaler_utils import FEATURE_DIM, FEATURE_NAMES
 
 
 # 数据不足异常
@@ -27,24 +27,6 @@ class DataInsufficientError(Exception):
         super().__init__(
             f"Data insufficient: {missing_count} features missing: {missing_features}"
         )
-
-
-def _compute_time_features(date_str: str) -> tuple[float, float]:
-    """
-    计算时间编码特征。
-
-    Args:
-        date_str: "YYYY-MM-DD" 格式日期
-
-    Returns:
-        (day_sin, day_cos)
-    """
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    day_of_year = dt.timetuple().tm_yday
-    days_in_year = 366 if dt.year % 4 == 0 else 365
-
-    theta = 2 * np.pi * day_of_year / days_in_year
-    return float(np.sin(theta)), float(np.cos(theta))
 
 
 def aggregate_sleep_features(sleep_data: dict | None) -> dict:
@@ -177,7 +159,7 @@ def aggregate_daily_features(
         acoustic_data: SenseVoice数据
 
     Returns:
-        (10,) numpy数组，按 FULL_FEATURE_NAMES 顺序排列
+        (10,) numpy数组，按 FEATURE_NAMES 顺序排列
 
     Raises:
         DataInsufficientError: 当≥3个特征缺失时
@@ -188,7 +170,7 @@ def aggregate_daily_features(
     social_feats = aggregate_social_features(social_data)
     acoustic_feats = aggregate_acoustic_features(acoustic_data)
 
-    # 2. 按 FULL_FEATURE_NAMES 顺序合并（10维健康特征）
+    # 2. 按 FEATURE_NAMES 顺序合并（10维健康特征）
     all_features = {}
     all_features.update(acoustic_feats)   # sad_ratio, avg_speed, pitch_variability, distress_events
     all_features.update(sleep_feats)      # sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
@@ -196,7 +178,7 @@ def aggregate_daily_features(
     all_features.update(social_feats)     # social_turns
 
     # 3. 统计缺失
-    health_names = FULL_FEATURE_NAMES  # 所有10维都是健康特征
+    health_names = FEATURE_NAMES  # 所有10维都是健康特征
     missing_features = [
         name for name in health_names if all_features.get(name) is None
     ]
@@ -207,9 +189,9 @@ def aggregate_daily_features(
         raise DataInsufficientError(missing_count, missing_features)
 
     # 5. 组装10维向量
-    vector = np.zeros(FULL_FEATURE_DIM, dtype=np.float64)
+    vector = np.zeros(FEATURE_DIM, dtype=np.float64)
 
-    for i, name in enumerate(FULL_FEATURE_NAMES):
+    for i, name in enumerate(FEATURE_NAMES):
         if name in all_features and all_features[name] is not None:
             vector[i] = float(all_features[name])
         else:
@@ -220,7 +202,7 @@ def aggregate_daily_features(
 
 def get_feature_value(vector: np.ndarray, feature_name: str) -> float:
     """从特征向量中提取指定特征值"""
-    if feature_name in FULL_FEATURE_NAMES:
-        idx = FULL_FEATURE_NAMES.index(feature_name)
+    if feature_name in FEATURE_NAMES:
+        idx = FEATURE_NAMES.index(feature_name)
         return float(vector[idx])
     raise ValueError(f"Unknown feature: {feature_name}")

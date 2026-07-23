@@ -112,19 +112,19 @@ def classify_risk_type(
             ...
         ]
     """
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
 
     if consecutive_days is None:
         consecutive_days = {}
 
     if "mean" in residual_stats and isinstance(residual_stats["mean"], np.ndarray):
         residual_mean = {
-            FULL_FEATURE_NAMES[i]: float(residual_stats["mean"][i])
-            for i in range(len(FULL_FEATURE_NAMES))
+            FEATURE_NAMES[i]: float(residual_stats["mean"][i])
+            for i in range(len(FEATURE_NAMES))
         }
         residual_std = {
-            FULL_FEATURE_NAMES[i]: float(residual_stats["std"][i])
-            for i in range(len(FULL_FEATURE_NAMES))
+            FEATURE_NAMES[i]: float(residual_stats["std"][i])
+            for i in range(len(FEATURE_NAMES))
         }
     else:
         residual_mean = residual_stats.get("mean", {})

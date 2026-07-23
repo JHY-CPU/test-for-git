@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.baseline.ewma import CumulativeEWMABaseline
 from src.baseline.gru_model import PersonalBaselineGRU
-from src.baseline.scaler_utils import FULL_FEATURE_DIM, fit_scaler, save_scaler
+from src.baseline.scaler_utils import FEATURE_DIM, fit_scaler, save_scaler
 from src.utils.io import (
     get_baseline_dir,
     get_recent_vectors,
@@ -84,8 +84,8 @@ def train_initial_baseline(
             f"需要至少14天有效数据，当前只有{len(valid_df)}天"
         )
 
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
-    data = valid_df[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)[:14]  # (14, 10)
+    from src.baseline.scaler_utils import FEATURE_NAMES
+    data = valid_df[FEATURE_NAMES].to_numpy(dtype=np.float64)[:14]  # (14, 10)
 
     logger.info(f"  └─ 加载 {len(data)} 天特征数据")
 
@@ -148,7 +148,7 @@ def train_initial_baseline(
 
     # 4. 训练GRU模型
     model = PersonalBaselineGRU(
-        feature_dim=FULL_FEATURE_DIM,
+        feature_dim=FEATURE_DIM,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         dropout=dropout,
@@ -245,7 +245,7 @@ def train_initial_baseline(
     save_baseline_meta(elder_id, {
         "ewma_n_at_train": ewma.n,
         "train_date": _dt.now().strftime("%Y-%m-%d"),
-        "feature_dim": FULL_FEATURE_DIM,
+        "feature_dim": FEATURE_DIM,
     })
 
     logger.info(f"  └─ 基线文件保存完成: {get_baseline_dir(elder_id)}")
@@ -290,7 +290,7 @@ def weekly_retrain(
     exclude_deviation = train_cfg.get("exclude_deviation_days", True)
 
     # 1. 取最近N天有效特征（带日期，用于剔除已判定为偏离的异常天）
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
     try:
         df = load_features_csv(elder_id)
     except Exception:
@@ -315,7 +315,7 @@ def weekly_retrain(
             if excluded:
                 logger.info(f"  └─ 微调剔除 {excluded} 个偏离天（防基线被异常期污染）")
 
-    recent = df_recent[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)
+    recent = df_recent[FEATURE_NAMES].to_numpy(dtype=np.float64)
 
     if len(recent) < 14:
         logger.warning(f"  └─ 有效数据不足14天（{len(recent)}天），跳过微调")

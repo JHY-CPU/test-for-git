@@ -121,11 +121,6 @@ class TestEndToEndSimulation:
 
         return vector
 
-    def _compute_day_sin_cos(self, day: int, year: int = 2026) -> tuple:
-        """计算第N天的时间编码"""
-        theta = 2 * np.pi * day / 365
-        return np.sin(theta), np.cos(theta)
-
     def test_full_50_day_simulation(self, setup_simulation, tmp_path):
         """
         模拟被监测老人50天完整流程。
@@ -146,11 +141,11 @@ class TestEndToEndSimulation:
         #
         # 验证各组件独立功能和组件间接口兼容性
 
-        from src.baseline.scaler_utils import FULL_FEATURE_NAMES, FULL_FEATURE_DIM
+        from src.baseline.scaler_utils import FEATURE_NAMES, FEATURE_DIM
 
         # 1. 验证特征维度（已移除时间编码，现为10维）
-        assert FULL_FEATURE_DIM == 10
-        assert len(FULL_FEATURE_NAMES) == 10
+        assert FEATURE_DIM == 10
+        assert len(FEATURE_NAMES) == 10
 
         # 2. 为每位老人生成模拟数据并验证
         for elder_id, config in elders.items():
@@ -237,7 +232,7 @@ class TestEndToEndSimulation:
         elders = setup_simulation["elders"]
         feature_names = setup_simulation["features"]
 
-        from src.baseline.scaler_utils import FULL_FEATURE_DIM
+        from src.baseline.scaler_utils import FEATURE_DIM
 
         for elder_id, config in elders.items():
             # 生成14天数据
@@ -251,7 +246,7 @@ class TestEndToEndSimulation:
             data = np.array(vectors_14d)
 
             # 验证数据可用性（10维，已移除时间编码）
-            assert data.shape == (14, FULL_FEATURE_DIM)
+            assert data.shape == (14, FEATURE_DIM)
             # 正常数据每个样本缺失不超过2个
             nan_per_row = np.isnan(data[:, :10]).sum(axis=1)
             assert not np.any(nan_per_row > 2), \

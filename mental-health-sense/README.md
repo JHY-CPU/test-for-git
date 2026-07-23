@@ -51,7 +51,7 @@ mental-health-sense/
 │   │   ├── activity/                # PIR + IPC活动数据
 │   │   └── social/                  # 拾音器 + 智能音箱数据
 │   ├── features/                    # 聚合后的每日特征向量（CSV）
-│   │   └── E001/features.csv        # 10维健康特征（含遗留time编码列，模型不使用）
+│   │   └── E001/features.csv        # 10维健康特征
 │   ├── baselines/                   # 该老人的个人基线模型
 │   │   └── E001/
 │   │       ├── gru.pth              # 训练好的GRU模型

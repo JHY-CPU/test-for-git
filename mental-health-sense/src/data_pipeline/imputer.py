@@ -11,7 +11,7 @@
 
 import numpy as np
 
-from src.baseline.scaler_utils import FULL_FEATURE_DIM, FULL_FEATURE_NAMES
+from src.baseline.scaler_utils import FEATURE_DIM, FEATURE_NAMES
 
 
 def impute_missing(
@@ -33,9 +33,9 @@ def impute_missing(
         - missing_count: 无法填充的特征数
         - missing_features: 无法填充的特征名称列表
     """
-    if current_vec.shape != (FULL_FEATURE_DIM,):
+    if current_vec.shape != (FEATURE_DIM,):
         raise ValueError(
-            f"Expected shape ({FULL_FEATURE_DIM},), got {current_vec.shape}"
+            f"Expected shape ({FEATURE_DIM},), got {current_vec.shape}"
         )
 
     # 全部10维都是健康特征
@@ -50,7 +50,7 @@ def impute_missing(
     if missing_count > 0 and prev_day_vec is not None:
         # 前向填充：用昨日值替换NaN
         prev_health = prev_day_vec
-        for i in range(FULL_FEATURE_DIM):
+        for i in range(FEATURE_DIM):
             if missing_mask[i] and not np.isnan(prev_health[i]):
                 filled[i] = prev_health[i]
                 missing_mask[i] = False
@@ -61,11 +61,11 @@ def impute_missing(
     # 统计最终无法填充的特征
     final_missing_count = 0
     final_missing_list = []
-    for i in range(FULL_FEATURE_DIM):
+    for i in range(FEATURE_DIM):
         if np.isnan(health_features[i]):
             if prev_day_vec is None or np.isnan(prev_day_vec[i]):
                 final_missing_count += 1
-                final_missing_list.append(FULL_FEATURE_NAMES[i])
+                final_missing_list.append(FEATURE_NAMES[i])
 
     return filled, final_missing_count, final_missing_list
 
@@ -90,9 +90,9 @@ def impute_sequence(
     """
     n_days = feature_sequence.shape[0]
     filled = feature_sequence.copy()
-    degraded_features = {name: 0 for name in FULL_FEATURE_NAMES}
+    degraded_features = {name: 0 for name in FEATURE_NAMES}
 
-    for feat_idx in range(FULL_FEATURE_DIM):  # 处理所有10维健康特征
+    for feat_idx in range(FEATURE_DIM):  # 处理所有10维健康特征
         feature_col = filled[:, feat_idx]
         missing_mask = np.isnan(feature_col)
 
@@ -123,15 +123,15 @@ def impute_sequence(
                             next_value = feature_col[end + 1]
                             interp_values = np.linspace(fill_value, next_value, gap_length + 2)[1:-1]
                             feature_col[start:end+1] = interp_values
-                            degraded_features[FULL_FEATURE_NAMES[feat_idx]] += gap_length
+                            degraded_features[FEATURE_NAMES[feat_idx]] += gap_length
                         else:
                             # 无后续数据，前向填充
                             feature_col[start:end+1] = fill_value
-                            degraded_features[FULL_FEATURE_NAMES[feat_idx]] += gap_length
+                            degraded_features[FEATURE_NAMES[feat_idx]] += gap_length
                 else:
                     # 无前置数据，填充0
                     feature_col[start:end+1] = 0.0
-                    degraded_features[FULL_FEATURE_NAMES[feat_idx]] += gap_length
+                    degraded_features[FEATURE_NAMES[feat_idx]] += gap_length
             else:
                 i += 1
 

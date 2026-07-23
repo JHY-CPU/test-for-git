@@ -12,35 +12,7 @@ from src.data_pipeline.aggregator import (
     aggregate_activity_features,
     aggregate_social_features,
     aggregate_acoustic_features,
-    _compute_time_features,
 )
-
-
-class TestTimeFeatures:
-    """测试时间编码（保留函数测试，时间编码已从特征向量移除）"""
-
-    def test_winter(self):
-        """冬季日期"""
-        sin_val, cos_val = _compute_time_features("2026-01-01")
-        assert -1.0 <= sin_val <= 1.0
-        assert -1.0 <= cos_val <= 1.0
-
-    def test_summer(self):
-        """夏季日期"""
-        sin_val, cos_val = _compute_time_features("2026-07-01")
-        assert -1.0 <= sin_val <= 1.0
-
-    def test_leap_year(self):
-        """闰年"""
-        sin_val, cos_val = _compute_time_features("2024-12-31")
-        assert -1.0 <= sin_val <= 1.0
-
-    def test_symmetry(self):
-        """日期距离半年应对称"""
-        sin1, cos1 = _compute_time_features("2026-01-01")
-        sin2, cos2 = _compute_time_features("2026-07-02")
-        np.testing.assert_almost_equal(sin1, -sin2, decimal=1)
-        np.testing.assert_almost_equal(cos1, -cos2, decimal=1)
 
 
 class TestSubAggregators:
@@ -148,8 +120,8 @@ class TestAggregateDaily:
             )
 
     def test_output_ordering(self):
-        """验证输出顺序与FULL_FEATURE_NAMES一致"""
-        from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+        """验证输出顺序与FEATURE_NAMES一致"""
+        from src.baseline.scaler_utils import FEATURE_NAMES
 
         vec = aggregate_daily_features(
             date_str="2026-08-01",
@@ -170,9 +142,9 @@ class TestAggregateDaily:
         )
 
         # sad_ratio 应在 index 0
-        sad_idx = FULL_FEATURE_NAMES.index("sad_ratio")
+        sad_idx = FEATURE_NAMES.index("sad_ratio")
         assert vec[sad_idx] == 0.05
 
         # sleep_efficiency 应在 index 4
-        sleep_idx = FULL_FEATURE_NAMES.index("sleep_efficiency")
+        sleep_idx = FEATURE_NAMES.index("sleep_efficiency")
         assert vec[sleep_idx] == 0.85

@@ -57,10 +57,10 @@ class TestClassifyRiskType:
 
     def test_normal_day_no_risk(self):
         """测试正常日：不触发任何风险"""
-        from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+        from src.baseline.scaler_utils import FEATURE_NAMES
 
         # 所有残差都接近0（完全正常）
-        feature_residuals = {name: 0.01 for name in FULL_FEATURE_NAMES}
+        feature_residuals = {name: 0.01 for name in FEATURE_NAMES}
 
         results = classify_risk_type(
             feature_residuals=feature_residuals,
@@ -71,9 +71,9 @@ class TestClassifyRiskType:
 
     def test_depression_triggered(self):
         """测试抑郁风险触发"""
-        from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+        from src.baseline.scaler_utils import FEATURE_NAMES
 
-        feature_residuals = {name: 0.0 for name in FULL_FEATURE_NAMES}
+        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
         # sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑
         feature_residuals["sad_ratio"] = 3.0
         feature_residuals["avg_speed"] = -3.0
@@ -93,9 +93,9 @@ class TestClassifyRiskType:
 
     def test_sleep_problem_triggered(self):
         """测试睡眠问题触发"""
-        from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+        from src.baseline.scaler_utils import FEATURE_NAMES
 
-        feature_residuals = {name: 0.0 for name in FULL_FEATURE_NAMES}
+        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
         # sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓
         feature_residuals["sleep_efficiency"] = -3.0
         feature_residuals["deep_sleep_ratio"] = -3.0

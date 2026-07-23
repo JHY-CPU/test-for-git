@@ -53,13 +53,13 @@ def save_daily_features(
         missing_count: 缺失特征计数
         data_quality: valid / insufficient / offline
     """
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
 
     dir_path = get_features_dir(elder_id)
     dir_path.mkdir(parents=True, exist_ok=True)
     filepath = dir_path / "features.csv"
 
-    row = {name: float(feature_vector[i]) for i, name in enumerate(FULL_FEATURE_NAMES)}
+    row = {name: float(feature_vector[i]) for i, name in enumerate(FEATURE_NAMES)}
     row["date"] = date
     row["missing_count"] = missing_count
     row["data_quality"] = data_quality
@@ -67,7 +67,7 @@ def save_daily_features(
     # 固定列顺序（与 generate_simulation_data.py 一致）。
     # 追加模式 header=False 只写值不写列名，必须显式对齐列顺序，
     # 否则 dict 插入顺序（date 在末尾）会与既有表头（date 在首列）错位，污染 CSV。
-    cols = ["date"] + FULL_FEATURE_NAMES + ["missing_count", "data_quality"]
+    cols = ["date"] + FEATURE_NAMES + ["missing_count", "data_quality"]
     df_row = pd.DataFrame([row])[cols]
 
     if filepath.exists():
@@ -81,7 +81,7 @@ def load_features_csv(elder_id: str) -> pd.DataFrame:
     加载指定老人的全部特征数据。
 
     Returns:
-        DataFrame，列为 FULL_FEATURE_NAMES + ['date', 'missing_count', 'data_quality']
+        DataFrame，列为 FEATURE_NAMES + ['date', 'missing_count', 'data_quality']
     """
     filepath = get_features_dir(elder_id) / "features.csv"
     if not filepath.exists():
@@ -105,7 +105,7 @@ def get_feature_vectors(
     Returns:
         (n_days, 10) 特征矩阵
     """
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
 
     df = load_features_csv(elder_id)
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
@@ -114,7 +114,7 @@ def get_feature_vectors(
     if len(df_filtered) == 0:
         raise ValueError(f"No data found for {elder_id} between {start_date} and {end_date}")
 
-    return df_filtered[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)
+    return df_filtered[FEATURE_NAMES].to_numpy(dtype=np.float64)
 
 
 def get_daily_vector(elder_id: str, date: str) -> np.ndarray:
@@ -143,8 +143,8 @@ def get_recent_vectors(elder_id: str, days: int = 30) -> np.ndarray:
     df = df.sort_values("date", ascending=False)
     df_recent = df.head(days).sort_values("date")
 
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
-    return df_recent[FULL_FEATURE_NAMES].to_numpy(dtype=np.float64)
+    from src.baseline.scaler_utils import FEATURE_NAMES
+    return df_recent[FEATURE_NAMES].to_numpy(dtype=np.float64)
 
 
 # ========== 基线模型保存/加载 ==========
@@ -262,11 +262,11 @@ def load_feature_weights() -> dict[str, float]:
 
 def get_feature_weight_array() -> np.ndarray:
     """
-    获取特征权重数组（与FULL_FEATURE_NAMES顺序一致）。
+    获取特征权重数组（与FEATURE_NAMES顺序一致）。
 
     Returns:
         (10,) 权重数组
     """
-    from src.baseline.scaler_utils import FULL_FEATURE_NAMES
+    from src.baseline.scaler_utils import FEATURE_NAMES
     weights_dict = load_feature_weights()
-    return np.array([weights_dict.get(name, 1.0) for name in FULL_FEATURE_NAMES])
+    return np.array([weights_dict.get(name, 1.0) for name in FEATURE_NAMES])
