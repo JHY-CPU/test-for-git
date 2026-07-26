@@ -20,9 +20,12 @@ class RiskRule:
     """单条风险判定规则"""
     name: str                      # 风险类型名称
     features: list[str]            # 相关特征名（按顺序对应direction和weight）
+    # directions 记录每个特征的"异常方向"而非只看绝对偏离。抑郁的语速是"变慢"才异常，
+    # 变快不算；睡眠效率是"下降"才异常。只看 |残差| 大会把方向相反的正常波动也误判成风险，
+    # 所以必须按方向匹配（见 classify_risk_type 里的 up/down 分支）。
     directions: list[str]          # 异常方向: "up" / "down" / "any"
     weights: list[float]           # 特征在风险评分中的权重
-    threshold_ratio: float = 2.0   # 残差超标倍数阈值
+    threshold_ratio: float = 2.0   # 残差超标倍数阈值（对"残差的残差"而非原始残差，见下方二次标准化）
     consecutive_days: int = 3      # 连续超标天数阈值
 
     def __post_init__(self):
@@ -40,6 +43,12 @@ def _load_risk_rules() -> dict[str, RiskRule]:
 
     weights = load_feature_weights()
 
+    # 三类风险的 threshold_ratio / consecutive_days 刻意不同：
+    #   - 抑郁：语音信号（SER 在老年嗓音上泛化性存疑）测量噪声较大，threshold_ratio 取 2.0 更严，
+    #     避免单路语音抖动就报；3 天连续确认。
+    #   - 睡眠：雷达生理指标相对稳定可信，门槛放到 1.5 即可捕捉，仍要 3 天连续。
+    #   - 社交孤独：本就是缓变过程（偶尔一两天少说话很正常），要 5 天连续才算趋势，
+    #     否则会把老人正常的"安静日"误报成孤独。
     return {
         "depression": RiskRule(
             name="抑郁风险",
@@ -117,17 +126,13 @@ def classify_risk_type(
     if consecutive_days is None:
         consecutive_days = {}
 
-    if "mean" in residual_stats and isinstance(residual_stats["mean"], np.ndarray):
-        residual_mean = {
-            FEATURE_NAMES[i]: float(residual_stats["mean"][i])
-            for i in range(len(FEATURE_NAMES))
-        }
+    # 只需 std 作为归一尺度（见下方 normalized_residual 说明，不再用 mean 以免破坏符号）
+    if "std" in residual_stats and isinstance(residual_stats["std"], np.ndarray):
         residual_std = {
             FEATURE_NAMES[i]: float(residual_stats["std"][i])
             for i in range(len(FEATURE_NAMES))
         }
     else:
-        residual_mean = residual_stats.get("mean", {})
         residual_std = residual_stats.get("std", {})
 
     results = []
@@ -139,15 +144,22 @@ def classify_risk_type(
 
         for feat, direction, weight in zip(rule.features, rule.directions, rule.weights):
             feat_value = feature_residuals.get(feat, 0.0)
-            feat_mean = residual_mean.get(feat, 0.0)
             feat_std = residual_std.get(feat, 1.0)
 
             if feat_std < 1e-8:
-                feat_std = 1e-8
+                feat_std = 1e-8  # 防除零：某特征训练残差几乎恒定时兜底
 
-            normalized_residual = (feat_value - feat_mean) / feat_std
+            # 二次标准化：feature_residuals 是带符号的 GRU 预测残差（actual-pred），
+            # 用"训练期残差尺度(std)"归一，得到带符号的 z 分——幅度表示偏离大小，
+            # 符号表示方向（正=偏高，负=偏低）。
+            # 注意：绝不能减去残差均值。训练残差统计按 |残差| 计（均值恒为正），
+            # 若从带符号残差里减这个正均值，会把符号整体拉偏，导致 down 方向永远误触发、
+            # 正常特征（残差≈0）也被判为 down 超标。只除以 std（尺度、恒正）即可保号。
+            normalized_residual = feat_value / feat_std
             threshold = rule.threshold_ratio
 
+            # 带符号方向判定：up 只认正向超标，down 只认负向超标。这是"方向匹配"的落点，
+            # 保证"语速变快""睡眠变好"这类反向偏离不会被计入风险特征。
             is_exceeding = False
             if direction == "up" and normalized_residual > threshold:
                 is_exceeding = True
@@ -159,6 +171,8 @@ def classify_risk_type(
             if is_exceeding:
                 exceeding_features.append(feat)
 
+            # 评分累加用 |z| 而非带符号值：即便某特征方向"不对"，它的波动幅度仍反映整体不稳定，
+            # 计入加权综合分；但它不会进 exceeding_features，故不满足"方向性超标"的激活前提。
             total_score += abs(normalized_residual) * weight
             weight_sum += weight
 
@@ -169,6 +183,10 @@ def classify_risk_type(
         else:
             cons_days = consecutive_days.get(risk_key, 0)
 
+        # 激活需三者同时成立，缺一不可——这是全系统"克制预警"理念的最后一道闸：
+        #   1) 至少 1 个特征"方向性"超标   → 排除纯幅度大但方向不对的噪声
+        #   2) 加权综合分 > 1.0            → 排除单特征擦线、整体其实平稳的情况
+        #   3) 连续天数达标                → 排除单日波动，只认真正成"趋势"的偏离
         is_active = (
             len(exceeding_features) >= 1
             and final_score > 1.0
@@ -193,16 +211,21 @@ def _count_consecutive_risk_type(
     daily_results: list[dict],
 ) -> int:
     """统计某个风险类型连续活跃的天数"""
+    # 从最近一天往回数（reversed），一旦遇到"该风险未活跃"的一天就停——
+    # 这样数出的是"截至今天的连续活跃天数"，中间断过就不算连续。
     count = 0
     for day_result in reversed(daily_results):
         risk_types = day_result.get("risk_types", [])
         if isinstance(risk_types, list):
+            # for-else：只有内层循环"正常跑完（没 break）"才执行 else。
+            # 命中且活跃 → break → 跳过 else → 继续往前一天数；
+            # 这一天里没找到活跃的该风险 → 不 break → 触发 else → 连续中断，收尾返回。
             for rt in risk_types:
                 if isinstance(rt, dict) and rt.get("risk_key") == risk_key:
                     if rt.get("is_active"):
                         count += 1
                         break
-                elif rt == risk_key:
+                elif rt == risk_key:  # 兼容旧格式：risk_types 直接存 key 字符串
                     count += 1
                     break
             else:

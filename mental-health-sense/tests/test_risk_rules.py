@@ -113,6 +113,43 @@ class TestClassifyRiskType:
         sleep_result = next(r for r in results if r["risk_key"] == "sleep_problem")
         assert sleep_result["is_active"]
 
+    def test_normal_day_positive_abs_mean_stats(self):
+        """回归：残差≈0 且 residual_stats 均值为正（abs 残差统计）时不得误报。
+
+        修复前 classify_risk_type 从带符号残差里减去 abs 均值，导致正常特征
+        （残差≈0）在 down 方向被判为超标，sleep_problem/social_isolation 直接误活跃。
+        """
+        from src.baseline.scaler_utils import FEATURE_NAMES
+
+        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
+        stats = {"mean": np.full(10, 0.5), "std": np.full(10, 0.3)}
+        results = classify_risk_type(
+            feature_residuals=feature_residuals,
+            residual_stats=stats,
+            consecutive_days={k: 9 for k in ("depression", "sleep_problem", "social_isolation")},
+        )
+        assert all(not r["is_active"] for r in results)
+        assert all(r["exceeding_features"] == [] for r in results)
+
+    def test_down_feature_improving_not_flagged(self):
+        """方向性：down 特征"变好"（残差为正）不得计入超标。
+
+        avg_speed 方向为 down（变慢才异常）。今日语速高于预测（residual>0）是好事，
+        不应进入 exceeding_features。
+        """
+        from src.baseline.scaler_utils import FEATURE_NAMES
+
+        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
+        feature_residuals["avg_speed"] = 3.0  # 语速比预测更快（正残差）→ 非异常
+        stats = {"mean": np.zeros(10), "std": np.ones(10)}
+        results = classify_risk_type(
+            feature_residuals=feature_residuals,
+            residual_stats=stats,
+            consecutive_days={"depression": 9},
+        )
+        dep = next(r for r in results if r["risk_key"] == "depression")
+        assert "avg_speed" not in dep["exceeding_features"]
+
     def test_feature_importance(self):
         """测试特征重要性获取"""
         importance = get_risk_feature_importance("depression")

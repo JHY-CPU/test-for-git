@@ -151,7 +151,11 @@ def daily_inference(
         pred_norm = model(input_tensor).numpy().flatten()  # (10,)
 
     # 5. 计算加权残差
-    residual = np.abs(pred_norm - today_norm)
+    # 带符号残差（actual - pred）保留"偏离方向"，供 classify_risk_type 做 up/down 方向判定；
+    # anomaly_score 只关心"偏离幅度"，用绝对值。二者不可混用：
+    # 若把绝对残差喂给方向判定，down 方向永远无法正确触发，且正常特征（残差≈0）会误判。
+    signed_residual = today_norm - pred_norm
+    residual = np.abs(signed_residual)
     weights = get_feature_weight_array()
     anomaly_score = float(np.dot(residual, weights) / np.sum(weights))
 
@@ -176,11 +180,14 @@ def daily_inference(
     ewma.update(anomaly_score)
     ewma.save(get_baseline_dir(elder_id) / "ewma.pkl")
 
-    # 8. 构建特征残差字典（用于可解释性）
+    # 8. 构建特征残差字典（用于可解释性 + 风险类型方向判定）
+    # 存带符号值：正=今日高于预测，负=今日低于预测。classify_risk_type 依赖此符号
+    # 区分"语速变慢(down)""睡眠效率下降(down)"等方向性异常。与 cold_start_fallback
+    # 写入的带符号 z-score 保持一致。
     from src.baseline.scaler_utils import FEATURE_NAMES
     feature_residuals = {}
     for i, name in enumerate(FEATURE_NAMES):
-        feature_residuals[name] = round(float(residual[i]), 4)
+        feature_residuals[name] = round(float(signed_residual[i]), 4)
 
     # 9. 统计连续偏离天数
     recent_results = load_daily_results(elder_id, n_days=7)
