@@ -26,6 +26,9 @@ def compute_false_positive_rate(
     if len(actual_events) != len(predicted_events):
         raise ValueError("Length mismatch")
 
+    # 分母只统计"真实无事件"的天（FP + TN），不含有事件的天。
+    # 对本系统 FPR 是最关键指标：老人绝大多数日子是正常的，一旦这些正常日频繁误报，
+    # 家人会迅速对系统脱敏、最终忽略真正的预警。所以要单独盯住"正常日里报错了多少"。
     false_positives = 0
     true_negatives = 0
 
@@ -37,7 +40,7 @@ def compute_false_positive_rate(
 
     total_negatives = false_positives + true_negatives
     if total_negatives == 0:
-        return 0.0
+        return 0.0  # 样本里根本没有正常日，FPR 无定义，按 0 处理
 
     return false_positives / total_negatives
 
@@ -194,6 +197,9 @@ def compare_thresholds(
     Returns:
         对比指标字典
     """
+    # 消融实验的核心论点：同一批真实事件下，"自己和自己比"的个人基线应比"群体固定阈值"
+    # 误报率显著更低。两者都用 >1.0 转成二值预警后，跑同一套检测指标做对比，
+    # 最后由 fpr_reduction / fpr_reduction_ratio 量化个人基线降低了多少误报（预期 4–6×）。
     personal_binary = [s > 1.0 for s in personal_results]
     population_binary = [s > 1.0 for s in population_results]
 

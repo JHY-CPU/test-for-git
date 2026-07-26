@@ -59,6 +59,10 @@ def transform_data(scaler: StandardScaler, data: np.ndarray) -> np.ndarray:
     """
     使用已有scaler归一化数据（不重新拟合）。
 
+    关键：推理阶段只能 transform、绝不能再 fit。GRU 是在训练期的归一化尺度上学到"正常态"的，
+    若对新数据重新 fit，归一化基准会随数据漂移，残差量纲跟着变，异常检测直接失真——
+    今天的偏离可能因为 scaler 被"带偏"而看起来正常。基准必须冻结在建档期。
+
     Args:
         scaler: 已拟合的StandardScaler
         data: (n_samples, feature_dim) 或 (feature_dim,) 特征

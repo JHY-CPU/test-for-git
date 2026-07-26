@@ -55,8 +55,10 @@ mental-health-sense/
 │   ├── baselines/                   # 该老人的个人基线模型
 │   │   └── E001/
 │   │       ├── gru.pth              # 训练好的GRU模型
+│   │       ├── gru.prev.pth         # 微调前的模型备份（可回滚）
 │   │       ├── scaler.pkl           # StandardScaler（归一化）
 │   │       ├── residual_stats.pkl   # 训练残差统计（均值、标准差）
+│   │       ├── baseline_meta.json   # 基线元数据（训练时间 + 训练后推理计数，用于观察期判定）
 │   │       └── ewma.pkl             # EWMA累积基线
 │   ├── logs/                        # 推理日志和周报
 │   │   ├── daily_inference/         # 每日GRU推理结果（JSON）
@@ -126,15 +128,19 @@ mental-health-sense/
 │   ├── test_simple.py               # 快速冒烟测试
 │   └── health_check.py              # 项目完整性检查
 │
-├── tests/                           # 单元测试
+├── tests/                           # 单元测试（119 个用例，确定性可复现）
+│   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
+│   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
 │   ├── test_ewma.py                 # EWMA基线测试
 │   ├── test_gru_model.py            # GRU模型测试
-│   ├── test_imputer.py              # 缺失值处理测试
-│   ├── test_risk_judge.py           # 风险判定测试
+│   ├── test_imputer.py              # 缺失值处理（前向填充）测试
+│   ├── test_validator.py            # 数据质量校验测试
+│   ├── test_risk_judge.py           # 风险判定测试（含低/高幅度连续偏离回归）
 │   ├── test_risk_rules.py           # 风险规则测试
-│   ├── test_integration.py          # 端到端集成测试
-│   └── ...
+│   ├── test_alert.py                # 预警推送测试
+│   ├── test_metrics.py              # 评估指标测试
+│   └── test_integration.py          # 端到端集成测试
 │
 ├── requirements.txt                 # Python依赖
 └── pytest.ini                       # Pytest配置
@@ -192,9 +198,11 @@ UnifiedDataManager                   + PIR/IPC活动数据
 | 等级 | 名称 | 触发条件 | 响应措施 |
 |------|------|----------|----------|
 | 0 | 正常 | 无偏离 | 无 |
-| 1 | 关注 | 单日偏离或间歇偏离 | 记录日志 |
-| 2 | 提醒 | 连续3天偏离 | 推送子女App |
-| 3 | 严重 | 连续5天偏离 | 短信 + 社区网格员 + 强制响铃 |
+| 1 | 关注 | 单日偏离、间歇偏离，或单日高峰值超标 | 记录日志 |
+| 2 | 提醒 | 连续3天偏离 **且** 平均幅度超标（avg_anomaly > sustained_avg） | 推送子女App |
+| 3 | 严重 | 连续5天偏离 **且** 平均幅度超标（同提醒级幅度门槛） | 短信 + 社区网格员 + 强制响铃 |
+
+> **严重级为何也要幅度门槛？** Level 3 会触发社区网格员介入 + 强提醒，代价高。若仅凭连续天数升级，长达数天但每天只"擦线"越过动态阈值的低幅度偏离也会直冲最高级，与提醒级（带幅度门槛）判定不一致，且过度打扰家人和社区。因此严重级与提醒级共用 `avg_anomaly > sustained_avg` 幅度门槛。
 
 ### 三种风险类型
 
@@ -259,7 +267,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | 个人化基线 | 避免用群体平均误判个体差异（误报率降低 4–6×） |
 | EWMA 动态阈值取 min | 防止老人缓慢衰退后系统"习以为常"变迟钝 |
 | 连续天数门槛 | 单日波动不触发（消融实验：误报率从 3.2 → 0.4 次/天） |
-| 冷启动观察期 | 训练后 7 次推理仅记录不报警，等待基线稳定（按训练后推理数计，不受 EWMA 预热样本干扰） |
+| 冷启动观察期 | 训练后 7 次推理仅记录不报警，等待基线稳定（按 `baseline_meta.json` 记录的**训练后推理计数**判定，不受 EWMA 预热样本把 n 顶到 7、使观察期形同虚设的干扰；旧基线无 meta 时安全降级） |
 | 实时轨不报警 | 实时轨仅采集，预警统一由每日趋势轨发出，避免单点波动打扰家人 |
 
 ---
@@ -707,5 +715,5 @@ MIT
 
 ---
 
-**最后更新**：2026-07-22  
-**项目版本**：v1.4（单人系统；实时轨仅采集不报警；GRU 加健康门禁 / 冷启动兜底 / early-stopping / 微调防污染）
+**最后更新**：2026-07-23  
+**项目版本**：v1.5（单人系统；实时轨仅采集不报警；GRU 加健康门禁 / 冷启动兜底 / early-stopping / 微调防污染；判定链路修复：前向填充生效 / 观察期按训练后推理计数 / 严重级加幅度门槛；移除时间编码死代码，特征统一为 10 维 `FEATURE_NAMES`）

@@ -48,14 +48,16 @@ def impute_missing(
     filled = health_features.copy()
 
     if missing_count > 0 and prev_day_vec is not None:
-        # 前向填充：用昨日值替换NaN
+        # 前向填充：用昨日值替换 NaN。对老年人的日尺度生理/行为特征，"今天大概率接近昨天"
+        # 是比填均值更稳妥的假设——填均值会把偏离往群体中心拉、削弱个人基线的偏离信号。
         prev_health = prev_day_vec
         for i in range(FEATURE_DIM):
             if missing_mask[i] and not np.isnan(prev_health[i]):
                 filled[i] = prev_health[i]
                 missing_mask[i] = False
 
-    # 对仍未填充的，用0填充（标记为数据不足）
+    # 仍填不上的（无昨日值或昨日也缺）填 0。归一化空间里 0 ≈ 训练均值，是"信息中性"的占位，
+    # 不会伪造出一个偏离；同时这些特征已计入 final_missing_count，由上层据此降级数据质量。
     filled[missing_mask] = 0.0
 
     # 统计最终无法填充的特征

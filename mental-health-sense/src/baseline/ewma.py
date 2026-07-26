@@ -52,18 +52,21 @@ class CumulativeEWMABaseline:
         self.history.append(new_value)
 
         if self.mean is None:
-            # 第一个值：初始化
+            # 第一个值：无历史可平滑，直接以它为初始均值；方差此刻无从估计，置 0。
+            # 这会让最初一两天的阈值偏窄，但冷启动观察期本就不报警，等样本累积后自然收敛。
             self.mean = float(new_value)
-            self.m2 = 0.0  # 初始方差为0
+            self.m2 = 0.0
             self.n = 1
         else:
             old_mean = self.mean
-            # 更新 EWMA 均值
+            # 更新 EWMA 均值：新值权重 alpha，历史权重 (1-alpha)。alpha 越小越"记性长"。
             self.mean = (1 - self.alpha) * self.mean + self.alpha * float(new_value)
             self.n += 1
 
-            # 更新 EWMA 方差：var = alpha * (x - old_mean)^2 + (1 - alpha) * var
-            # 由于 m2 存储的是方差，直接使用标准公式
+            # EWMA 方差递推：var = alpha * (x - old_mean)^2 + (1 - alpha) * var
+            # 注意用的是 old_mean（更新前的均值），这是 EWMV 的常用近似式——不是无偏样本方差，
+            # 但对"动态阈值"这个用途足够：它同样以指数衰减跟踪波动幅度，且 O(1) 增量可算，
+            # 无需保留全部历史。m2 直接存方差本身（非 Welford 的平方和），故下方开方即得 std。
             delta_squared = (float(new_value) - old_mean) ** 2
             self.m2 = self.alpha * delta_squared + (1 - self.alpha) * self.m2
 
@@ -75,9 +78,11 @@ class CumulativeEWMABaseline:
         Returns:
             标准差，n<2时返回1.0作为默认值
         """
+        # 只有 1 个样本时方差无意义，返回 1.0 而非 0：若返回 0，get_threshold 会退化成
+        # threshold == mean，任何微小波动都越阈误报。用 1.0 这个中性尺度先"撑住"阈值宽度。
         if self.n < 2:
             return 1.0
-        # m2 存储的就是方差，直接开方
+        # m2 存储的就是方差，直接开方；下限 1e-8 防止方差塌成 0 时阈值失去宽度。
         return max(self.m2 ** 0.5, 1e-8)
 
     @property
