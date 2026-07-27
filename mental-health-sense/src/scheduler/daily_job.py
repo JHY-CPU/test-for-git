@@ -260,34 +260,40 @@ def _cold_start_fallback(
     return result
 
 
-def _load_raw_and_aggregate(elder_id: str, date_str: str):
-    """
-    从data/raw/目录自动读取原始传感器数据并聚合。
-    这是一个适配层，根据实际数据格式实现。
+def load_raw_sensors(elder_id: str, date_str: str) -> dict:
+    """从 data/raw/ 读取四路传感器原始数据。
 
-    当前为占位实现，实际对接时替换。
+    Returns:
+        {"sleep":..., "activity":..., "social":..., "acoustic":...}，
+        缺失的路为 None。供 run_daily_pipeline 的 raw_data 参数使用。
     """
     import json
     from pathlib import Path
 
     raw_dir = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
 
-    def _load_json(subdir: str, filename: str) -> dict | None:
+    def _load_json(subdir: str) -> dict | None:
         filepath = raw_dir / subdir / elder_id / f"{date_str}.json"
         if filepath.exists():
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
         return None
 
-    sleep_data = _load_json("sleep", f"{date_str}.json")
-    activity_data = _load_json("activity", f"{date_str}.json")
-    social_data = _load_json("social", f"{date_str}.json")
-    acoustic_data = _load_json("acoustic", f"{date_str}.json")
+    return {
+        "sleep": _load_json("sleep"),
+        "activity": _load_json("activity"),
+        "social": _load_json("social"),
+        "acoustic": _load_json("acoustic"),
+    }
 
+
+def _load_raw_and_aggregate(elder_id: str, date_str: str):
+    """从 data/raw/ 目录自动读取原始传感器数据并聚合为 10 维特征向量。"""
+    raw = load_raw_sensors(elder_id, date_str)
     return aggregate_daily_features(
         date_str=date_str,
-        sleep_data=sleep_data,
-        activity_data=activity_data,
-        social_data=social_data,
-        acoustic_data=acoustic_data,
+        sleep_data=raw["sleep"],
+        activity_data=raw["activity"],
+        social_data=raw["social"],
+        acoustic_data=raw["acoustic"],
     )

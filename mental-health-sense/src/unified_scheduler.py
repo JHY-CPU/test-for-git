@@ -134,66 +134,50 @@ class UnifiedScheduler:
                 print(f"[每日轨] 调度异常: {e}")
 
     def _run_daily_inference(self, date: str):
-        """执行每日推理（整合实时数据）"""
+        """执行每日推理：真正调用 run_daily_pipeline（GRU + EWMA + 风险判定 + 预警）。
+
+        声学特征来自实时轨的自然日聚合；睡眠/活动/社交从 data/raw/ 读取（真实
+        传感器数据放到该目录即可）。任一路缺失时由 run_daily_pipeline 内部据实
+        判定数据质量（不再用假 mock 常量掩盖缺失）。
+        """
         print(f"[每日轨] 执行每日推理: {date}")
 
-        # 1. 从统一数据管理器获取声学特征
-        acoustic_data = self.data_manager.get_daily_acoustic_data(date)
-        print(f"[每日轨] 声学特征（来自实时系统）:")
-        print(f"  - sad_ratio: {acoustic_data['sad_ratio']:.3f}")
-        print(f"  - avg_speed: {acoustic_data['avg_speed']:.2f}")
-        print(f"  - pitch_variability: {acoustic_data['pitch_variability']:.1f}")
-        print(f"  - distress_events: {acoustic_data['distress_events']}")
+        # 1. 声学特征：来自实时轨自然日聚合（带质量标记）
+        acoustic = self.data_manager.get_daily_acoustic_with_quality(date)
+        if acoustic.get("data_quality") == "missing":
+            print(f"[每日轨] ⚠️ {date} 无实时声学数据，声学置空交由数据校验降级处理")
+            acoustic_data = None
+        else:
+            acoustic_data = {k: acoustic[k] for k in
+                             ("sad_ratio", "avg_speed", "pitch_variability", "distress_events")}
+            print(f"[每日轨] 声学特征（来自实时轨）: sad={acoustic_data['sad_ratio']:.3f}, "
+                  f"speed={acoustic_data['avg_speed']:.2f}, "
+                  f"pitchVar={acoustic_data['pitch_variability']:.1f}, "
+                  f"distress={acoustic_data['distress_events']}")
 
-        # 2. 获取其他传感器数据（TODO: 对接其他传感器）
-        sleep_data = self._get_sleep_data(date)
-        activity_data = self._get_activity_data(date)
-        social_data = self._get_social_data(date)
+        # 2. 其他三路传感器：从 data/raw/ 读取真实数据（无则为 None）
+        from src.scheduler.daily_job import load_raw_sensors, run_daily_pipeline
+        raw = load_raw_sensors(self.elder_id, date)
+        raw_data = {
+            "acoustic": acoustic_data,
+            "sleep": raw["sleep"],
+            "activity": raw["activity"],
+            "social": raw["social"],
+        }
 
-        # 3. 聚合为10维特征向量
-        from src.data_pipeline.aggregator import aggregate_daily_features
-
+        # 3. 调用完整每日管道（聚合→填充→校验→保存→GRU推理→风险判定→预警）
         try:
-            daily_vector = aggregate_daily_features(
+            result = run_daily_pipeline(
+                elder_id=self.elder_id,
                 date_str=date,
-                acoustic_data=acoustic_data,  # 来自实时系统！
-                sleep_data=sleep_data,
-                activity_data=activity_data,
-                social_data=social_data,
+                raw_data=raw_data,
             )
-
-            print(f"[每日轨] 10维特征向量已生成")
-
-            # 4. GRU推理（TODO: 调用现有的GRU模型）
-            # from src.baseline.inference import daily_inference
-            # result = daily_inference(self.elder_id, date, daily_vector)
-
-            print(f"[每日轨] GRU推理完成（待实现）")
-
+            risk = result.get("risk_result") or {}
+            print(f"[每日轨] 完成: status={result.get('status')}, "
+                  f"quality={result.get('data_quality')}, "
+                  f"risk_level={risk.get('risk_level', '-')}")
         except Exception as e:
             print(f"[每日轨] 推理失败: {e}")
-
-    def _get_sleep_data(self, date: str) -> dict:
-        """获取睡眠数据（TODO: 对接睡眠雷达）"""
-        # 返回模拟数据
-        return {
-            "sleep_efficiency": 0.85,
-            "deep_sleep_ratio": 0.25,
-            "sfi": 15,
-            "hrv_rmssd": 45,
-        }
-
-    def _get_activity_data(self, date: str) -> dict:
-        """获取活动数据（TODO: 对接PIR+IPC）"""
-        return {
-            "daily_activity": 5000,
-        }
-
-    def _get_social_data(self, date: str) -> dict:
-        """获取社交数据（TODO: 对接拾音+音箱）"""
-        return {
-            "social_turns": 15,
-        }
 
 
 # 使用示例

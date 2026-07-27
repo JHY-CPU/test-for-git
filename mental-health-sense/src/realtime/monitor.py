@@ -28,6 +28,18 @@ from src.realtime.audio_stream import AudioStream, MicrophoneStream, FileSimulat
 from src.realtime.sensevoice_engine import SenseVoiceEngine, RealtimeFeatureAggregator
 
 
+def _load_save_interval(default: int = 1800) -> int:
+    """从 realtime_config.yaml 读取 storage.save_interval（秒）。读取失败回退默认。"""
+    try:
+        import yaml
+        cfg_path = Path(__file__).resolve().parent.parent.parent / "config" / "realtime_config.yaml"
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return int(cfg.get("storage", {}).get("save_interval", default))
+    except Exception:
+        return default
+
+
 class RealtimeMonitor:
     """实时心理健康监测控制器"""
 
@@ -36,19 +48,23 @@ class RealtimeMonitor:
         elder_id: str,
         audio_stream: AudioStream,
         output_dir: str = "./data/realtime",
-        save_interval: int = 1800,  # 每30分钟保存一次特征
+        save_interval: int | None = None,  # None=从 realtime_config.yaml 读取
     ):
         """
         Args:
             elder_id: 老人ID
             audio_stream: 音频流对象
             output_dir: 输出目录
-            save_interval: 特征保存间隔（秒）
+            save_interval: 特征保存间隔（秒）。None 时从 realtime_config.yaml 的
+                storage.save_interval 读取（默认 1800=30分钟），不再硬编码。
         """
         self.elder_id = elder_id
         self.audio_stream = audio_stream
         self.output_dir = Path(output_dir)
-        self.save_interval = save_interval
+        self.save_interval = (
+            save_interval if save_interval is not None
+            else _load_save_interval()
+        )
 
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)

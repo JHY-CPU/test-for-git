@@ -29,6 +29,60 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _train_loop(
+    model: PersonalBaselineGRU,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    epochs: int,
+    lr: float,
+    patience: int | None = None,
+) -> float:
+    """全 batch 训练循环，带 early-stopping + 回滚最优权重。
+
+    冷启动与每周微调共用同一套过拟合抑制策略：连续 patience 轮 loss 无改善则
+    提前停止，并把模型权重回滚到最优点（避免停在抖动高点）。patience=None/0 时
+    不启用 early-stopping，跑满 epochs。
+
+    Returns:
+        best_loss（最优训练损失）
+    """
+    import copy
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+
+    model.train()
+    best_loss = float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+    epochs_no_improve = 0
+    for epoch in range(epochs):
+        pred = model(X)
+        loss = loss_fn(pred, y)
+        cur_loss = loss.item()
+
+        # 先按"产生 cur_loss 的这组权重"记录最优点，再做梯度更新——保证 best_state
+        # 与 best_loss 严格对应（若在 step 之后保存，存下的是"更新一步之后"的权重，
+        # 与刚记录的 best_loss 差一个梯度步，回滚点会偏移）。
+        if cur_loss < best_loss - 1e-6:
+            best_loss = cur_loss
+            best_state = copy.deepcopy(model.state_dict())
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if patience and epochs_no_improve >= patience:
+            logger.info(f"  └─ early-stopping：连续{patience}轮无改善，第{epoch + 1}轮停止")
+            break
+
+    # 回滚到最优权重
+    model.load_state_dict(best_state)
+    return best_loss
+
+
 def train_initial_baseline(
     elder_id: str,
     config: dict | None = None,
@@ -153,48 +207,12 @@ def train_initial_baseline(
         num_layers=num_layers,
         dropout=dropout,
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-
     # early-stopping：冷启动样本极少（14天仅约7个窗口样本），高 epoch 易过拟合。
-    # 连续 patience 轮 loss 无改善则提前停止，并回滚到最优权重。
-    import copy
-
-    model.train()
-    best_loss = float("inf")
-    best_state = copy.deepcopy(model.state_dict())
-    epochs_no_improve = 0
-    stopped_epoch = epochs
-    for epoch in range(epochs):
-        pred = model(X)
-        loss = loss_fn(pred, y)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        cur_loss = loss.item()
-        if cur_loss < best_loss - 1e-6:
-            best_loss = cur_loss
-            best_state = copy.deepcopy(model.state_dict())
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-
-        if (epoch + 1) % 30 == 0:
-            logger.debug(f"  └─ Epoch {epoch + 1}/{epochs}, Loss: {cur_loss:.6f}")
-
-        if patience and epochs_no_improve >= patience:
-            stopped_epoch = epoch + 1
-            logger.info(f"  └─ early-stopping：连续{patience}轮无改善，第{stopped_epoch}轮停止")
-            break
-
-    # 回滚到最优权重（避免停止时正好在一个抖动高点）
-    model.load_state_dict(best_state)
+    # 连续 patience 轮 loss 无改善则提前停止，并回滚到最优权重（见 _train_loop）。
+    best_loss = _train_loop(model, X, y, epochs=epochs, lr=lr, patience=patience)
 
     logger.info(
-        f"  └─ GRU训练完成: best_loss={best_loss:.6f}, "
-        f"epochs={stopped_epoch}/{epochs}, params={model.count_parameters()}"
+        f"  └─ GRU训练完成: best_loss={best_loss:.6f}, params={model.count_parameters()}"
     )
 
     # 5. 计算残差统计
@@ -288,6 +306,8 @@ def weekly_retrain(
     recent_days = train_cfg.get("recent_days", 30)
     merge_alpha = train_cfg.get("residual_merge_alpha", 0.3)
     exclude_deviation = train_cfg.get("exclude_deviation_days", True)
+    # 微调也启用 early-stopping（与冷启动一致），默认 patience=10；配置可覆盖
+    patience = train_cfg.get("patience", 10)
 
     # 1. 取最近N天有效特征（带日期，用于剔除已判定为偏离的异常天）
     from src.baseline.scaler_utils import FEATURE_NAMES
@@ -346,21 +366,9 @@ def weekly_retrain(
     X = torch.tensor(np.array(X_list), dtype=torch.float32)
     y = torch.tensor(np.array(y_list), dtype=torch.float32)
 
-    # 5. 低学习率微调
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-
-    model.train()
-    best_loss = float("inf")
-    for epoch in range(epochs):
-        pred = model(X)
-        loss = loss_fn(pred, y)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        if loss.item() < best_loss:
-            best_loss = loss.item()
+    # 5. 低学习率微调（与冷启动共用 _train_loop：early-stopping + 回滚最优权重，
+    #    抑制小样本过拟合；低 lr 防灾难性遗忘）
+    best_loss = _train_loop(model, X, y, epochs=epochs, lr=lr, patience=patience)
 
     logger.info(f"  └─ 微调完成: best_loss={best_loss:.6f}")
 

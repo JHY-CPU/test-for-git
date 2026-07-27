@@ -10,6 +10,7 @@ SenseVoice 实时推理引擎
 import os
 import re
 import json
+import time
 import logging
 import tempfile
 from pathlib import Path
@@ -17,6 +18,58 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 import numpy as np
+
+
+# 空窗口/无语音时的中性默认声学特征（归一化空间下接近训练均值，不伪造偏离）
+NEUTRAL_ACOUSTIC = {
+    "sad_ratio": 0.05,
+    "avg_speed": 4.0,
+    "pitch_variability": 25.0,
+    "distress_events": 0,
+    "n_utterances": 0,
+    "total_duration": 0.0,
+}
+
+
+def aggregate_acoustic_from_utterances(utterances: list[dict]) -> dict:
+    """从一组 utterance 计算 4 个声学特征 + 统计。
+
+    单一实现，供实时聚合器（当前窗口 / 最近N小时）与每日轨自然日聚合共用，
+    避免此前三处重复实现漂移。空列表返回 NEUTRAL_ACOUSTIC。
+    """
+    n_utterances = len(utterances)
+    if n_utterances == 0:
+        return dict(NEUTRAL_ACOUSTIC)
+
+    sad_weight = 0.0
+    total_weight = 0.0
+    for utt in utterances:
+        duration = utt.get("duration_sec", 1.0)
+        if utt.get("emotion", "neutral") == "sad":
+            sad_weight += duration
+        total_weight += duration
+    sad_ratio = sad_weight / total_weight if total_weight > 0 else 0.0
+    sad_ratio = min(max(sad_ratio, 0.0), 1.0)
+
+    speeds = [utt.get("speech_rate", 4.0) for utt in utterances]
+    avg_speed = float(np.mean(speeds)) if speeds else 4.0
+
+    pitches = [utt.get("pitch_mean", 200.0) for utt in utterances]
+    pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
+
+    distress_emotions = {"sad", "angry", "fearful"}
+    distress_events = sum(
+        1 for utt in utterances if utt.get("emotion") in distress_emotions
+    )
+
+    return {
+        "sad_ratio": round(sad_ratio, 4),
+        "avg_speed": round(avg_speed, 2),
+        "pitch_variability": round(pitch_variability, 1),
+        "distress_events": distress_events,
+        "n_utterances": n_utterances,
+        "total_duration": round(total_weight, 1),
+    }
 
 
 class SenseVoiceEngine:
@@ -319,6 +372,16 @@ class RealtimeFeatureAggregator:
             (ts, utt) for ts, utt in self.utterances_buffer if ts >= cutoff_time
         ]
 
+    def _utterances_within_window(self) -> list[dict]:
+        """按"当前墙上时钟"过滤出仍在 24h 窗口内的 utterance。
+
+        不依赖 add_utterances 触发的清理：老人长时间不说话时清理不会发生、
+        窗口会"冻结"，导致读取端拿到陈旧/跨日数据。这里读取时以 time.time()
+        再裁一次，保证任何时刻取到的都是"截至此刻真实的最近 24 小时"。
+        """
+        cutoff = time.time() - self.window_seconds
+        return [utt for ts, utt in self.utterances_buffer if ts >= cutoff]
+
     def get_current_features(self) -> dict:
         """
         获取当前时间窗口的声学特征
@@ -333,56 +396,17 @@ class RealtimeFeatureAggregator:
                 "total_duration": float,
             }
         """
-        if not self.utterances_buffer:
-            return {
-                "sad_ratio": 0.05,
-                "avg_speed": 4.0,
-                "pitch_variability": 25.0,
-                "distress_events": 0,
-                "n_utterances": 0,
-                "total_duration": 0.0,
-            }
-
-        utterances = [utt for _, utt in self.utterances_buffer]
-        n_utterances = len(utterances)
-
-        # 1. 悲伤占比
-        sad_weight = 0.0
-        total_weight = 0.0
-        for utt in utterances:
-            duration = utt.get("duration_sec", 1.0)
-            emotion = utt.get("emotion", "neutral")
-            if emotion == "sad":
-                sad_weight += duration
-            total_weight += duration
-
-        sad_ratio = sad_weight / total_weight if total_weight > 0 else 0.0
-
-        # 2. 平均语速
-        speeds = [utt.get("speech_rate", 4.0) for utt in utterances]
-        avg_speed = float(np.mean(speeds)) if speeds else 4.0
-
-        # 3. 基频变异性（F0标准差）
-        pitches = [utt.get("pitch_mean", 200.0) for utt in utterances]
-        pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
-
-        # 4. 痛苦事件
-        distress_emotions = {"sad", "angry", "fearful"}
-        distress_events = sum(
-            1 for utt in utterances if utt.get("emotion") in distress_emotions
-        )
-
-        return {
-            "sad_ratio": round(sad_ratio, 4),
-            "avg_speed": round(avg_speed, 2),
-            "pitch_variability": round(pitch_variability, 1),
-            "distress_events": distress_events,
-            "n_utterances": n_utterances,
-            "total_duration": round(total_weight, 1),
-        }
+        # 以墙上时钟裁出真正最近 24h 的 utterance（防窗口冻结导致的陈旧/跨日数据）
+        utterances = self._utterances_within_window()
+        return aggregate_acoustic_from_utterances(utterances)
 
     def get_hourly_features(self, last_n_hours: int = 1) -> dict:
-        """获取最近N小时的特征（用于短期趋势分析）"""
+        """获取最近N小时的特征（用于短期趋势分析）。
+
+        以 buffer 内最后一条 utterance 的时间戳为参考往回取 N 小时——这里刻意
+        用数据时间而非墙上时钟，因为它服务于"最近说的这批话"的短期趋势展示，
+        与每日轨的自然日聚合无关。
+        """
         if not self.utterances_buffer:
             return self.get_current_features()
 
@@ -397,36 +421,7 @@ class RealtimeFeatureAggregator:
         if not recent_utterances:
             return self.get_current_features()
 
-        # 计算特征（与get_current_features相同逻辑）
-        n_utterances = len(recent_utterances)
-
-        sad_weight = sum(
-            utt.get("duration_sec", 1.0)
-            for utt in recent_utterances
-            if utt.get("emotion") == "sad"
-        )
-        total_weight = sum(utt.get("duration_sec", 1.0) for utt in recent_utterances)
-        sad_ratio = sad_weight / total_weight if total_weight > 0 else 0.0
-
-        speeds = [utt.get("speech_rate", 4.0) for utt in recent_utterances]
-        avg_speed = float(np.mean(speeds)) if speeds else 4.0
-
-        pitches = [utt.get("pitch_mean", 200.0) for utt in recent_utterances]
-        pitch_variability = float(np.std(pitches)) if len(pitches) >= 2 else 25.0
-
-        distress_emotions = {"sad", "angry", "fearful"}
-        distress_events = sum(
-            1 for utt in recent_utterances if utt.get("emotion") in distress_emotions
-        )
-
-        return {
-            "sad_ratio": round(sad_ratio, 4),
-            "avg_speed": round(avg_speed, 2),
-            "pitch_variability": round(pitch_variability, 1),
-            "distress_events": distress_events,
-            "n_utterances": n_utterances,
-            "total_duration": round(total_weight, 1),
-        }
+        return aggregate_acoustic_from_utterances(recent_utterances)
 
 
 # 使用示例

@@ -6,33 +6,49 @@
     每日系统从实时系统读取累积数据，形成统一的数据流
 """
 
+import os
 import json
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
-from src.realtime.sensevoice_engine import RealtimeFeatureAggregator
+from src.realtime.sensevoice_engine import (
+    RealtimeFeatureAggregator,
+    aggregate_acoustic_from_utterances,
+    NEUTRAL_ACOUSTIC,
+)
+
+# 声学 4 维（与 aggregator/每日轨对齐）
+_ACOUSTIC_KEYS = ("sad_ratio", "avg_speed", "pitch_variability", "distress_events")
 
 
 class UnifiedDataManager:
     """统一数据流管理器
 
     职责：
-        1. 管理实时系统的特征聚合器
-        2. 为每日系统提供标准化的acoustic_data
-        3. 维护数据一致性和完整性
+        1. 管理实时系统的特征聚合器（实时展示用，24h 滑动窗口）
+        2. 按"自然日"持久化原始 utterance，供每日轨按自然日聚合声学特征
+        3. 为每日系统提供带质量标记的 acoustic_data
+
+    时间语义（关键）：实时展示用滑动窗口（"截至此刻最近 24h"），每日轨用自然日
+    （"某年某月某日 00:00–23:59"）。二者语义不同，故分开存取，避免"滑动窗口 vs
+    墙上时钟"错位——原 snapshot 方案在老人夜间静默 + 每日轨凌晨触发时会读到错位/陈旧数据。
     """
 
     def __init__(self, elder_id: str, data_dir: str = "./data"):
         self.elder_id = elder_id
         self.data_dir = Path(data_dir)
 
-        # 实时特征聚合器（24小时滑动窗口）
+        # 实时特征聚合器（24小时滑动窗口，仅用于实时展示）
         self.realtime_aggregator = RealtimeFeatureAggregator(window_hours=24)
 
         # 数据持久化目录
         self.features_dir = self.data_dir / "realtime" / elder_id / "features"
         self.features_dir.mkdir(parents=True, exist_ok=True)
+        # 按自然日存原始 utterance（每日轨聚合的权威来源）
+        self.utterances_dir = self.data_dir / "realtime" / elder_id / "utterances"
+        self.utterances_dir.mkdir(parents=True, exist_ok=True)
 
     def add_realtime_utterances(self, utterances: list[dict], timestamp: float):
         """
@@ -40,58 +56,92 @@ class UnifiedDataManager:
 
         Args:
             utterances: SenseVoice推理结果
-            timestamp: 时间戳
+            timestamp: 音频块起始时间戳（Unix 秒，墙上时钟）
         """
         self.realtime_aggregator.add_utterances(utterances, timestamp)
 
-        # 自动保存快照（防止系统重启丢失数据）
+        # 按每条 utterance 的墙上时钟归属到对应自然日，落 JSONL（append-only，抗中断）
+        self._persist_utterances_by_day(utterances, timestamp)
+
+        # 兼容旧接口：仍保存滑动窗口快照（实时展示 / 调试用）
         self._save_snapshot()
 
+    def _persist_utterances_by_day(self, utterances: list[dict], timestamp: float):
+        """把 utterance 按墙上时钟归属的自然日追加到 {date}.jsonl。"""
+        for utt in utterances:
+            utt_ts = timestamp + utt.get("start_sec", 0)
+            day = datetime.fromtimestamp(utt_ts).strftime("%Y-%m-%d")
+            record = {"ts": utt_ts, **utt}
+            day_file = self.utterances_dir / f"{day}.jsonl"
+            # append-only 单行写：即使中断也只可能丢最后一行，不损坏历史
+            with open(day_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def aggregate_natural_day(self, date: str) -> dict:
+        """聚合某自然日（00:00–23:59）的全部 utterance → 声学特征 + 质量标记。
+
+        Returns:
+            {**4维声学, "n_utterances", "total_duration", "data_quality"}
+            data_quality: "valid"（有语音）/ "missing"（该日无任何 utterance）
+        """
+        day_file = self.utterances_dir / f"{date}.jsonl"
+        utterances: list[dict] = []
+        if day_file.exists():
+            with open(day_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        utterances.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        # 跳过中断产生的半截行，不让单行损坏拖垮整日聚合
+                        continue
+
+        feats = aggregate_acoustic_from_utterances(utterances)
+        feats["data_quality"] = "valid" if utterances else "missing"
+        return feats
+
     def get_current_features(self) -> dict:
-        """获取当前24小时特征（实时监测使用）"""
+        """获取当前24小时特征（实时展示用，滑动窗口）"""
         return self.realtime_aggregator.get_current_features()
 
     def get_daily_acoustic_data(self, date: str) -> dict:
-        """
-        获取指定日期的声学特征（每日系统使用）
+        """获取指定日期的声学特征（每日系统使用），仅 4 维声学值。
 
-        Args:
-            date: 日期字符串 "YYYY-MM-DD"
+        统一走"自然日聚合"这一权威来源，不再对"今天/过去"用两套数据源。
+        无数据时返回中性默认值（质量标记见 get_daily_acoustic_with_quality）。
+        """
+        return {k: self.get_daily_acoustic_with_quality(date)[k] for k in _ACOUSTIC_KEYS}
+
+    def get_daily_acoustic_with_quality(self, date: str) -> dict:
+        """带质量标记的声学特征。
 
         Returns:
-            符合每日系统格式的acoustic_data
-            {
-                "sad_ratio": float,
-                "avg_speed": float,
-                "pitch_variability": float,
-                "distress_events": int,
-            }
+            {**4维声学, "data_quality": "valid"|"missing"}
+
+        data_quality="missing" 表示该自然日无任何 utterance：返回的是中性默认值而非
+        真实测量。每日轨据此把该天声学视为缺失（交给 imputer/validator 处理），
+        避免用假的"正常值"喂进 GRU 掩盖真实偏离。
         """
-        # 方案1：从实时聚合器获取（如果是今天）
-        today = datetime.now().strftime("%Y-%m-%d")
-        if date == today:
-            features = self.realtime_aggregator.get_current_features()
-            return {
-                "sad_ratio": features["sad_ratio"],
-                "avg_speed": features["avg_speed"],
-                "pitch_variability": features["pitch_variability"],
-                "distress_events": features["distress_events"],
-            }
+        day = self.aggregate_natural_day(date)
 
-        # 方案2：从历史快照读取（如果是过去）
-        snapshot_file = self.features_dir / f"snapshot_{date}.json"
-        if snapshot_file.exists():
-            with open(snapshot_file, "r", encoding="utf-8") as f:
-                snapshot = json.load(f)
-            return snapshot.get("acoustic_data", {})
+        # 该自然日无原始 utterance：尝试回退到旧快照（历史兼容），仍无则标 missing
+        if day["data_quality"] == "missing":
+            snapshot_file = self.features_dir / f"snapshot_{date}.json"
+            if snapshot_file.exists():
+                try:
+                    with open(snapshot_file, "r", encoding="utf-8") as f:
+                        acoustic = json.load(f).get("acoustic_data", {})
+                    if acoustic:
+                        return {**{k: acoustic.get(k, NEUTRAL_ACOUSTIC[k]) for k in _ACOUSTIC_KEYS},
+                                "data_quality": "valid"}
+                except (json.JSONDecodeError, OSError):
+                    pass
+            return {**{k: NEUTRAL_ACOUSTIC[k] for k in _ACOUSTIC_KEYS},
+                    "data_quality": "missing"}
 
-        # 方案3：返回默认值
-        return {
-            "sad_ratio": 0.05,
-            "avg_speed": 4.0,
-            "pitch_variability": 25.0,
-            "distress_events": 0,
-        }
+        return {**{k: day[k] for k in _ACOUSTIC_KEYS}, "data_quality": "valid"}
 
     def _save_snapshot(self):
         """保存当前状态快照"""
@@ -115,8 +165,11 @@ class UnifiedDataManager:
         }
 
         snapshot_file = self.features_dir / f"snapshot_{today}.json"
-        with open(snapshot_file, "w", encoding="utf-8") as f:
+        # 原子写：先写临时文件再 os.replace 替换，进程中断不会留下半截损坏的 JSON
+        tmp_file = snapshot_file.with_suffix(".json.tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_file, snapshot_file)
 
     def get_7day_acoustic_history(self, end_date: str) -> list[dict]:
         """

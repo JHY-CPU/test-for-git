@@ -27,6 +27,7 @@ training:
   finetune:
     epochs: 50
     lr: 0.0003
+    patience: 10             # early-stopping：微调也启用（与冷启动一致），抑制小样本过拟合
     recent_days: 30
     residual_merge_alpha: 0.3
     exclude_deviation_days: true  # 微调只用被判为正常(is_deviation=False)的天，防基线被异常期污染

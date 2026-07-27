@@ -14,6 +14,26 @@
 
 ---
 
+## 项目现状（v1.6）
+
+> 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
+
+**代码层已完工并验证**：133 个单元测试全部通过；统一系统生产链路（实时采集 → 每日趋势推理 → 预警）已端到端打通。`docs/TODO.md` 记录的 7 项"实现落差"（P0×2 / P1×2 / P2×3）已全部收口。
+
+系统验证分三层，证据强度依次递增（完整方案见 `docs/VALIDATION.md`）：
+
+| 层次 | 回答的问题 | 状态 | 说明 |
+|------|-----------|------|------|
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 133 单测 + 端到端冒烟，统一链路已打通 |
+| **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 消融与敏感性分析待落地；**前置**是先把仿真改成"非循环" |
+| **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
+
+> ⚠️ **当前最大验证缺口**：`generate_simulation_data.py` 注入的异常方向与 `rules.py` 检测方向完全一致，属"按答案出题"——只能证明链路通（层次 A），证明不了判别能力。推进层次 B 前必须先打破这个循环（`docs/VALIDATION.md` 阶段 1 的前置任务）。
+
+**诚实定位**：特征选择有文献依据，但特征的测量效度与真实场景误报率需真实设备验证。本系统做**趋势预警**，**不做临床诊断**。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -65,7 +85,8 @@ mental-health-sense/
 │   │   └── weekly_reports/          # LLM生成的周报
 │   ├── realtime/                    # 实时监测数据
 │   │   ├── E001/
-│   │   │   ├── features/            # 24小时聚合特征（JSON快照）
+│   │   │   ├── features/            # 24小时滑动窗口快照（实时展示用，snapshot_*.json）
+│   │   │   ├── utterances/          # 按自然日持久化的原始语音片段（{date}.jsonl，每日轨聚合的权威来源）
 │   │   │   └── alerts/              # 实时风险预警记录
 │   │   └── demo/                    # 演示结果
 │   └── elder_configs.json           # 老人元数据（姓名、描述）
@@ -128,7 +149,7 @@ mental-health-sense/
 │   ├── test_simple.py               # 快速冒烟测试
 │   └── health_check.py              # 项目完整性检查
 │
-├── tests/                           # 单元测试（119 个用例，确定性可复现）
+├── tests/                           # 单元测试（133 个用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -140,6 +161,8 @@ mental-health-sense/
 │   ├── test_risk_rules.py           # 风险规则测试
 │   ├── test_alert.py                # 预警推送测试
 │   ├── test_metrics.py              # 评估指标测试
+│   ├── test_unified_data_manager.py # 实时↔每日衔接：自然日聚合 / 墙上时钟窗口 / 缺失标记
+│   ├── test_train_loop.py           # 训练循环 early-stopping / 回滚回归
 │   └── test_integration.py          # 端到端集成测试
 │
 ├── requirements.txt                 # Python依赖
@@ -170,11 +193,11 @@ mental-health-sense/
 音频输入（麦克风/RTSP/文件）          每天凌晨02:00触发
     ↓                                    ↓
 SenseVoice实时推理                   UnifiedDataManager
-    ↓                                获取昨日声学特征
-24小时滑动窗口聚合                       ↓
-    ↓                                + 睡眠雷达数据
-UnifiedDataManager                   + PIR/IPC活动数据
-保存特征快照                          + 拾音器社交数据
+    ↓                                按自然日聚合昨日声学
+按自然日持久化原始片段                    ↓（无数据则标 missing）
+（utterances/{date}.jsonl）          + 睡眠雷达数据（data/raw/）
+    ↓                                + PIR/IPC活动数据（data/raw/）
+24小时滑动窗口（实时展示）              + 拾音器社交数据（data/raw/）
 （不做实时报警）                         ↓
     │                                10维特征向量
     │                                    ↓
@@ -310,7 +333,9 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 ### 4. 过拟合抑制与可回滚
 
 - **early-stopping**：冷启动 14 天仅约 7 个训练样本，150 epoch 几乎必然过拟合。连续
-  `patience`（默认 20）轮 loss 无改善则提前停止，并**回滚到最优权重**。
+  `patience` 轮 loss 无改善则提前停止，并**回滚到最优权重**。冷启动与每周微调**共用同一
+  训练循环** `_train_loop`（冷启动 patience=20、微调 patience=10），两条路径的过拟合抑制
+  策略一致，不再是微调跑满固定轮数。
 - **模型版本化**：每周微调覆盖 `gru.pth` 前，先备份为 `gru.prev.pth`，微调把模型搞坏时可回滚。
 
 ---
@@ -519,6 +544,8 @@ python scripts/test_unified_system.py
 
 ### 实时特征快照（realtime/*/features/snapshot_*.json）
 
+24 小时滑动窗口快照，仅供实时展示 / 调试，**不作为每日轨聚合依据**（原子写入，进程中断不损坏）：
+
 ```json
 {
   "date": "2026-07-18",
@@ -533,6 +560,17 @@ python scripts/test_unified_system.py
   "total_duration": 320.5
 }
 ```
+
+### 自然日原始语音片段（realtime/*/utterances/{date}.jsonl）
+
+每条语音片段按其**墙上时钟归属的自然日**追加一行（append-only JSONL），是**每日轨聚合声学特征的权威来源**。这样避免了"24 小时滑动窗口"在老人夜间静默、每日轨凌晨 02:00 触发时读到错位/陈旧数据的问题——每日轨聚合的是"某自然日 00:00–23:59"，与 GRU"一天一条"的语义天然对齐。
+
+```jsonl
+{"ts": 1752811200.0, "start_sec": 0, "duration_sec": 3.0, "emotion": "sad", "speech_rate": 3.5, "pitch_mean": 190}
+{"ts": 1752811230.5, "start_sec": 0, "duration_sec": 2.4, "emotion": "neutral", "speech_rate": 4.1, "pitch_mean": 205}
+```
+
+> 某自然日无任何片段时，`UnifiedDataManager.get_daily_acoustic_with_quality` 返回中性默认值并标记 `data_quality="missing"`，交由每日轨的校验/填充链路据实降级，而非用假的"正常值"喂进 GRU 掩盖真实偏离。
 
 ---
 
@@ -556,6 +594,7 @@ training:
   finetune:
     epochs: 50             # 微调轮数
     lr: 0.0003
+    patience: 10           # early-stopping：微调也启用（与冷启动共用 _train_loop），抑制小样本过拟合
     recent_days: 30        # 微调使用的近期天数
     residual_merge_alpha: 0.3  # 残差统计融合系数
     exclude_deviation_days: true  # 微调只用正常天（is_deviation=False），防基线被异常期污染
@@ -607,7 +646,10 @@ sensevoice:
   language: "zh"           # 语言（zh/en/ja/ko/yue）
 
 aggregator:
-  window_hours: 24         # 24小时聚合窗口
+  window_hours: 24         # 24小时滑动窗口（实时展示用）
+
+storage:
+  save_interval: 1800      # 特征快照保存间隔（秒）。RealtimeMonitor 从此处读取（不再硬编码）
 
 # ⚠️ risk 段已停用：实时轨不再做主动报警，此段配置当前不被代码读取，
 # 仅作历史参考保留。所有预警统一由每日趋势轨发出（见 settings.yaml 的 risk 段）。
@@ -715,5 +757,7 @@ MIT
 
 ---
 
-**最后更新**：2026-07-23  
-**项目版本**：v1.5（单人系统；实时轨仅采集不报警；GRU 加健康门禁 / 冷启动兜底 / early-stopping / 微调防污染；判定链路修复：前向填充生效 / 观察期按训练后推理计数 / 严重级加幅度门槛；移除时间编码死代码，特征统一为 10 维 `FEATURE_NAMES`）
+**最后更新**：2026-07-27  
+**项目版本**：v1.6（在 v1.5 基础上打通统一系统链路并修复实时↔每日同步：统一调度器真正调用每日管道、不再是 TODO 桩；声学改为按自然日聚合 + 缺失标记，甩掉"滑动窗口 vs 墙上时钟"错位；微调与冷启动共用 early-stopping；快照原子写；save_interval 走配置。测试 133 个用例全绿。文档结构：本 README（总览 + 现状分层）、`docs/TODO.md`（7 项实现落差修复记录）、`docs/VALIDATION.md`（三层验证方案与路线图））
+
+> v1.5 要点：单人系统；实时轨仅采集不报警；GRU 加健康门禁 / 冷启动兜底 / early-stopping / 微调防污染；判定链路修复（前向填充生效 / 观察期按训练后推理计数 / 严重级加幅度门槛）；移除时间编码死代码，特征统一为 10 维 `FEATURE_NAMES`。
