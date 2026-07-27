@@ -362,12 +362,18 @@ class RealtimeFeatureAggregator:
             utt_timestamp = timestamp + utt.get("start_sec", 0)
             self.utterances_buffer.append((utt_timestamp, utt))
 
-        # 清理过期数据
-        self._cleanup_old_data(timestamp)
+        # 清理过期数据（按墙上时钟，与 get_current_features 的读取过滤同一时间系统）
+        self._cleanup_old_data()
 
-    def _cleanup_old_data(self, current_time: float):
-        """移除超出时间窗口的数据"""
-        cutoff_time = current_time - self.window_seconds
+    def _cleanup_old_data(self, current_time: float | None = None):
+        """移除超出时间窗口的数据（buffer 内存看护）。
+
+        基准默认取墙上时钟 time.time()，而非传入的数据时间戳——这样窗口按系统
+        时间滚动，不会因老人静默、add 不触发而冻结在"最后一句话时刻"。与读取侧
+        _utterances_within_window 用同一把尺子。current_time 仅供测试注入。
+        """
+        ref = time.time() if current_time is None else current_time
+        cutoff_time = ref - self.window_seconds
         self.utterances_buffer = [
             (ts, utt) for ts, utt in self.utterances_buffer if ts >= cutoff_time
         ]

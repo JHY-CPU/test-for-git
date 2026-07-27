@@ -62,6 +62,19 @@ class TestWallClockWindow:
         feats = agg.get_current_features()
         assert feats["n_utterances"] == 0
 
+    def test_cleanup_uses_wall_clock_not_data_time(self):
+        """buffer 清理按墙上时钟：静默期后新增一句话，会连带清掉 >24h 的旧数据，
+        窗口不会冻结在"最后一句话时刻"。"""
+        agg = RealtimeFeatureAggregator(window_hours=24)
+        now = time.time()
+        # 预置一条 25h 前的旧数据
+        agg.utterances_buffer = [(now - 25 * 3600, _utt("sad"))]
+        # 老人现在说了一句话，触发 add → _cleanup_old_data()（默认取 time.time()）
+        agg.add_utterances([_utt("neutral")], now)
+        # 旧数据应被按墙上时钟清出 buffer，只剩刚才那条
+        assert len(agg.utterances_buffer) == 1
+        assert agg.utterances_buffer[0][1]["emotion"] == "neutral"
+
 
 class TestNaturalDayAggregation:
     def test_persist_and_aggregate_by_calendar_day(self):
