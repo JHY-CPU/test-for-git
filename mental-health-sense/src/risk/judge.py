@@ -113,6 +113,7 @@ def judge_risk_level(
 
     # 5. 分类风险类型
     active_risk_types = []
+    risk_type_qualifies = {}  # {risk_key: 今天是否达标}，供 quick_judge 写回日志
     try:
         residual_stats = load_residual_stats(elder_id)
 
@@ -120,13 +121,18 @@ def judge_risk_level(
         latest_result = daily_results[-1] if daily_results else {}
         feature_residuals = latest_result.get("feature_residuals", {})
 
+        today_is_deviation = bool(latest_result.get("is_deviation", False))
         if feature_residuals and residual_stats is not None:
             risk_type_results = classify_risk_type(
                 feature_residuals=feature_residuals,
                 residual_stats=residual_stats,
                 daily_results=daily_results,
+                today_is_deviation=today_is_deviation,
             )
             active_risk_types = [r for r in risk_type_results if r.get("is_active")]
+            risk_type_qualifies = {
+                r["risk_key"]: bool(r.get("qualifies", False)) for r in risk_type_results
+            }
     except Exception as e:
         logger.debug(f"  └─ 风险类型分类跳过: {e}")
 
@@ -147,6 +153,7 @@ def judge_risk_level(
         "risk_level": risk_level,
         "risk_label": risk_labels[risk_level],
         "risk_types": active_risk_types,
+        "risk_type_qualifies": risk_type_qualifies,
         "consecutive_deviation": consecutive_deviation,
         "avg_anomaly_7d": round(avg_anomaly, 4),
         "max_anomaly_7d": round(max_anomaly, 4),
@@ -193,6 +200,10 @@ def quick_judge(elder_id: str, today_date: str) -> dict:
     快速判定：加载最新推理结果后直接判定。
     适用于每日调度任务。
 
+    判定后把"今天各风险类型是否达标（qualifies）"写回今天的推理日志，
+    使次日的连续天数统计能读到今天——这是风险类型能连续累积、最终激活的关键。
+    （历史上 risk_types 从不写回日志，导致连续天数恒为 0、类型永不激活。）
+
     Args:
         elder_id: 老人ID
         today_date: 今日日期
@@ -200,5 +211,17 @@ def quick_judge(elder_id: str, today_date: str) -> dict:
     Returns:
         风险判定结果字典
     """
+    from src.utils.io import save_daily_result
+
     daily_results = load_daily_results(elder_id, n_days=7)
-    return judge_risk_level(elder_id, daily_results)
+    result = judge_risk_level(elder_id, daily_results)
+
+    # 把今天的 qualifies 写回今天的推理日志（保留 inference 已写入的全部字段）
+    qualifies = result.get("risk_type_qualifies")
+    if qualifies and daily_results:
+        today_log = daily_results[-1]
+        if today_log.get("date") == today_date:
+            today_log["risk_type_qualifies"] = qualifies
+            save_daily_result(elder_id, today_date, today_log)
+
+    return result

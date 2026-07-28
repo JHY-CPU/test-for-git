@@ -98,6 +98,7 @@ def classify_risk_type(
     residual_stats: dict[str, np.ndarray],
     consecutive_days: dict[str, int] | None = None,
     daily_results: list[dict] | None = None,
+    today_is_deviation: bool = True,
 ) -> list[dict]:
     """
     根据当日特征残差判断风险类型。
@@ -178,26 +179,37 @@ def classify_risk_type(
 
         final_score = total_score / weight_sum if weight_sum > 0 else 0.0
 
-        if daily_results is not None:
-            cons_days = _count_consecutive_risk_type(risk_key, daily_results)
-        else:
-            cons_days = consecutive_days.get(risk_key, 0)
-
-        # 激活需三者同时成立，缺一不可——这是全系统"克制预警"理念的最后一道闸：
-        #   1) 至少 1 个特征"方向性"超标   → 排除纯幅度大但方向不对的噪声
-        #   2) 加权综合分 > 1.0            → 排除单特征擦线、整体其实平稳的情况
-        #   3) 连续天数达标                → 排除单日波动，只认真正成"趋势"的偏离
-        is_active = (
-            len(exceeding_features) >= 1
+        # 当天"达标"信号：今天整体已判偏离 且 ≥1 特征方向性超标 且 加权综合分 > 1.0。
+        # 刻意不含连续天数——它只回答"今天够不够格"。连续天数另算。
+        #
+        # today_is_deviation 这道闸是关键：风险"类型"是对"今天整体异常"的细化分类，
+        # 若今天整体都不算偏离（anomaly_score 未超动态阈值），就不该分出任何类型。
+        # 否则类型判定用的是固定门槛 final_score>1.0，不受动态阈值保护——正常日
+        # |z| 本就常在 1 附近，会频繁误 qualifies、攒够连续天数后把三类都误激活
+        # （范围2 诊断：纯高斯正常数据也全线误报）。挂靠整体偏离后，正常日直接不分类。
+        qualifies_today = (
+            today_is_deviation
+            and len(exceeding_features) >= 1
             and final_score > 1.0
-            and cons_days >= rule.consecutive_days
         )
+
+        if daily_results is not None:
+            cons_days = _count_consecutive_risk_type(
+                risk_key, daily_results, qualifies_today
+            )
+        else:
+            cons_days = consecutive_days.get(risk_key, 0) + (1 if qualifies_today else 0)
+
+        # 激活 = 今天达标 且 连续达标天数 ≥ 门槛（3/3/5 天）。这仍是"克制预警"的闸：
+        # 方向匹配(qualifies 里) + 幅度门槛(qualifies 里) + 连续趋势(cons_days)。
+        is_active = qualifies_today and cons_days >= rule.consecutive_days
 
         results.append({
             "risk_type": rule.name,
             "risk_key": risk_key,
             "score": round(final_score, 4),
             "is_active": is_active,
+            "qualifies": qualifies_today,   # 供 quick_judge 写回日志，次日统计连续天数
             "exceeding_features": exceeding_features,
             "consecutive_days": cons_days,
             "threshold_required": rule.consecutive_days,
@@ -206,30 +218,52 @@ def classify_risk_type(
     return results
 
 
+def _day_qualifies(day_result: dict, risk_key: str) -> bool:
+    """某历史日志里，该风险类型当天是否"达标"（方向+幅度，不含连续天数）。
+
+    权威来源是 quick_judge 写回的 `risk_type_qualifies` 字典。为兼容旧日志，
+    退而读 `risk_types` 里该类型的 qualifies/is_active 标志。
+    """
+    quals = day_result.get("risk_type_qualifies")
+    if isinstance(quals, dict) and risk_key in quals:
+        return bool(quals[risk_key])
+    # 兼容旧格式：从 risk_types 列表里找
+    for rt in day_result.get("risk_types", []) or []:
+        if isinstance(rt, dict) and rt.get("risk_key") == risk_key:
+            return bool(rt.get("qualifies", rt.get("is_active", False)))
+        if rt == risk_key:
+            return True
+    return False
+
+
 def _count_consecutive_risk_type(
     risk_key: str,
     daily_results: list[dict],
+    today_qualifies: bool | None = None,
 ) -> int:
-    """统计某个风险类型连续活跃的天数"""
-    # 从最近一天往回数（reversed），一旦遇到"该风险未活跃"的一天就停——
-    # 这样数出的是"截至今天的连续活跃天数"，中间断过就不算连续。
+    """统计某风险类型"截至今天"的连续达标天数。
+
+    关键修复：今天的达标信号用**现算的** today_qualifies（今天的日志此刻还没写回
+    risk_type_qualifies，读日志会漏掉今天，导致永远数不到自己 → 死循环）。
+    历史天数从日志的 risk_type_qualifies 读。中间断过即停（真正的"连续"）。
+
+    Args:
+        today_qualifies: 今天是否达标（现算）。None 时退化为纯读日志（如周报回溯场景）。
+    """
+    results = daily_results
     count = 0
-    for day_result in reversed(daily_results):
-        risk_types = day_result.get("risk_types", [])
-        if isinstance(risk_types, list):
-            # for-else：只有内层循环"正常跑完（没 break）"才执行 else。
-            # 命中且活跃 → break → 跳过 else → 继续往前一天数；
-            # 这一天里没找到活跃的该风险 → 不 break → 触发 else → 连续中断，收尾返回。
-            for rt in risk_types:
-                if isinstance(rt, dict) and rt.get("risk_key") == risk_key:
-                    if rt.get("is_active"):
-                        count += 1
-                        break
-                elif rt == risk_key:  # 兼容旧格式：risk_types 直接存 key 字符串
-                    count += 1
-                    break
-            else:
-                break
+
+    # 今天：用现算值。若今天就不达标，连续数直接 0。
+    if today_qualifies is not None:
+        if not today_qualifies:
+            return 0
+        count = 1
+        results = daily_results[:-1] if daily_results else []  # 今天那条已用现算值，往前数
+
+    # 历史：从近到远，遇到第一个"不达标"就停
+    for day_result in reversed(results):
+        if _day_qualifies(day_result, risk_key):
+            count += 1
         else:
             break
     return count
