@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import shutil
 import sys
 from datetime import datetime, timedelta
@@ -192,13 +193,20 @@ def cleanup(velder: str):
 
 def run_scenario(scn: dict, config) -> dict:
     """跑一个场景：造数据→逐日管道→day21训练。返回观测到的最高等级与激活过的类型。"""
+    import torch
     from src.scheduler.daily_job import run_daily_pipeline, load_raw_sensors
     from src.baseline.trainer import train_initial_baseline
 
     velder = "D_" + scn["id"]
     cleanup(velder)
     root = get_project_root()
-    seed = abs(hash(scn["id"])) % 100000
+    # 用 hashlib 而非内置 hash()：内置 hash() 对字符串每次进程启动结果都不同
+    # （PYTHONHASHSEED 随机化），会导致每次跑出的合成数据不同、通过数在 4/8~6/8 飘。
+    # hashlib.md5 是确定性的，保证同一场景每次都得到同一个种子 → 结果可复现。
+    seed = int(hashlib.md5(scn["id"].encode()).hexdigest(), 16) % 100000
+    # 固定 PyTorch 随机种子：GRU 初始权重默认随机，会让每次训出的模型略有不同、
+    # 边界场景通过/不通过翻转。连同上面确定性的数据种子，一起保证整体结果可复现。
+    torch.manual_seed(seed)
 
     series = gen_normal_series(seed)
     if scn.get("inject"):
