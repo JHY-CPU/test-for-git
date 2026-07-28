@@ -18,17 +18,33 @@
 
 > 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
 
-**代码层已完工并验证**：133 个单元测试全部通过；统一系统生产链路（实时采集 → 每日趋势推理 → 预警）已端到端打通。`docs/TODO.md` 记录的 7 项"实现落差"（P0×2 / P1×2 / P2×3）已全部收口。
+**核心算法层已完工并验证**：134 个单元测试全部通过；统一系统生产链路（实时采集 → 每日趋势推理 → 预警）已端到端打通。`docs/TODO.md` 记录的 7 项"实现落差"（P0×2 / P1×2 / P2×3）已全部收口。
+
+> ⚠️ **实现成熟度：算法是真的，硬件对接与外部服务大多还是"桩/模拟"。** 这是科研原型阶段的正常状态，但必须讲清楚，避免误以为"能上真机"：
+
+| 部分 | 状态 | 说明 |
+|------|------|------|
+| GRU 基线 / EWMA / 风险判定 / 数据管道 | ✅ 真实可用 | 有算法、有测试，是系统的核心 |
+| 传感器**真实采集**（睡眠雷达/摄像头/麦克风/SenseVoice 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
+| 实时**音高** `pitch_variability` | ⚠️ **名存实亡** | SenseVoice Small 不输出 F0，`pitch_mean` 被写死 200.0，实时路径下该特征无意义 |
+| RTSP 摄像头音频 | ⚠️ 占位（返回静音） | 真实 ffmpeg/gstreamer 抽音未实现 |
+| 预警**推送**（子女App/短信/网格员） | ⚠️ 模拟 | `alert.py` 只写日志字符串，未接真实推送服务 |
+| 周报 LLM | ⚠️ 待核对 | 模型 id `claude-sonnet-5` 可能无效，有规则模板兜底 |
+
+**一句话**：现在能端到端跑通、能验证算法逻辑，靠的是**模拟/文件数据**；接真实设备与推送服务是后续工作。
 
 系统验证分三层，证据强度依次递增（完整方案见 `docs/VALIDATION.md`）：
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 133 单测 + 端到端冒烟，统一链路已打通 |
-| **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 消融与敏感性分析待落地；**前置**是先把仿真改成"非循环" |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 134 单测 + 端到端冒烟（`validate_synthetic.py`），统一链路已打通 |
+| **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 已落地判别力脚本 `validate_discriminative.py`（8 场景，含混淆项），当前稳定 6/8；已借此修复 2 个真实缺陷，暴露 1 个"串味"待办（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
-> ⚠️ **当前最大验证缺口**：`generate_simulation_data.py` 注入的异常方向与 `rules.py` 检测方向完全一致，属"按答案出题"——只能证明链路通（层次 A），证明不了判别能力。推进层次 B 前必须先打破这个循环（`docs/VALIDATION.md` 阶段 1 的前置任务）。
+> ✅ **"循环论证"缺口已部分打破**：新脚本 `validate_discriminative.py` 的正常天带真实噪声（AR(1)+周节律）并加入混淆项（感冒/周末安静/单日尖峰），不再是"按答案出题"。它已证明判别力（当前 6/8），并借此修复了 2 个真实缺陷、暴露 1 个"串味"待办。
+> ⚠️ 但**老的 `generate_simulation_data.py` 仍是循环的**（异常方向=检测方向），只能测链路、测不了判别力。绝对数字仍需真实数据校准（层次 C）。
+>
+> 📖 GRU 训练的完整细节（结构/样本/耗时/无验证集设计/建档期实验/基线总览）见 `docs/TRAINING.md`。
 
 **诚实定位**：特征选择有文献依据，但特征的测量效度与真实场景误报率需真实设备验证。本系统做**趋势预警**，**不做临床诊断**。
 
@@ -40,11 +56,17 @@
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 生成模拟数据（1位老人 × 50天）
+# 2. 生成模拟数据（1位老人 × 60天）
 python scripts/generate_simulation_data.py
 
 # 3. 冷启动训练（建档期 Day 21）
 python scripts/train_all_baselines.py
+
+#    模拟数据为 60 天，异常注入在第 40-46 天（已避开建档期 1-21 + 观察期 22-28），
+#    正式运行期(29+)能完整看到"正常→异常升级→恢复"的预警过程。
+#    也可直接用验证脚本查看：
+#      python scripts/validate_synthetic.py       # 60天跑通验证
+#      python scripts/validate_discriminative.py  # 8场景判别力验证
 
 # 4. 每日推理
 python scripts/run_daily_pipeline.py --date 2026-08-15
@@ -138,18 +160,20 @@ mental-health-sense/
 │   └── unified_scheduler.py         # 统一系统调度器
 │
 ├── scripts/                         # 可执行脚本
-│   ├── generate_simulation_data.py  # 生成50天模拟数据（单人）
+│   ├── generate_simulation_data.py  # 生成60天模拟数据（异常注入40-46，避开建档+观察期）
 │   ├── train_all_baselines.py       # 冷启动训练
 │   ├── run_daily_pipeline.py        # 手动触发每日推理
 │   ├── start_realtime_monitor.py    # 启动实时监测
 │   ├── start_unified_system.py      # 启动统一系统（生产环境）
 │   ├── demo_realtime.py             # 实时系统演示（无需硬件）
 │   ├── test_realtime_system.py      # 实时模块测试
-│   ├── test_unified_system.py       # 统一系统集成测试
-│   ├── test_simple.py               # 快速冒烟测试
+│   ├── test_unified_system.py       # 统一系统集成测试（独立脚本，非pytest）
+│   ├── test_simple.py               # 快速冒烟测试（独立脚本，非pytest）
+│   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
+│   ├── validate_discriminative.py   # 【范围2】合成数据判别力验证（8场景+混淆项，层次B）
 │   └── health_check.py              # 项目完整性检查
 │
-├── tests/                           # 单元测试（133 个用例，确定性可复现）
+├── tests/                           # 单元测试（134 个用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -393,11 +417,11 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 ## 模拟数据档案
 
 本系统为**单人系统**，只分析一位老人（默认 ID `E001`）。`generate_simulation_data.py`
-为该老人生成 50 天模拟数据，其中注入一段异常，用于端到端验证趋势检测能力：
+为该老人生成 60 天模拟数据，其中注入一段异常，用于端到端验证趋势检测能力：
 
-| ID | 注入异常 | 验证目标 |
-|------|----------|----------|
-| E001 | Day 25-30 抑郁特征注入（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑） | 连续偏离 → 逐级升到3级预警（抑郁风险） |
+| ID | 时间线 | 注入异常 | 验证目标 |
+|------|--------|----------|----------|
+| E001 | 建档1-21 / 观察22-28 / 正常29-39 / **异常40-46** / 恢复47-60 | Day 40-46 抑郁特征注入（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），已避开建档期+观察期 | 连续偏离 → 逐级升到3级预警（抑郁风险）→ 恢复降级 |
 
 > 接入真实老人数据时，可沿用 `E001` 这个 ID，或在 `generate_simulation_data.py` 的
 > `ELDER_ID` 处改成你自己的编号——它只是 `data/features/{ID}/`、`data/raw/*/{ID}/`
@@ -757,7 +781,9 @@ MIT
 
 ---
 
-**最后更新**：2026-07-27  
-**项目版本**：v1.6（在 v1.5 基础上打通统一系统链路并修复实时↔每日同步：统一调度器真正调用每日管道、不再是 TODO 桩；声学改为按自然日聚合 + 缺失标记，甩掉"滑动窗口 vs 墙上时钟"错位；微调与冷启动共用 early-stopping；快照原子写；save_interval 走配置。测试 133 个用例全绿。文档结构：本 README（总览 + 现状分层）、`docs/TODO.md`（7 项实现落差修复记录）、`docs/VALIDATION.md`（三层验证方案与路线图））
+**最后更新**：2026-07-28  
+**项目版本**：v1.7（在 v1.6 基础上：①冷启动建档期 14→21 天并提为可配置项 `build_days`，附 20-seed 过拟合对比实验；②修复风险类型分类两处缺陷——"永不激活"（日志不写回 risk_types）与"正常日误激活"（类型判定挂靠 is_deviation）；③新增合成数据验证脚本 `validate_synthetic.py`（范围1跑通）与 `validate_discriminative.py`（范围2判别力，含真实噪声+混淆项）；④新增 `docs/TRAINING.md` GRU 训练详解。⑤修复模拟数据异常注入天数（25-30 → 40-46）与总天数（50 → 60），避开新建档期+观察期。测试 134 全绿。已知待办：跨类型"串味"（共享GRU溢出）、真实传感器采集/推送仍为桩。文档：本 README（总览+现状）、`docs/TRAINING.md`（训练详解）、`docs/TODO.md`、`docs/VALIDATION.md`（三层验证+§7执行记录））
+
+> v1.6 要点：打通统一系统链路（统一调度器真正调用每日管道）；声学按自然日聚合 + 缺失标记；微调与冷启动共用 early-stopping；统一系统快照原子写；save_interval 走配置。
 
 > v1.5 要点：单人系统；实时轨仅采集不报警；GRU 加健康门禁 / 冷启动兜底 / early-stopping / 微调防污染；判定链路修复（前向填充生效 / 观察期按训练后推理计数 / 严重级加幅度门槛）；移除时间编码死代码，特征统一为 10 维 `FEATURE_NAMES`。
