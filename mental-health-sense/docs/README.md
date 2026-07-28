@@ -43,7 +43,7 @@ pip install -r requirements.txt
 # 2. 生成模拟数据（1位老人 × 50天）
 python scripts/generate_simulation_data.py
 
-# 3. 冷启动训练（Day 14）
+# 3. 冷启动训练（建档期 Day 21）
 python scripts/train_all_baselines.py
 
 # 4. 每日推理
@@ -302,7 +302,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ### 1. 训练数据健康门禁（防"学坏"）
 
-**问题**：若建档期（前 14 天）恰好混入老人状态不好的日子，GRU 会把异常学成
+**问题**：若建档期（默认前 21 天）恰好混入老人状态不好的日子，GRU 会把异常学成
 "正常基线"，之后再也报不出来。
 
 **做法**（`src/baseline/data_health.py`，冷启动时调用）：训练前用 **MAD（中位数绝对
@@ -332,7 +332,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ### 4. 过拟合抑制与可回滚
 
-- **early-stopping**：冷启动 14 天仅约 7 个训练样本，150 epoch 几乎必然过拟合。连续
+- **early-stopping**：冷启动建档期（默认 21 天）约 14 个训练样本，150 epoch 易过拟合。连续
   `patience` 轮 loss 无改善则提前停止，并**回滚到最优权重**。冷启动与每周微调**共用同一
   训练循环** `_train_loop`（冷启动 patience=20、微调 patience=10），两条路径的过拟合抑制
   策略一致，不再是微调跑满固定轮数。
@@ -415,7 +415,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 # 生成模拟数据
 python scripts/generate_simulation_data.py
 
-# 训练基线模型（Day 14）
+# 训练基线模型（建档期 Day 21）
 python scripts/train_all_baselines.py
 
 # 每日推理（默认老人 E001）

@@ -21,6 +21,10 @@ gru:
 # ===== 训练参数 =====
 training:
   initial:
+    build_days: 21           # 建档期天数（→ build_days-7 个训练样本）。14 天(7样本)过拟合明显：
+                             # 多种子实验中训练残差仅为留出残差的一半，单天静态判定 FPR 高；
+                             # 提到 21 天(14样本)后过拟合 gap 减 1/3、FPR 大幅下降、检出率不变。
+                             # 代价是多等 7 天建档盲区（有冷启动兜底顶着）。详见 docs/TRAINING.md。
     epochs: 150
     lr: 0.001
     patience: 20             # early-stopping：连续N轮loss无改善则提前停止（防小样本过拟合）

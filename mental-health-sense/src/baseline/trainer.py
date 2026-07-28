@@ -2,7 +2,7 @@
 冷启动训练与每周微调
 
 核心函数：
-    - train_initial_baseline(): Day 14冷启动，首次训练GRU + 初始化EWMA
+    - train_initial_baseline(): 建档期（默认21天）冷启动，首次训练GRU + 初始化EWMA
     - weekly_retrain(): 每周微调，用最近30天数据更新模型
 """
 
@@ -88,15 +88,15 @@ def train_initial_baseline(
     config: dict | None = None,
 ) -> tuple[PersonalBaselineGRU, StandardScaler, dict, CumulativeEWMABaseline]:
     """
-    Day 14结束时调用，建立该老人的个人基线。
+    建档期（默认 21 天，配置 training.initial.build_days）结束时调用，建立个人基线。
 
-    步骤：
-        1. 读取前14天特征 → (14, 10)
+    步骤（以默认 21 天为例）：
+        1. 读取前 build_days 天特征 → (21, 10)
         2. StandardScaler.fit → scaler.pkl
-        3. 构建7→1滑动窗口 → 7个训练样本
+        3. 构建7→1滑动窗口 → (build_days-7)=14 个训练样本
         4. 训练GRU (150 epoch)
         5. 计算训练集残差统计 → residual_stats.pkl
-        6. 初始化EWMA（14天异常分=0滚动更新）
+        6. 初始化EWMA（逐样本滚动更新）
         7. 保存 gru.pth
 
     Args:
@@ -107,7 +107,7 @@ def train_initial_baseline(
         (model, scaler, residual_stats, ewma)
 
     Raises:
-        ValueError: 数据不足14天时
+        ValueError: 数据不足 build_days 天时
     """
     logger.info(f"冷启动训练开始: elder_id={elder_id}")
 
@@ -121,6 +121,7 @@ def train_initial_baseline(
     ewma_cfg = config.get("ewma", {})
 
     window = gru_cfg.get("window", 7)
+    build_days = train_cfg.get("build_days", 21)  # 建档期天数（→ build_days-window 个样本）
     epochs = train_cfg.get("epochs", 150)
     lr = train_cfg.get("lr", 0.001)
     patience = train_cfg.get("patience", 20)
@@ -133,13 +134,13 @@ def train_initial_baseline(
     df = load_features_csv(elder_id)
     valid_df = df[df["data_quality"] == "valid"]
 
-    if len(valid_df) < 14:
+    if len(valid_df) < build_days:
         raise ValueError(
-            f"需要至少14天有效数据，当前只有{len(valid_df)}天"
+            f"需要至少{build_days}天有效数据，当前只有{len(valid_df)}天"
         )
 
     from src.baseline.scaler_utils import FEATURE_NAMES
-    data = valid_df[FEATURE_NAMES].to_numpy(dtype=np.float64)[:14]  # (14, 10)
+    data = valid_df[FEATURE_NAMES].to_numpy(dtype=np.float64)[:build_days]  # (build_days, 10)
 
     logger.info(f"  └─ 加载 {len(data)} 天特征数据")
 
@@ -207,7 +208,7 @@ def train_initial_baseline(
         num_layers=num_layers,
         dropout=dropout,
     )
-    # early-stopping：冷启动样本极少（14天仅约7个窗口样本），高 epoch 易过拟合。
+    # early-stopping：冷启动样本少（21天约14个窗口样本），高 epoch 易过拟合。
     # 连续 patience 轮 loss 无改善则提前停止，并回滚到最优权重（见 _train_loop）。
     best_loss = _train_loop(model, X, y, epochs=epochs, lr=lr, patience=patience)
 
