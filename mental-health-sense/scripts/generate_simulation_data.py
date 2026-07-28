@@ -1,5 +1,5 @@
 """
-50天模拟数据生成器（单人系统）
+60天模拟数据生成器（单人系统）
 
 为唯一被监测的老人生成模拟传感器数据，用于端到端测试与演示。
 生成的数据落在 data/features/{ELDER_ID}/ 和 data/raw/*/{ELDER_ID}/ 下，
@@ -47,8 +47,11 @@ ELDER_CONFIGS = {
             "social_turns": (35, 5),
         },
         "anomaly": {
-            "start_day": 25,
-            "end_day": 30,
+            # 异常注入在 Day 40-46：必须避开"建档期(1-21天)+观察期(22-28天)"，
+            # 否则异常落在观察期内会被"只记录不报警"盖掉，演示看不到预警。
+            # 时间线：建档1-21 / 观察22-28 / 正常29-39 / 异常40-46 / 恢复47-60。
+            "start_day": 40,
+            "end_day": 46,
             "features": {
                 "sad_ratio": 0.20,
                 "avg_speed": 2.5,
@@ -56,7 +59,7 @@ ELDER_CONFIGS = {
                 "distress_events": 3.0,
             },
         },
-        "description": "Day 25-30 注入抑郁特征（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），用于演示连续偏离触发预警",
+        "description": "Day 40-46 注入抑郁特征（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），已避开建档期+观察期，用于演示连续偏离触发预警",
     },
 }
 
@@ -135,11 +138,11 @@ def generate_daily_vector(
 
 def generate_all_data(
     output_dir: str | Path,
-    n_days: int = 50,
+    n_days: int = 60,
     start_date: str = "2026-07-01",
 ):
     """
-    生成被监测老人的50天特征数据。
+    生成被监测老人的 n_days 天特征数据（默认 60 天）。
 
     数据存储结构：
         data/features/{elder_id}/features.csv
@@ -291,7 +294,7 @@ if __name__ == "__main__":
     project_root = Path(__file__).resolve().parent.parent
     output_path = project_root
 
-    generate_all_data(output_path, n_days=50, start_date="2026-07-01")
+    generate_all_data(output_path, n_days=60, start_date="2026-07-01")
 
     print("\n下一步:")
     print("  1. 查看生成的数据: ls data/features/*/")
