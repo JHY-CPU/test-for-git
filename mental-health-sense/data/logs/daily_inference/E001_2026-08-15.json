@@ -1,28 +1,28 @@
 {
   "elder_id": "E001",
   "date": "2026-08-15",
-  "anomaly_score": 1.1632,
-  "static_threshold": 1.3127,
-  "ewma_threshold": 1.3127,
-  "dynamic_threshold": 1.3127,
-  "is_deviation": false,
+  "anomaly_score": 3.376,
+  "static_threshold": 1.6893,
+  "ewma_threshold": 7.1925,
+  "dynamic_threshold": 1.6893,
+  "is_deviation": true,
   "feature_residuals": {
-    "sad_ratio": 2.0192,
-    "avg_speed": 0.9318,
-    "pitch_variability": 1.0544,
-    "distress_events": 1.3788,
-    "sleep_efficiency": 0.9135,
-    "deep_sleep_ratio": 0.0997,
-    "sfi": 1.2886,
-    "hrv_rmssd": 0.665,
-    "daily_activity": 1.0705,
-    "social_turns": 1.659
+    "sleep_efficiency": 0.3025,
+    "deep_sleep_ratio": -4.8147,
+    "sfi": 8.3139,
+    "hrv_rmssd": -5.6377,
+    "daily_activity": 2.4884,
+    "social_turns": -1.1471
   },
-  "consecutive_deviation_days": 0,
-  "ewma_n": 8,
-  "ewma_mean": 0.3643,
-  "ewma_std": 0.2377,
+  "consecutive_deviation_days": 1,
+  "ewma_n": 26,
+  "ewma_mean": 2.095,
+  "ewma_std": 2.0361,
   "data_quality": "valid",
   "status": "success",
-  "in_observation_period": false
+  "in_observation_period": false,
+  "risk_type_qualifies": {
+    "sleep_problem": true,
+    "social_isolation": true
+  }
 }

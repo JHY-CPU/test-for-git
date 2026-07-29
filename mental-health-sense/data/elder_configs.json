@@ -1,6 +1,6 @@
 {
   "E001": {
     "name": "示例老人",
-    "description": "Day 25-30 注入抑郁特征（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），用于演示连续偏离触发预警"
+    "description": "Day 40-46 注入睡眠恶化特征（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期+观察期，用于演示连续偏离触发预警"
   }
 }

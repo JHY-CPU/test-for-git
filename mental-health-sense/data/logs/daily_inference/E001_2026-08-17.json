@@ -1,0 +1,28 @@
+{
+  "elder_id": "E001",
+  "date": "2026-08-17",
+  "anomaly_score": 0.9372,
+  "static_threshold": 1.6893,
+  "ewma_threshold": 7.0385,
+  "dynamic_threshold": 1.6893,
+  "is_deviation": false,
+  "feature_residuals": {
+    "sleep_efficiency": 1.0323,
+    "deep_sleep_ratio": 0.1457,
+    "sfi": 1.2607,
+    "hrv_rmssd": -1.4277,
+    "daily_activity": -1.3041,
+    "social_turns": -0.6802
+  },
+  "consecutive_deviation_days": 0,
+  "ewma_n": 28,
+  "ewma_mean": 1.9873,
+  "ewma_std": 1.9634,
+  "data_quality": "valid",
+  "status": "success",
+  "in_observation_period": false,
+  "risk_type_qualifies": {
+    "sleep_problem": false,
+    "social_isolation": false
+  }
+}
