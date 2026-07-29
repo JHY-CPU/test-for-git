@@ -21,14 +21,12 @@ WEEKLY_REPORT_SYSTEM_PROMPT = """你是一位老年心理健康分析助手。�
 WEEKLY_REPORT_USER_TEMPLATE = """请根据以下老人本周的监测数据，生成一份周报。
 
 【本周数据】
-- 情绪低落的日占比趋势：{sad_trend}
 - 社交互动频次变化：{social_trend}
 - 睡眠质量变化：{sleep_trend}
 - 日常活动量变化：{activity_trend}
 - 异常天数：{deviation_days}天（共7天）
 
 【上周对比】
-{sad_week_change}
 {social_week_change}
 {sleep_week_change}
 {activity_week_change}
@@ -47,14 +45,12 @@ def generate_rule_based_report(
     elder_id: str,
     week_start: str,
     week_end: str,
-    sad_trend: str,
     social_trend: str,
     sleep_trend: str,
     activity_trend: str,
     deviation_days: int,
     risk_label: str,
     risk_types: list[str],
-    sad_week_change: str = "无明显变化",
     social_week_change: str = "无明显变化",
     sleep_week_change: str = "无明显变化",
     activity_week_change: str = "无明显变化",
@@ -73,14 +69,6 @@ def generate_rule_based_report(
         opener = f"{elder_id}老人本周有{deviation_days}天出现偏离常态的情况，需要关注。"
     else:
         opener = f"{elder_id}老人本周有{deviation_days}天明显偏离日常状态，建议多加留意。"
-
-    # 情绪线
-    sad_map = {
-        "上升": "情绪低落的天数有所增加",
-        "下降": "情绪状态相比上周有好转",
-        "平稳": "情绪状态总体平稳",
-    }
-    sad_line = sad_map.get(sad_trend, "情绪状态无明显变化")
 
     # 社交线
     social_map = {
@@ -109,7 +97,7 @@ def generate_rule_based_report(
     else:
         advice = "一切正常，保持现有的联系频率就好。"
 
-    report = f"{opener}{sad_line}；{social_line}；{sleep_line}。{advice}"
+    report = f"{opener}{social_line}；{sleep_line}。{advice}"
 
     return report
 
@@ -127,14 +115,12 @@ def fill_prompt(
     """
     # 确保所有必需变量都有默认值
     defaults = {
-        "sad_trend": "平稳",
         "social_trend": "平稳",
         "sleep_trend": "平稳",
         "activity_trend": "平稳",
         "deviation_days": 0,
         "risk_label": "正常",
         "risk_types": "无",
-        "sad_week_change": "情绪方面与上周相比无明显变化",
         "social_week_change": "社交方面与上周相比无明显变化",
         "sleep_week_change": "睡眠方面与上周相比无明显变化",
         "activity_week_change": "活动方面与上周相比无明显变化",

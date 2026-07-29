@@ -42,7 +42,6 @@ def run_daily_pipeline(
             - sleep: 睡眠雷达数据
             - activity: PIR+IPC数据
             - social: 拾音+音箱数据
-            - acoustic: SenseVoice数据
             None表示自动从data/raw/读取
         config: 全局配置
 
@@ -69,7 +68,6 @@ def run_daily_pipeline(
                 sleep_data=raw_data.get("sleep"),
                 activity_data=raw_data.get("activity"),
                 social_data=raw_data.get("social"),
-                acoustic_data=raw_data.get("acoustic"),
             )
         else:
             # 从data/raw/目录自动读取
@@ -185,7 +183,7 @@ def _cold_start_fallback(
     Args:
         elder_id: 老人ID
         date_str: 今日日期
-        today_vec: (10,) 今日已填充的特征向量
+        today_vec: (6,) 今日已填充的特征向量
         config: 全局配置
 
     Returns:
@@ -264,7 +262,7 @@ def load_raw_sensors(elder_id: str, date_str: str) -> dict:
     """从 data/raw/ 读取四路传感器原始数据。
 
     Returns:
-        {"sleep":..., "activity":..., "social":..., "acoustic":...}，
+        {"sleep":..., "activity":..., "social":...}，
         缺失的路为 None。供 run_daily_pipeline 的 raw_data 参数使用。
     """
     import json
@@ -283,17 +281,15 @@ def load_raw_sensors(elder_id: str, date_str: str) -> dict:
         "sleep": _load_json("sleep"),
         "activity": _load_json("activity"),
         "social": _load_json("social"),
-        "acoustic": _load_json("acoustic"),
     }
 
 
 def _load_raw_and_aggregate(elder_id: str, date_str: str):
-    """从 data/raw/ 目录自动读取原始传感器数据并聚合为 10 维特征向量。"""
+    """从 data/raw/ 目录自动读取原始传感器数据并聚合为 6 维特征向量。"""
     raw = load_raw_sensors(elder_id, date_str)
     return aggregate_daily_features(
         date_str=date_str,
         sleep_data=raw["sleep"],
         activity_data=raw["activity"],
         social_data=raw["social"],
-        acoustic_data=raw["acoustic"],
     )

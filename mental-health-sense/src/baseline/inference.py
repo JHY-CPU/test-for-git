@@ -139,8 +139,8 @@ def daily_inference(
         past_7 = past_7[-7:]
 
     # 3. 归一化
-    past_7_norm = transform_data(scaler, past_7)  # (7, 10)
-    today_norm = transform_data(scaler, today_vec)  # (10,)
+    past_7_norm = transform_data(scaler, past_7)  # (7, 6)
+    today_norm = transform_data(scaler, today_vec)  # (6,)
 
     # 4. GRU预测
     input_tensor = torch.tensor(
@@ -148,7 +148,7 @@ def daily_inference(
     )
     model.eval()
     with torch.no_grad():
-        pred_norm = model(input_tensor).numpy().flatten()  # (10,)
+        pred_norm = model(input_tensor).numpy().flatten()  # (6,)
 
     # 5. 计算加权残差
     # 带符号残差（actual - pred）保留"偏离方向"，供 classify_risk_type 做 up/down 方向判定；

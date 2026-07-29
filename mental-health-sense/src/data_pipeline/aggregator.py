@@ -1,13 +1,12 @@
 """
-数据聚合器：四维度传感器数据 → 10维特征向量
+数据聚合器：三维度传感器数据 → 6维特征向量
 
 数据来源：
     - 睡眠雷达（非接触式）→ sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
     - PIR传感器 + IPC骨骼追踪 → daily_activity, space_entropy
     - 拾音设备 + 智能音箱 → social_turns, speech_duration_ratio
-    - SenseVoice模型 → sad_ratio, avg_speed, pitch_variability, distress_events
 
-输出：每日一行10维健康特征向量（时间编码已移除）
+输出：每日一行6维健康特征向量（时间编码已移除）
 """
 
 from datetime import datetime, timedelta
@@ -110,75 +109,40 @@ def aggregate_social_features(social_data: dict | None) -> dict:
     return features
 
 
-def aggregate_acoustic_features(acoustic_data: dict | None) -> dict:
-    """
-    从SenseVoice模型提取声学/语义特征。
-
-    Args:
-        acoustic_data: 声学数据字典，包含:
-            - sad_ratio: 悲伤标签占比
-            - avg_speed: 平均语速（音节/秒）
-            - pitch_variability: 基频变异性（F0标准差）
-            - distress_events: 叹气/哭声频次
-
-    Returns:
-        {feature_name: value} 字典
-    """
-    features = {
-        "sad_ratio": None,
-        "avg_speed": None,
-        "pitch_variability": None,
-        "distress_events": None,
-    }
-
-    if acoustic_data is None:
-        return features
-
-    for key in features:
-        if key in acoustic_data and acoustic_data[key] is not None:
-            features[key] = float(acoustic_data[key])
-
-    return features
-
-
 def aggregate_daily_features(
     date_str: str,
     sleep_data: dict | None = None,
     activity_data: dict | None = None,
     social_data: dict | None = None,
-    acoustic_data: dict | None = None,
 ) -> np.ndarray:
     """
-    四维度原始数据 → 10维特征向量。
+    三维度原始数据 → 6维特征向量。
 
     Args:
         date_str: 日期字符串 "YYYY-MM-DD" (保留参数以保持接口兼容，但不再用于时间编码)
         sleep_data: 睡眠雷达数据
         activity_data: PIR + IPC数据
         social_data: 拾音 + 音箱数据
-        acoustic_data: SenseVoice数据
 
     Returns:
-        (10,) numpy数组，按 FEATURE_NAMES 顺序排列
+        (6,) numpy数组，按 FEATURE_NAMES 顺序排列
 
     Raises:
         DataInsufficientError: 当≥3个特征缺失时
     """
-    # 1. 聚合四维度特征
+    # 1. 聚合三维度特征
     sleep_feats = aggregate_sleep_features(sleep_data)
     activity_feats = aggregate_activity_features(activity_data)
     social_feats = aggregate_social_features(social_data)
-    acoustic_feats = aggregate_acoustic_features(acoustic_data)
 
-    # 2. 按 FEATURE_NAMES 顺序合并（10维健康特征）
+    # 2. 按 FEATURE_NAMES 顺序合并（6维健康特征）
     all_features = {}
-    all_features.update(acoustic_feats)   # sad_ratio, avg_speed, pitch_variability, distress_events
     all_features.update(sleep_feats)      # sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
     all_features.update(activity_feats)   # daily_activity
     all_features.update(social_feats)     # social_turns
 
     # 3. 统计缺失
-    health_names = FEATURE_NAMES  # 所有10维都是健康特征
+    health_names = FEATURE_NAMES  # 所有6维都是健康特征
     missing_features = [
         name for name in health_names if all_features.get(name) is None
     ]
@@ -188,7 +152,7 @@ def aggregate_daily_features(
     if missing_count >= 3:
         raise DataInsufficientError(missing_count, missing_features)
 
-    # 5. 组装10维向量
+    # 5. 组装6维向量
     vector = np.zeros(FEATURE_DIM, dtype=np.float64)
 
     for i, name in enumerate(FEATURE_NAMES):

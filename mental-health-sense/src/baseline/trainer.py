@@ -91,7 +91,7 @@ def train_initial_baseline(
     建档期（默认 21 天，配置 training.initial.build_days）结束时调用，建立个人基线。
 
     步骤（以默认 21 天为例）：
-        1. 读取前 build_days 天特征 → (21, 10)
+        1. 读取前 build_days 天特征 → (21, 6)
         2. StandardScaler.fit → scaler.pkl
         3. 构建7→1滑动窗口 → (build_days-7)=14 个训练样本
         4. 训练GRU (150 epoch)
@@ -140,7 +140,7 @@ def train_initial_baseline(
         )
 
     from src.baseline.scaler_utils import FEATURE_NAMES
-    data = valid_df[FEATURE_NAMES].to_numpy(dtype=np.float64)[:build_days]  # (build_days, 10)
+    data = valid_df[FEATURE_NAMES].to_numpy(dtype=np.float64)[:build_days]  # (build_days, 6)
 
     logger.info(f"  └─ 加载 {len(data)} 天特征数据")
 
@@ -181,15 +181,15 @@ def train_initial_baseline(
     # 2. 拟合Scaler（在清洗后的数据上拟合，避免归一化基准被异常天带偏）
     scaler = StandardScaler()
     scaler = fit_scaler(scaler, data)
-    data_norm = scaler.transform(data)  # (14, 10)
+    data_norm = scaler.transform(data)  # (14, 6)
 
     logger.info(f"  └─ Scaler拟合完成: mean={scaler.mean_[0]:.4f}, std={scaler.scale_[0]:.4f}")
 
     # 3. 构建滑动窗口样本
     X_list, y_list = [], []
     for i in range(window, len(data_norm)):
-        X_list.append(data_norm[i - window:i])  # (7, 10)
-        y_list.append(data_norm[i])              # (10,)
+        X_list.append(data_norm[i - window:i])  # (7, 6)
+        y_list.append(data_norm[i])              # (6,)
 
     if len(X_list) == 0:
         raise ValueError(
@@ -220,10 +220,10 @@ def train_initial_baseline(
     model.eval()
     with torch.no_grad():
         train_pred = model(X)
-        residuals = torch.abs(train_pred - y).numpy()  # (n_samples, 10)
+        residuals = torch.abs(train_pred - y).numpy()  # (n_samples, 6)
         residual_stats = {
-            "mean": residuals.mean(axis=0),  # (10,)
-            "std": residuals.std(axis=0),    # (10,)
+            "mean": residuals.mean(axis=0),  # (6,)
+            "std": residuals.std(axis=0),    # (6,)
         }
 
     logger.info(f"  └─ 残差统计: mean={residual_stats['mean'].mean():.4f}, "
@@ -349,7 +349,7 @@ def weekly_retrain(
     from src.utils.io import load_gru_model, load_residual_stats
 
     scaler = load_scaler(get_baseline_dir(elder_id) / "scaler.pkl")
-    data_norm = scaler.transform(recent)  # (n, 10)
+    data_norm = scaler.transform(recent)  # (n, 6)
 
     # 3. 加载现有模型
     model = load_gru_model(PersonalBaselineGRU, elder_id, "gru.pth")

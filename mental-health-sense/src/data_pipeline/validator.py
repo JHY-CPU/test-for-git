@@ -18,7 +18,7 @@ def validate_daily_data(
     校验每日数据质量。
 
     Args:
-        feature_vector: (10,) 特征向量
+        feature_vector: (6,) 特征向量
         missing_count: 当日无法填充的缺失特征数
         recent_quality: 最近数据质量记录（用于检测离线）
 
@@ -43,7 +43,7 @@ def validate_daily_data(
 
     # 检查极端异常值（传感器故障特征）
     # 负值视为异常
-    health_features = feature_vector[:10]
+    health_features = feature_vector[:FEATURE_DIM]
     if np.any(health_features < -100):
         return "insufficient"
 

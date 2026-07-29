@@ -1,8 +1,8 @@
 """
 个人基线GRU模型定义
 
-输入：过去7天的10维特征向量
-输出：第8天的10维特征向量预测
+输入：过去7天的6维特征向量
+输出：第8天的6维特征向量预测
 
 系统为被监测的老人独立维护一个GRU模型，预测残差作为"偏离个人常态"的量化依据。
 """
@@ -16,27 +16,27 @@ class PersonalBaselineGRU(nn.Module):
     个人基线GRU模型：用过去7天预测第8天。
 
     Architecture:
-        GRU(input_dim=10, hidden_dim=16, num_layers=1)
-        → Linear(16, 10)
+        GRU(input_dim=6, hidden_dim=16, num_layers=1)
+        → Linear(16, 6)
 
-    Input shape:  (batch, 7, 10)
-    Output shape: (batch, 10)
+    Input shape:  (batch, 7, 6)
+    Output shape: (batch, 6)
 
     Args:
-        feature_dim: 输入特征维度，默认10（健康特征，已移除时间编码）
+        feature_dim: 输入特征维度，默认6（健康特征，已移除时间编码）
         hidden_dim: GRU隐藏层维度，默认16（极轻量，防止过拟合）
         num_layers: GRU层数，默认1
         dropout: Dropout比率，默认0.2
 
     Usage:
         >>> model = PersonalBaselineGRU()
-        >>> x = torch.randn(32, 7, 10)  # (batch, 7天, 10特征)
-        >>> pred = model(x)              # (batch, 10)
+        >>> x = torch.randn(32, 7, 6)  # (batch, 7天, 6特征)
+        >>> pred = model(x)              # (batch, 6)
     """
 
     def __init__(
         self,
-        feature_dim: int = 10,
+        feature_dim: int = 6,
         hidden_dim: int = 16,
         num_layers: int = 1,
         dropout: float = 0.2,

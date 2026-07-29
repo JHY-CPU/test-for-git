@@ -23,13 +23,13 @@ def impute_missing(
     对当前日特征向量执行前向填充。
 
     Args:
-        current_vec: (10,) 当日特征向量（含NaN）
-        prev_day_vec: (10,) 昨日特征向量（用于填充），None时无法填充
+        current_vec: (6,) 当日特征向量（含NaN）
+        prev_day_vec: (6,) 昨日特征向量（用于填充），None时无法填充
         forward_fill_only: 是否仅使用前向填充（默认True，保持向后兼容）
 
     Returns:
         (filled_vector, missing_count, missing_features)
-        - filled_vector: 填充后的(10,)向量
+        - filled_vector: 填充后的(6,)向量
         - missing_count: 无法填充的特征数
         - missing_features: 无法填充的特征名称列表
     """
@@ -38,7 +38,7 @@ def impute_missing(
             f"Expected shape ({FEATURE_DIM},), got {current_vec.shape}"
         )
 
-    # 全部10维都是健康特征
+    # 全部6维都是健康特征
     health_features = current_vec
 
     # 找出缺失位置
@@ -82,7 +82,7 @@ def impute_sequence(
     对于连续缺失超过max_forward_days的特征，如果前后都有数据，使用线性插值。
 
     Args:
-        feature_sequence: (n_days, 10) 特征序列
+        feature_sequence: (n_days, 6) 特征序列
         max_forward_days: 前向填充的最大天数，超过则尝试插值
 
     Returns:
@@ -94,7 +94,7 @@ def impute_sequence(
     filled = feature_sequence.copy()
     degraded_features = {name: 0 for name in FEATURE_NAMES}
 
-    for feat_idx in range(FEATURE_DIM):  # 处理所有10维健康特征
+    for feat_idx in range(FEATURE_DIM):  # 处理所有6维健康特征
         feature_col = filled[:, feat_idx]
         missing_mask = np.isnan(feature_col)
 

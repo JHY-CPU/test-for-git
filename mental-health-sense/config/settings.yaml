@@ -12,7 +12,7 @@ paths:
 
 # ===== GRU 模型参数 =====
 gru:
-  feature_dim: 10  # 已移除时间编码，现在只有10维健康特征
+  feature_dim: 6  # 已移除时间编码与语音声学维，现在只有6维健康特征
   hidden_dim: 16
   num_layers: 1
   window: 7

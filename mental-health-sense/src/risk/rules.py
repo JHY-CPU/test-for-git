@@ -1,10 +1,9 @@
 """
 风险类型判定规则
 
-三种风险类型（全部基于趋势检测）：
-    - 抑郁风险：sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑
+两种风险类型（全部基于趋势检测）：
     - 睡眠问题：sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓
-    - 社交孤独：social_turns↓ + daily_activity↓ + sad_ratio↑
+    - 社交孤独：social_turns↓ + daily_activity↓
 
 每种类型有独立的特征贡献权重和阈值。
 所有风险均基于连续趋势判定，无单点触发。
@@ -20,8 +19,8 @@ class RiskRule:
     """单条风险判定规则"""
     name: str                      # 风险类型名称
     features: list[str]            # 相关特征名（按顺序对应direction和weight）
-    # directions 记录每个特征的"异常方向"而非只看绝对偏离。抑郁的语速是"变慢"才异常，
-    # 变快不算；睡眠效率是"下降"才异常。只看 |残差| 大会把方向相反的正常波动也误判成风险，
+    # directions 记录每个特征的"异常方向"而非只看绝对偏离。睡眠效率是"下降"才异常，
+    # 变好不算；睡眠碎片化是"上升"才异常。只看 |残差| 大会把方向相反的正常波动也误判成风险，
     # 所以必须按方向匹配（见 classify_risk_type 里的 up/down 分支）。
     directions: list[str]          # 异常方向: "up" / "down" / "any"
     weights: list[float]           # 特征在风险评分中的权重
@@ -43,26 +42,11 @@ def _load_risk_rules() -> dict[str, RiskRule]:
 
     weights = load_feature_weights()
 
-    # 三类风险的 threshold_ratio / consecutive_days 刻意不同：
-    #   - 抑郁：语音信号（SER 在老年嗓音上泛化性存疑）测量噪声较大，threshold_ratio 取 2.0 更严，
-    #     避免单路语音抖动就报；3 天连续确认。
+    # 两类风险的 threshold_ratio / consecutive_days 刻意不同：
     #   - 睡眠：雷达生理指标相对稳定可信，门槛放到 1.5 即可捕捉，仍要 3 天连续。
     #   - 社交孤独：本就是缓变过程（偶尔一两天少说话很正常），要 5 天连续才算趋势，
     #     否则会把老人正常的"安静日"误报成孤独。
     return {
-        "depression": RiskRule(
-            name="抑郁风险",
-            features=["sad_ratio", "avg_speed", "pitch_variability", "distress_events"],
-            directions=["up", "down", "down", "up"],
-            weights=[
-                weights["sad_ratio"],
-                weights["avg_speed"],
-                weights["pitch_variability"],
-                weights["distress_events"],
-            ],
-            threshold_ratio=2.0,
-            consecutive_days=3,
-        ),
         "sleep_problem": RiskRule(
             name="睡眠问题",
             features=["sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd"],
@@ -78,12 +62,11 @@ def _load_risk_rules() -> dict[str, RiskRule]:
         ),
         "social_isolation": RiskRule(
             name="社交孤独",
-            features=["social_turns", "daily_activity", "sad_ratio"],
-            directions=["down", "down", "up"],
+            features=["social_turns", "daily_activity"],
+            directions=["down", "down"],
             weights=[
                 weights["social_turns"],
                 weights["daily_activity"],
-                weights["sad_ratio"],
             ],
             threshold_ratio=1.5,
             consecutive_days=5,
@@ -105,18 +88,18 @@ def classify_risk_type(
 
     Args:
         feature_residuals: {feature_name: residual_value} 当日各特征的标准化残差
-        residual_stats: {"mean": np.ndarray(10,), "std": np.ndarray(10,)}
+        residual_stats: {"mean": np.ndarray(6,), "std": np.ndarray(6,)}
         consecutive_days: 各特征连续异常天数（可选）
         daily_results: 近7天推理结果（用于统计连续天数）
 
     Returns:
         [
             {
-                "risk_type": "抑郁风险",
-                "risk_key": "depression",
+                "risk_type": "睡眠问题",
+                "risk_key": "sleep_problem",
                 "score": 2.3,
                 "is_active": True,
-                "exceeding_features": ["sad_ratio", "avg_speed"],
+                "exceeding_features": ["sleep_efficiency", "sfi"],
                 "consecutive_days": 3,
             },
             ...

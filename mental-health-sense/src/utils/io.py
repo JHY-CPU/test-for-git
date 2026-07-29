@@ -49,7 +49,7 @@ def save_daily_features(
     Args:
         elder_id: 老人ID
         date: 日期字符串 "YYYY-MM-DD"
-        feature_vector: (10,) 特征向量
+        feature_vector: (6,) 特征向量
         missing_count: 缺失特征计数
         data_quality: valid / insufficient / offline
     """
@@ -103,7 +103,7 @@ def get_feature_vectors(
         end_date: 结束日期 "YYYY-MM-DD"（含）
 
     Returns:
-        (n_days, 10) 特征矩阵
+        (n_days, 6) 特征矩阵
     """
     from src.baseline.scaler_utils import FEATURE_NAMES
 
@@ -122,7 +122,7 @@ def get_daily_vector(elder_id: str, date: str) -> np.ndarray:
     获取指定日期的单条特征向量。
 
     Returns:
-        (10,) numpy数组
+        (6,) numpy数组
     """
     vectors = get_feature_vectors(elder_id, date, date)
     return vectors[0]
@@ -137,7 +137,7 @@ def get_recent_vectors(elder_id: str, days: int = 30) -> np.ndarray:
         days: 最近天数
 
     Returns:
-        (n, 10) 特征矩阵
+        (n, 6) 特征矩阵
     """
     df = load_features_csv(elder_id)
     df = df.sort_values("date", ascending=False)
@@ -265,7 +265,7 @@ def get_feature_weight_array() -> np.ndarray:
     获取特征权重数组（与FEATURE_NAMES顺序一致）。
 
     Returns:
-        (10,) 权重数组
+        (6,) 权重数组
     """
     from src.baseline.scaler_utils import FEATURE_NAMES
     weights_dict = load_feature_weights()

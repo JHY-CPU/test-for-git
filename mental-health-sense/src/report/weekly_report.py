@@ -130,7 +130,6 @@ def generate_weekly_report(
 
 | 维度 | 本周趋势 | 上周对比 |
 | :--- | :--- | :--- |
-| 情绪状态 | {trends.get('sad_trend', '平稳')} | 情绪方面与上周相比{trends.get('sad_week_change', '无明显变化')} |
 | 社交互动 | {trends.get('social_trend', '平稳')} | 社交方面与上周相比{trends.get('social_week_change', '无明显变化')} |
 | 睡眠质量 | {trends.get('sleep_trend', '平稳')} | 睡眠方面与上周相比{trends.get('sleep_week_change', '无明显变化')} |
 | 日常活动 | {trends.get('activity_trend', '平稳')} | 活动方面与上周相比{trends.get('activity_week_change', '无明显变化')} |
@@ -161,26 +160,21 @@ def _compute_weekly_trends(week_results: list[dict]) -> dict:
     """
     if len(week_results) < 2:
         return {
-            "sad_trend": "平稳",
             "social_trend": "平稳",
             "sleep_trend": "平稳",
             "activity_trend": "平稳",
-            "sad_week_change": "无明显变化",
             "social_week_change": "无明显变化",
             "sleep_week_change": "无明显变化",
             "activity_week_change": "无明显变化",
         }
 
     # 从feature_residuals中提取各维度周变化
-    sad_vals = []
     social_vals = []
     sleep_vals = []
     activity_vals = []
 
     for r in week_results:
         residuals = r.get("feature_residuals", {})
-        if "sad_ratio" in residuals:
-            sad_vals.append(residuals["sad_ratio"])
         if "social_turns" in residuals:
             social_vals.append(abs(residuals["social_turns"]))
         if "sleep_efficiency" in residuals:
@@ -211,11 +205,9 @@ def _compute_weekly_trends(week_results: list[dict]) -> dict:
         return "无明显变化"
 
     return {
-        "sad_trend": _judge_trend(sad_vals),
         "social_trend": _judge_trend(social_vals),
         "sleep_trend": _judge_trend(sleep_vals),
         "activity_trend": _judge_trend(activity_vals),
-        "sad_week_change": _judge_week_change(sad_vals),
         "social_week_change": _judge_week_change(social_vals),
         "sleep_week_change": _judge_week_change(sleep_vals),
         "activity_week_change": _judge_week_change(activity_vals),
@@ -244,14 +236,12 @@ def _generate_with_llm(
 
     prompt = fill_prompt(
         WEEKLY_REPORT_USER_TEMPLATE,
-        sad_trend=trends.get("sad_trend", "平稳"),
         social_trend=trends.get("social_trend", "平稳"),
         sleep_trend=trends.get("sleep_trend", "平稳"),
         activity_trend=trends.get("activity_trend", "平稳"),
         deviation_days=deviation_days,
         risk_label=risk_result.get("risk_label", "正常"),
         risk_types=risk_types_str,
-        sad_week_change=trends.get("sad_week_change", "无明显变化"),
         social_week_change=trends.get("social_week_change", "无明显变化"),
         sleep_week_change=trends.get("sleep_week_change", "无明显变化"),
         activity_week_change=trends.get("activity_week_change", "无明显变化"),
