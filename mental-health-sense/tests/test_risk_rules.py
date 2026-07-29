@@ -49,10 +49,10 @@ class TestClassifyRiskType:
     """测试风险类型分类"""
 
     def make_residual_stats(self):
-        """构造残差统计"""
+        """构造残差统计（6维）"""
         return {
-            "mean": np.zeros(12),
-            "std": np.ones(12),
+            "mean": np.zeros(6),
+            "std": np.ones(6),
         }
 
     def test_normal_day_no_risk(self):
@@ -69,18 +69,15 @@ class TestClassifyRiskType:
 
         assert all(not r["is_active"] for r in results)
 
-    def test_depression_triggered(self):
-        """测试抑郁风险触发"""
+    def test_social_isolation_triggered(self):
+        """测试社交孤独触发（social_turns↓ + daily_activity↓）"""
         from src.baseline.scaler_utils import FEATURE_NAMES
 
         feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        # sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑
-        feature_residuals["sad_ratio"] = 3.0
-        feature_residuals["avg_speed"] = -3.0
-        feature_residuals["pitch_variability"] = -2.5
-        feature_residuals["distress_events"] = 2.5
+        feature_residuals["social_turns"] = -3.0
+        feature_residuals["daily_activity"] = -3.0
 
-        consecutive = {"depression": 3}
+        consecutive = {"social_isolation": 5}
 
         results = classify_risk_type(
             feature_residuals=feature_residuals,
@@ -88,8 +85,8 @@ class TestClassifyRiskType:
             consecutive_days=consecutive,
         )
 
-        dep_result = next(r for r in results if r["risk_key"] == "depression")
-        assert dep_result["is_active"]
+        soc_result = next(r for r in results if r["risk_key"] == "social_isolation")
+        assert soc_result["is_active"]
 
     def test_sleep_problem_triggered(self):
         """测试睡眠问题触发"""
@@ -122,11 +119,11 @@ class TestClassifyRiskType:
         from src.baseline.scaler_utils import FEATURE_NAMES
 
         feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        stats = {"mean": np.full(10, 0.5), "std": np.full(10, 0.3)}
+        stats = {"mean": np.full(6, 0.5), "std": np.full(6, 0.3)}
         results = classify_risk_type(
             feature_residuals=feature_residuals,
             residual_stats=stats,
-            consecutive_days={k: 9 for k in ("depression", "sleep_problem", "social_isolation")},
+            consecutive_days={k: 9 for k in ("sleep_problem", "social_isolation")},
         )
         assert all(not r["is_active"] for r in results)
         assert all(r["exceeding_features"] == [] for r in results)
@@ -134,30 +131,30 @@ class TestClassifyRiskType:
     def test_down_feature_improving_not_flagged(self):
         """方向性：down 特征"变好"（残差为正）不得计入超标。
 
-        avg_speed 方向为 down（变慢才异常）。今日语速高于预测（residual>0）是好事，
-        不应进入 exceeding_features。
+        sleep_efficiency 方向为 down（下降才异常）。今日睡眠效率高于预测（residual>0）
+        是好事，不应进入 exceeding_features。
         """
         from src.baseline.scaler_utils import FEATURE_NAMES
 
         feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        feature_residuals["avg_speed"] = 3.0  # 语速比预测更快（正残差）→ 非异常
-        stats = {"mean": np.zeros(10), "std": np.ones(10)}
+        feature_residuals["sleep_efficiency"] = 3.0  # 睡眠效率比预测更高（正残差）→ 非异常
+        stats = {"mean": np.zeros(6), "std": np.ones(6)}
         results = classify_risk_type(
             feature_residuals=feature_residuals,
             residual_stats=stats,
-            consecutive_days={"depression": 9},
+            consecutive_days={"sleep_problem": 9},
         )
-        dep = next(r for r in results if r["risk_key"] == "depression")
-        assert "avg_speed" not in dep["exceeding_features"]
+        sleep = next(r for r in results if r["risk_key"] == "sleep_problem")
+        assert "sleep_efficiency" not in sleep["exceeding_features"]
 
     def test_feature_importance(self):
         """测试特征重要性获取"""
-        importance = get_risk_feature_importance("depression")
+        importance = get_risk_feature_importance("sleep_problem")
         assert len(importance) == 4
-        assert "sad_ratio" in importance
-        assert "avg_speed" in importance
-        assert "pitch_variability" in importance
-        assert "distress_events" in importance
+        assert "sleep_efficiency" in importance
+        assert "deep_sleep_ratio" in importance
+        assert "sfi" in importance
+        assert "hrv_rmssd" in importance
 
         total = sum(importance.values())
         assert abs(total - 1.0) < 0.01
@@ -170,7 +167,6 @@ class TestClassifyRiskType:
     def test_list_risk_types(self):
         """测试列出所有风险类型"""
         types = list_risk_types()
-        assert "抑郁风险" in types
         assert "睡眠问题" in types
         assert "社交孤独" in types
-        assert len(types) == 3
+        assert len(types) == 2

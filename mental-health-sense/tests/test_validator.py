@@ -14,9 +14,9 @@ from src.data_pipeline.validator import (
 
 
 def make_vector(health_values):
-    """构造10维向量（已移除时间编码）"""
+    """构造6维向量（已移除时间编码）"""
     vec = np.array(health_values, dtype=np.float64)
-    assert vec.shape == (10,)
+    assert vec.shape == (6,)
     return vec
 
 
@@ -24,50 +24,50 @@ class TestValidateDailyData:
     """测试每日数据校验"""
 
     def test_valid_data(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         quality = validate_daily_data(vec, missing_count=0)
         assert quality == "valid"
 
     def test_insufficient_missing(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         quality = validate_daily_data(vec, missing_count=3)
         assert quality == "insufficient"
 
     def test_insufficient_more_missing(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         quality = validate_daily_data(vec, missing_count=5)
         assert quality == "insufficient"
 
     def test_offline_after_continuous_insufficient(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         recent = ["insufficient", "insufficient", "insufficient"]
         quality = validate_daily_data(vec, missing_count=4, recent_quality=recent)
         assert quality == "offline"
 
     def test_offline_with_mixed_history(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         recent = ["insufficient", "offline", "offline"]
         quality = validate_daily_data(vec, missing_count=3, recent_quality=recent)
         assert quality == "offline"
 
     def test_not_offline_with_interruption(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         recent = ["insufficient", "valid", "insufficient"]
         quality = validate_daily_data(vec, missing_count=3, recent_quality=recent)
         assert quality != "offline"
 
     def test_extreme_outlier(self):
-        vec = make_vector([-999.0] + [1.0] * 9)
+        vec = make_vector([-999.0] + [1.0] * 5)
         quality = validate_daily_data(vec, missing_count=0)
         assert quality == "insufficient"
 
     def test_edge_case_exactly_3_missing(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         quality = validate_daily_data(vec, missing_count=3)
         assert quality == "insufficient"
 
     def test_edge_case_2_missing_ok(self):
-        vec = make_vector([1.0] * 10)
+        vec = make_vector([1.0] * 6)
         quality = validate_daily_data(vec, missing_count=2)
         assert quality == "valid"
 

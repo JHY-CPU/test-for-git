@@ -9,17 +9,17 @@ from src.data_pipeline.imputer import impute_missing, check_offline_status
 
 
 class TestImputer:
-    """测试缺失值填充（特征向量现为10维，已移除时间编码）"""
+    """测试缺失值填充（特征向量现为6维，已移除时间编码）"""
 
     def make_vector(self, health_values):
-        """构造10维特征向量"""
+        """构造6维特征向量"""
         vec = np.array(health_values, dtype=np.float64)
-        assert vec.shape == (10,)
+        assert vec.shape == (6,)
         return vec
 
     def test_no_missing(self):
         """测试无缺失值情况"""
-        current = self.make_vector([1.0] * 10)
+        current = self.make_vector([1.0] * 6)
         filled, missing_count, missing_names = impute_missing(current)
 
         assert missing_count == 0
@@ -28,8 +28,8 @@ class TestImputer:
 
     def test_single_missing_with_prev(self):
         """测试单特征缺失 + 前向填充"""
-        current = self.make_vector([1.0, np.nan] + [1.0] * 8)
-        prev = self.make_vector([1.0, 2.0] + [1.0] * 8)
+        current = self.make_vector([1.0, np.nan] + [1.0] * 4)
+        prev = self.make_vector([1.0, 2.0] + [1.0] * 4)
 
         filled, missing_count, missing_names = impute_missing(current, prev)
 
@@ -38,7 +38,7 @@ class TestImputer:
 
     def test_single_missing_without_prev(self):
         """测试单特征缺失 + 无昨日数据"""
-        current = self.make_vector([1.0, np.nan] + [1.0] * 8)
+        current = self.make_vector([1.0, np.nan] + [1.0] * 4)
 
         filled, missing_count, missing_names = impute_missing(current)
 
@@ -47,8 +47,8 @@ class TestImputer:
 
     def test_multiple_missing_partial_fill(self):
         """测试多特征缺失 + 部分可填充"""
-        current = self.make_vector([np.nan, 1.0, np.nan, np.nan] + [1.0] * 6)
-        prev = self.make_vector([2.0, 1.0, 3.0, np.nan] + [1.0] * 6)
+        current = self.make_vector([np.nan, 1.0, np.nan, np.nan] + [1.0] * 2)
+        prev = self.make_vector([2.0, 1.0, 3.0, np.nan] + [1.0] * 2)
 
         filled, missing_count, missing_names = impute_missing(current, prev)
 
@@ -58,20 +58,20 @@ class TestImputer:
 
     def test_all_health_features_nan(self):
         """测试全部健康特征缺失（极端情况）"""
-        current = self.make_vector([np.nan] * 10)
-        prev = self.make_vector(list(range(1, 11)))
+        current = self.make_vector([np.nan] * 6)
+        prev = self.make_vector(list(range(1, 7)))
 
         filled, missing_count, missing_names = impute_missing(current, prev)
 
         # 全部可前向填充
         assert missing_count == 0
-        for i in range(10):
+        for i in range(6):
             assert filled[i] == i + 1
 
     def test_time_features_never_missing(self):
-        """验证10维向量中不含时间编码（时间编码已移除）"""
+        """验证6维向量中不含时间编码（时间编码已移除）"""
         from src.baseline.scaler_utils import FEATURE_DIM, FEATURE_NAMES
-        assert FEATURE_DIM == 10
+        assert FEATURE_DIM == 6
         assert "day_sin" not in FEATURE_NAMES
         assert "day_cos" not in FEATURE_NAMES
 

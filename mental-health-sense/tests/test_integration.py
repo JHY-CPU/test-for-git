@@ -31,14 +31,10 @@ class TestEndToEndSimulation:
         """设置模拟环境（使用临时目录）"""
         import src.utils.io as io_mod
 
-        # 被监测老人：Day25-30 注入抑郁特征，用于验证趋势检测
+        # 被监测老人：Day25-30 注入睡眠恶化特征，用于验证趋势检测
         elder_configs = {
             "E001": {
                 "baseline": {
-                    "sad_ratio": (0.05, 0.02),
-                    "avg_speed": (4.5, 0.3),
-                    "pitch_variability": (32, 4),
-                    "distress_events": (0.1, 0.2),
                     "sleep_efficiency": (0.88, 0.04),
                     "deep_sleep_ratio": (0.30, 0.03),
                     "sfi": (5.0, 1.0),
@@ -50,10 +46,10 @@ class TestEndToEndSimulation:
                     "start_day": 25,
                     "end_day": 30,
                     "features": {
-                        "sad_ratio": 0.20,
-                        "avg_speed": 2.5,
-                        "pitch_variability": 12.0,
-                        "distress_events": 3.0,
+                        "sleep_efficiency": 0.65,
+                        "deep_sleep_ratio": 0.15,
+                        "sfi": 14.0,
+                        "hrv_rmssd": 28.0,
                     },
                 },
             },
@@ -62,7 +58,6 @@ class TestEndToEndSimulation:
         return {
             "elders": elder_configs,
             "features": [
-                "sad_ratio", "avg_speed", "pitch_variability", "distress_events",
                 "sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd",
                 "daily_activity", "social_turns",
             ],
@@ -81,7 +76,7 @@ class TestEndToEndSimulation:
         baseline = elder_config["baseline"]
         anomaly = elder_config.get("anomaly")
 
-        vector = np.zeros(10, dtype=np.float64)
+        vector = np.zeros(6, dtype=np.float64)
 
         for i, feat in enumerate(features):
             if feat in baseline:
@@ -114,7 +109,7 @@ class TestEndToEndSimulation:
                     value = max(0.0, value)
 
                 # 比例类特征限制在[0,1]
-                if feat in ("sad_ratio", "sleep_efficiency", "deep_sleep_ratio"):
+                if feat in ("sleep_efficiency", "deep_sleep_ratio"):
                     value = min(max(value, 0.0), 1.0)
 
                 vector[i] = value
@@ -143,30 +138,31 @@ class TestEndToEndSimulation:
 
         from src.baseline.scaler_utils import FEATURE_NAMES, FEATURE_DIM
 
-        # 1. 验证特征维度（已移除时间编码，现为10维）
-        assert FEATURE_DIM == 10
-        assert len(FEATURE_NAMES) == 10
+        # 1. 验证特征维度（已移除时间编码与语音声学维，现为6维）
+        assert FEATURE_DIM == 6
+        assert len(FEATURE_NAMES) == 6
 
         # 2. 为每位老人生成模拟数据并验证
         for elder_id, config in elders.items():
             all_vectors = []
             for day in range(1, 51):
-                vec_10d = self._generate_daily_vector(
+                vec_6d = self._generate_daily_vector(
                     day, config, feature_names, seed=hash(elder_id)
                 )
-                all_vectors.append(vec_10d)
+                all_vectors.append(vec_6d)
 
             all_vectors = np.array(all_vectors)
 
             # 验证形状
-            assert all_vectors.shape == (50, 10)
+            assert all_vectors.shape == (50, 6)
 
-            # 验证异常注入 (E001: Day25-30)
+            # 验证异常注入 (E001: Day25-30 睡眠恶化 → sleep_efficiency 下降)
             if elder_id == "E001":
-                normal_sad = np.nanmean(all_vectors[0:24, 0])
-                anomaly_sad = np.nanmean(all_vectors[24:30, 0])
-                assert anomaly_sad > normal_sad, \
-                    f"E001异常注入失败: normal={normal_sad:.3f}, anomaly={anomaly_sad:.3f}"
+                se_idx = FEATURE_NAMES.index("sleep_efficiency")
+                normal_se = np.nanmean(all_vectors[0:24, se_idx])
+                anomaly_se = np.nanmean(all_vectors[24:30, se_idx])
+                assert anomaly_se < normal_se, \
+                    f"E001异常注入失败: normal={normal_se:.3f}, anomaly={anomaly_se:.3f}"
 
         # 3. 验证EWMA正确性
         from src.baseline.ewma import CumulativeEWMABaseline
@@ -179,13 +175,13 @@ class TestEndToEndSimulation:
         threshold = ewma.get_threshold(2.5)
         assert threshold > 1.0, "异常值应推高阈值"
 
-        # 4. 验证GRU模型（特征维度为10）
+        # 4. 验证GRU模型（特征维度为6）
         from src.baseline.gru_model import PersonalBaselineGRU
         model = PersonalBaselineGRU()
-        x = np.random.randn(1, 7, 10).astype(np.float32)
+        x = np.random.randn(1, 7, 6).astype(np.float32)
         import torch
         pred = model.predict(torch.tensor(x))
-        assert pred.shape == (1, 10)
+        assert pred.shape == (1, 6)
 
         # 5. 验证风险判定逻辑
         daily_results = []
@@ -205,7 +201,7 @@ class TestEndToEndSimulation:
 
         # 6. 验证预警动作
         from src.risk.alert import trigger_alert
-        alert_result = trigger_alert("E001", 2, [{"risk_type": "抑郁风险"}])
+        alert_result = trigger_alert("E001", 2, [{"risk_type": "睡眠问题"}])
         assert alert_result["alerted"]  # 二级应触发推送
 
         # 7. 验证规则周报生成
@@ -214,13 +210,12 @@ class TestEndToEndSimulation:
             elder_id="E001",
             week_start="2026-08-01",
             week_end="2026-08-07",
-            sad_trend="上升",
             social_trend="平稳",
-            sleep_trend="平稳",
+            sleep_trend="下降",
             activity_trend="平稳",
             deviation_days=3,
             risk_label="提醒",
-            risk_types=["抑郁风险"],
+            risk_types=["睡眠问题"],
         )
         assert len(report) > 0
         assert "E001" in report
@@ -238,22 +233,22 @@ class TestEndToEndSimulation:
             # 生成14天数据
             vectors_14d = []
             for day in range(1, 15):
-                vec_10d = self._generate_daily_vector(
+                vec_6d = self._generate_daily_vector(
                     day, config, feature_names, seed=hash(elder_id)
                 )
-                vectors_14d.append(vec_10d)
+                vectors_14d.append(vec_6d)
 
             data = np.array(vectors_14d)
 
-            # 验证数据可用性（10维，已移除时间编码）
+            # 验证数据可用性（6维，已移除时间编码与语音声学维）
             assert data.shape == (14, FEATURE_DIM)
             # 正常数据每个样本缺失不超过2个
-            nan_per_row = np.isnan(data[:, :10]).sum(axis=1)
+            nan_per_row = np.isnan(data[:, :FEATURE_DIM]).sum(axis=1)
             assert not np.any(nan_per_row > 2), \
                 f"{elder_id}: 每样本缺失不超过2个，实际: {nan_per_row}"
 
             # 验证数据方差（足够的变异性用于训练）
-            for i in range(10):
+            for i in range(FEATURE_DIM):
                 std_i = np.nanstd(data[:, i])
                 assert std_i > 0, f"特征{i} 方差为0，无法训练"
 

@@ -10,31 +10,31 @@ from src.baseline.gru_model import PersonalBaselineGRU
 
 
 class TestPersonalBaselineGRU:
-    """测试个人基线GRU模型（特征维度已更新为10）"""
+    """测试个人基线GRU模型（特征维度已更新为6）"""
 
     @pytest.fixture
     def model(self):
         return PersonalBaselineGRU(
-            feature_dim=10,
+            feature_dim=6,
             hidden_dim=16,
             num_layers=1,
         )
 
     @pytest.fixture
     def sample_input(self):
-        # (batch=4, window=7, features=10)
-        return torch.randn(4, 7, 10)
+        # (batch=4, window=7, features=6)
+        return torch.randn(4, 7, 6)
 
     def test_forward_shape(self, model, sample_input):
         """测试前向传播输出形状"""
         output = model(sample_input)
-        assert output.shape == (4, 10)
+        assert output.shape == (4, 6)
 
     def test_single_batch(self, model):
         """测试单样本输入"""
-        x = torch.randn(1, 7, 10)
+        x = torch.randn(1, 7, 6)
         output = model(x)
-        assert output.shape == (1, 10)
+        assert output.shape == (1, 6)
 
     def test_gradient_flow(self, model, sample_input):
         """测试梯度流动"""
@@ -49,7 +49,7 @@ class TestPersonalBaselineGRU:
     def test_predict_mode(self, model, sample_input):
         """测试推理模式（无梯度）"""
         output = model.predict(sample_input)
-        assert output.shape == (4, 10)
+        assert output.shape == (4, 6)
         assert not output.requires_grad
 
     def test_get_hidden_state(self, model, sample_input):
@@ -60,7 +60,7 @@ class TestPersonalBaselineGRU:
     def test_parameter_count(self):
         """测试参数量统计（极轻量）"""
         model = PersonalBaselineGRU(
-            feature_dim=10,
+            feature_dim=6,
             hidden_dim=16,
             num_layers=1,
         )
@@ -140,5 +140,5 @@ class TestPersonalBaselineGRU:
         """测试模型字符串表示"""
         rep = repr(model)
         assert "PersonalBaselineGRU" in rep
-        assert "feature_dim=10" in rep
+        assert "feature_dim=6" in rep
         assert "hidden_dim=16" in rep

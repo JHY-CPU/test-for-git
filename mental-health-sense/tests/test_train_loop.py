@@ -8,9 +8,9 @@ from src.baseline.trainer import _train_loop
 
 def _fixture(dropout=0.2):
     torch.manual_seed(0)
-    model = PersonalBaselineGRU(feature_dim=10, hidden_dim=16, num_layers=1, dropout=dropout)
-    X = torch.randn(6, 7, 10)
-    y = torch.randn(6, 10)
+    model = PersonalBaselineGRU(feature_dim=6, hidden_dim=16, num_layers=1, dropout=dropout)
+    X = torch.randn(6, 7, 6)
+    y = torch.randn(6, 6)
     return model, X, y
 
 
