@@ -5,29 +5,27 @@
 ## 系统特点
 
 - **单人系统**：面向单一老人的连续监测与趋势预警
-- **双轨架构**：实时轨（语音采集前端）+ 每日轨（趋势分析 + 统一预警出口）
-- **克制预警**：实时轨不做主动报警，预警统一由每日趋势轨在连续偏离后发出，避免过度敏感打扰家人
+- **单轨每日批处理**：每日读取累积的传感器数据（`data/raw/`），聚合为 6 维特征后做趋势推理与预警，无独立实时运行时
+- **克制预警**：预警仅在连续多日偏离后发出，避免单日波动过度敏感打扰家人
 - **个人化基线**：为该老人独立建模（PersonalBaselineGRU + EWMA动态阈值），"自己和自己比"
-- **多传感器融合**：睡眠雷达 + PIR/IPC + 拾音器 + SenseVoice语音情感分析
+- **多传感器融合**：睡眠雷达 + PIR/IPC + 拾音器（麦克风 VAD 统计对话轮次）
 - **趋势判定**：连续3-5天偏离才触发预警，避免单日波动误报
-- **统一数据流**：实时系统作为采集前端，每日系统读取累积数据
+- **文件驱动数据流**：各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`，每日管道从此累积读取
 
 ---
 
-## 项目现状（v1.6）
+## 项目现状（v1.8）
 
 > 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
 
-**核心算法层已完工并验证**：134 个单元测试全部通过；统一系统生产链路（实时采集 → 每日趋势推理 → 预警）已端到端打通。`docs/TODO.md` 记录的 7 项"实现落差"（P0×2 / P1×2 / P2×3）已全部收口。
+**核心算法层已完工并验证**：123 个单元测试（12 个测试文件）全部通过；每日趋势管道（批处理：读取 `data/raw/` → 6 维特征聚合 → GRU 残差推理 → EWMA → 连续偏离判定 → 风险判定 → 预警 → 周报）已端到端打通，不依赖任何实时运行时。`docs/TODO.md` 记录的 7 项"实现落差"（P0×2 / P1×2 / P2×3）已全部收口。
 
 > ⚠️ **实现成熟度：算法是真的，硬件对接与外部服务大多还是"桩/模拟"。** 这是科研原型阶段的正常状态，但必须讲清楚，避免误以为"能上真机"：
 
 | 部分 | 状态 | 说明 |
 |------|------|------|
 | GRU 基线 / EWMA / 风险判定 / 数据管道 | ✅ 真实可用 | 有算法、有测试，是系统的核心 |
-| 传感器**真实采集**（睡眠雷达/摄像头/麦克风/SenseVoice 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
-| 实时**音高** `pitch_variability` | ⚠️ **名存实亡** | SenseVoice Small 不输出 F0，`pitch_mean` 被写死 200.0，实时路径下该特征无意义 |
-| RTSP 摄像头音频 | ⚠️ 占位（返回静音） | 真实 ffmpeg/gstreamer 抽音未实现 |
+| 传感器**真实采集**（睡眠雷达/摄像头/麦克风 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
 | 预警**推送**（子女App/短信/网格员） | ⚠️ 模拟 | `alert.py` 只写日志字符串，未接真实推送服务 |
 | 周报 LLM | ⚠️ 待核对 | 模型 id `claude-sonnet-5` 可能无效，有规则模板兜底 |
 
@@ -37,7 +35,7 @@
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 134 单测 + 端到端冒烟（`validate_synthetic.py`），统一链路已打通 |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 123 单测（12 文件）+ 端到端冒烟（`validate_synthetic.py`），每日管道链路已打通 |
 | **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 已落地判别力脚本 `validate_discriminative.py`（8 场景，含混淆项），当前稳定 6/8；已借此修复 2 个真实缺陷，暴露 1 个"串味"待办（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
@@ -71,8 +69,8 @@ python scripts/train_all_baselines.py
 # 4. 每日推理
 python scripts/run_daily_pipeline.py --date 2026-08-15
 
-# 5. 启动统一系统（实时+每日）
-python scripts/start_unified_system.py --elder-id E001 --microphone
+# 5. 运行测试（12 个测试文件 / 123 用例）
+python -m pytest
 ```
 
 ---
@@ -84,16 +82,15 @@ mental-health-sense/
 ├── config/                          # 配置文件
 │   ├── settings.yaml                # 全局配置（GRU、训练、EWMA、风险阈值）
 │   ├── feature_weights.json         # 特征权重（加权残差计算）
-│   └── realtime_config.yaml         # 实时系统配置
+│   └── realtime_config.yaml         # ⚠️ 孤儿文件：实时运行时已删除，无代码读取，仅历史留存
 │
 ├── data/                            # 数据目录
 │   ├── raw/                         # 原始传感器数据（JSON）
-│   │   ├── acoustic/                # SenseVoice输出（sad_ratio、avg_speed、pitch_variability等）
-│   │   ├── sleep/                   # 睡眠雷达数据
-│   │   ├── activity/                # PIR + IPC活动数据
-│   │   └── social/                  # 拾音器 + 智能音箱数据
+│   │   ├── sleep/                   # 睡眠雷达数据（{date}.json）
+│   │   ├── activity/                # PIR + IPC活动数据（{date}.json）
+│   │   └── social/                  # 拾音器 VAD 对话数据（{date}.json，social_turns 聚合来源）
 │   ├── features/                    # 聚合后的每日特征向量（CSV）
-│   │   └── E001/features.csv        # 10维健康特征
+│   │   └── E001/features.csv        # 6维健康特征
 │   ├── baselines/                   # 该老人的个人基线模型
 │   │   └── E001/
 │   │       ├── gru.pth              # 训练好的GRU模型
@@ -105,12 +102,6 @@ mental-health-sense/
 │   ├── logs/                        # 推理日志和周报
 │   │   ├── daily_inference/         # 每日GRU推理结果（JSON）
 │   │   └── weekly_reports/          # LLM生成的周报
-│   ├── realtime/                    # 实时监测数据
-│   │   ├── E001/
-│   │   │   ├── features/            # 24小时滑动窗口快照（实时展示用，snapshot_*.json）
-│   │   │   ├── utterances/          # 按自然日持久化的原始语音片段（{date}.jsonl，每日轨聚合的权威来源）
-│   │   │   └── alerts/              # 实时风险预警记录
-│   │   └── demo/                    # 演示结果
 │   └── elder_configs.json           # 老人元数据（姓名、描述）
 │
 ├── src/                             # 源代码
@@ -124,22 +115,16 @@ mental-health-sense/
 │   │   └── scaler_utils.py          # StandardScaler管理
 │   │
 │   ├── data_pipeline/               # 数据采集与预处理
-│   │   ├── aggregator.py            # 四维度传感器 → 10维特征向量
+│   │   ├── aggregator.py            # 三维度(睡眠/活动/社交) → 6维特征向量
 │   │   ├── imputer.py               # 缺失值处理（前向填充）
 │   │   ├── validator.py             # 数据质量校验
 │   │   └── adapters/                # 传感器适配器
 │   │       ├── sleep_radar.py       # 睡眠雷达适配器
 │   │       ├── camera.py            # IPC/RTSP摄像头适配器
-│   │       ├── microphone.py        # 麦克风适配器
-│   │       └── sensevoice.py        # SenseVoice模型适配器
-│   │
-│   ├── realtime/                    # 实时语音采集前端（不做报警）
-│   │   ├── audio_stream.py          # 音频流抽象（麦克风/RTSP/文件）
-│   │   ├── sensevoice_engine.py     # SenseVoice推理 + 24小时聚合器
-│   │   └── monitor.py               # RealtimeMonitor：语音采集前端（提取声学特征）
+│   │       └── microphone.py        # 麦克风适配器（VAD 统计对话轮次）
 │   │
 │   ├── risk/                        # 风险判定层
-│   │   ├── rules.py                 # 3种风险类型（抑郁/睡眠/社交）
+│   │   ├── rules.py                 # 2类风险类型（睡眠/社交）
 │   │   ├── judge.py                 # 4级风险判定（连续天数）
 │   │   └── alert.py                 # 预警推送（日志/文件/App/短信）
 │   │
@@ -152,28 +137,18 @@ mental-health-sense/
 │   │   └── weekly_job.py            # 趋势轨（周日03:00）
 │   │
 │   ├── utils/                       # 工具函数
-│   │   ├── io.py                    # 文件读写
-│   │   ├── logger.py                # 日志配置
-│   │   └── metrics.py               # 评估指标
-│   │
-│   ├── unified_data_manager.py      # 统一数据流管理（实时↔每日）
-│   └── unified_scheduler.py         # 统一系统调度器
+│       ├── io.py                    # 文件读写
+│       ├── logger.py                # 日志配置
+│       └── metrics.py               # 评估指标
 │
 ├── scripts/                         # 可执行脚本
 │   ├── generate_simulation_data.py  # 生成60天模拟数据（异常注入40-46，避开建档+观察期）
 │   ├── train_all_baselines.py       # 冷启动训练
 │   ├── run_daily_pipeline.py        # 手动触发每日推理
-│   ├── start_realtime_monitor.py    # 启动实时监测
-│   ├── start_unified_system.py      # 启动统一系统（生产环境）
-│   ├── demo_realtime.py             # 实时系统演示（无需硬件）
-│   ├── test_realtime_system.py      # 实时模块测试
-│   ├── test_unified_system.py       # 统一系统集成测试（独立脚本，非pytest）
-│   ├── test_simple.py               # 快速冒烟测试（独立脚本，非pytest）
 │   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
-│   ├── validate_discriminative.py   # 【范围2】合成数据判别力验证（8场景+混淆项，层次B）
-│   └── health_check.py              # 项目完整性检查
+│   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（8场景+混淆项，层次B）
 │
-├── tests/                           # 单元测试（134 个用例，确定性可复现）
+├── tests/                           # 单元测试（12 个测试文件 / 123 用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -185,7 +160,6 @@ mental-health-sense/
 │   ├── test_risk_rules.py           # 风险规则测试
 │   ├── test_alert.py                # 预警推送测试
 │   ├── test_metrics.py              # 评估指标测试
-│   ├── test_unified_data_manager.py # 实时↔每日衔接：自然日聚合 / 墙上时钟窗口 / 缺失标记
 │   ├── test_train_loop.py           # 训练循环 early-stopping / 回滚回归
 │   └── test_integration.py          # 端到端集成测试
 │
@@ -197,47 +171,40 @@ mental-health-sense/
 
 ## 核心架构
 
-### 双轨调度
+### 单轨每日批处理
 
 | 轨道 | 频率 | 功能 | 判定依据 |
 |------|------|------|----------|
-| **实时轨** | 持续采集 | 语音**采集前端**（提取声学特征，不做报警） | —— |
-| **每日轨** | 每日02:00 | 深度趋势分析 + **统一预警出口** | GRU预测 + EWMA动态阈值 |
+| **每日趋势轨** | 每日02:00 | 读取累积原始数据 → 6维特征聚合 → 深度趋势分析 → 预警出口 | GRU预测 + EWMA动态阈值 |
+| **周报轨** | 周日03:00 | 汇总一周趋势生成周报 | LLM（fallback: 规则模板） |
 
-**核心理念**：实时轨只负责持续采集语音特征，**不做实时主动报警**；所有心理风险预警统一由每日趋势轨在累积数据上判定后发出。这样既保留了语音这一路输入，又避免实时轨因单点波动过度敏感、频繁打扰家人。
+**核心理念**：系统是**单轨的每日批处理管道**，没有独立的实时采集运行时。各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`（其中 `social/` 由麦克风 VAD 采集对话轮次），每日趋势轨在累积数据上做判定后统一发出预警。所有心理风险预警仅在**连续多日偏离**后触发，避免因单日波动过度敏感、频繁打扰家人。
 
 ### 数据流架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                       统一系统                                │
-└─────────────────────────────────────────────────────────────┘
+【每日趋势轨：批处理，每天凌晨02:00触发】
 
-【实时轨：采集前端】                 【每日轨：分析 + 预警出口】
-音频输入（麦克风/RTSP/文件）          每天凌晨02:00触发
-    ↓                                    ↓
-SenseVoice实时推理                   UnifiedDataManager
-    ↓                                按自然日聚合昨日声学
-按自然日持久化原始片段                    ↓（无数据则标 missing）
-（utterances/{date}.jsonl）          + 睡眠雷达数据（data/raw/）
-    ↓                                + PIR/IPC活动数据（data/raw/）
-24小时滑动窗口（实时展示）              + 拾音器社交数据（data/raw/）
-（不做实时报警）                         ↓
-    │                                10维特征向量
-    │                                    ↓
-    └──── 声学特征汇入 ─────────────►  GRU模型预测
-                                        ↓
-                                    加权残差计算
-                                        ↓
-                                    EWMA动态阈值判定
-                                        ↓
-                                    连续偏离天数统计
-                                        ↓
-                                    风险类型分类
-                                        ↓
-                                    Level 0/1/2/3判定
-                                        ↓
-                                    预警推送（统一出口）
+data/raw/sleep/{date}.json      ─┐
+data/raw/activity/{date}.json   ─┼─► 按自然日聚合传感器数据
+data/raw/social/{date}.json     ─┘        ↓（无数据则标 missing）
+（social 由麦克风 VAD 采集）           缺失填充 / 数据质量校验
+                                          ↓
+                                      6维特征向量
+                                          ↓
+                                      GRU模型预测（预测正常态）
+                                          ↓
+                                      加权残差计算
+                                          ↓
+                                      EWMA动态阈值判定
+                                          ↓
+                                      连续偏离天数统计
+                                          ↓
+                                      风险类型分类（睡眠问题 / 社交孤独）
+                                          ↓
+                                      Level 0/1/2/3判定
+                                          ↓
+                                      预警推送（统一出口）
 ```
 
 ### 四级风险（全部基于趋势）
@@ -251,13 +218,14 @@ SenseVoice实时推理                   UnifiedDataManager
 
 > **严重级为何也要幅度门槛？** Level 3 会触发社区网格员介入 + 强提醒，代价高。若仅凭连续天数升级，长达数天但每天只"擦线"越过动态阈值的低幅度偏离也会直冲最高级，与提醒级（带幅度门槛）判定不一致，且过度打扰家人和社区。因此严重级与提醒级共用 `avg_anomaly > sustained_avg` 幅度门槛。
 
-### 三种风险类型
+### 两种风险类型
 
 | 类型 | 特征信号 | 连续天数要求 |
 |------|----------|--------------|
-| **抑郁风险** | sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑ | 3天 |
 | **睡眠问题** | sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓ | 3天 |
-| **社交孤独** | social_turns↓ + daily_activity↓ + sad_ratio↑ | 5天 |
+| **社交孤独** | social_turns↓ + daily_activity↓ | 5天 |
+
+> **抑郁趋势判断已移除**：原"抑郁风险"类型依赖 4 路语音声学特征（sad_ratio/avg_speed/pitch_variability/distress_events），现整体交由**外部专用抑郁模型**接入，本系统不再直接输出抑郁风险。
 
 ---
 
@@ -265,15 +233,14 @@ SenseVoice实时推理                   UnifiedDataManager
 
 系统**不使用分类器直接判断心理疾病**，而是通过"个人化基线偏离 + 加权规则匹配 + 连续趋势确认"三层机制实现映射，刻意回避临床诊断。
 
-### 第一层：多传感器 → 10 维特征向量
+### 第一层：多传感器 → 6 维特征向量
 
-四路传感器每日聚合成一条特征记录：
+三路传感器每日聚合成一条特征记录：
 
 ```
 睡眠雷达 ──────────► sleep_efficiency / deep_sleep_ratio / sfi / hrv_rmssd
 PIR + IPC ─────────► daily_activity
-拾音器 + 智能音箱 ──► social_turns
-SenseVoice 语音 ───► sad_ratio / avg_speed / pitch_variability / distress_events
+拾音器（VAD）──────► social_turns
 ```
 
 ### 第二层：GRU 个人基线 → 加权残差异常分数
@@ -298,14 +265,13 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 | 风险类型 | 判定逻辑 |
 |---------|---------|
-| 抑郁风险 | sad_ratio **向上**超标 AND avg_speed **向下**超标 AND pitch_variability **向下**超标 AND distress_events **向上**超标 |
 | 睡眠问题 | sleep_efficiency/deep_sleep_ratio/hrv_rmssd **向下**超标 AND sfi **向上**超标 |
-| 社交孤独 | social_turns/daily_activity **向下**超标 AND sad_ratio **向上**超标 |
+| 社交孤独 | social_turns/daily_activity **向下**超标 |
 
 激活条件（三者同时满足）：
 - 至少 1 个特征方向性超标
 - 加权综合分 > 1.0
-- **连续达标天数 ≥ 阈值**（抑郁/睡眠 3 天，社交孤独 5 天）
+- **连续达标天数 ≥ 阈值**（睡眠 3 天，社交孤独 5 天）
 
 ### 防误报机制
 
@@ -315,7 +281,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | EWMA 动态阈值取 min | 防止老人缓慢衰退后系统"习以为常"变迟钝 |
 | 连续天数门槛 | 单日波动不触发（消融实验：误报率从 3.2 → 0.4 次/天） |
 | 冷启动观察期 | 训练后 7 次推理仅记录不报警，等待基线稳定（按 `baseline_meta.json` 记录的**训练后推理计数**判定，不受 EWMA 预热样本把 n 顶到 7、使观察期形同虚设的干扰；旧基线无 meta 时安全降级） |
-| 实时轨不报警 | 实时轨仅采集，预警统一由每日趋势轨发出，避免单点波动打扰家人 |
+| 每日批处理统一出口 | 预警仅在累积数据上连续偏离后发出，不做单日实时报警，避免单点波动打扰家人 |
 
 ---
 
@@ -366,18 +332,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ## 特征设计与科学依据
 
-10 个特征覆盖抑郁的三条公认通路：**精神运动迟滞**、**自主神经失调**、**行为退缩**。
-
-### 语音特征（SenseVoice 提取）
-
-| 特征 | 异常方向 | 文献支撑 | 备注 |
-|-----|---------|---------|------|
-| `avg_speed` 语速 | ↓ | **强**。老年抑郁系统综述明确 "slower speech rate"，精神运动迟滞标志 | 证据充分 |
-| `pitch_variability` 基频变异性（F0 标准差） | ↓ | **中强**。抑郁表现为语调平淡单调，SD F0 与抑郁严重度显著相关；均值无显著差异 | 使用变异性而非均值，是本系统相较同类研究的改进点 |
-| `sad_ratio` 悲伤情感占比 | ↑ | **中**。语音情感与抑郁相关；SER 模型在老年嗓音上的泛化性仍存疑 | 方向正确，测量效度待验证 |
-| `distress_events` 痛苦声频次 | ↑ | **中**。叹气/哭声作为行为观察有临床依据，量化标准尚无共识 | 方向合理 |
-
-> **特别说明**：早期版本使用 `avg_pitch`（平均基频），文献复核后发现与抑郁相关的是**基频变异性**而非均值（一项经典研究显示均值在抑郁组与好转组之间无显著差异）。当前版本已更正为 `pitch_variability`。
+6 个特征聚焦两条可**非接触**监测的公认通路：**自主神经失调**（睡眠 + HRV）、**行为退缩**（活动 + 社交）。抑郁相关的**精神运动迟滞**通路原由语音声学特征承载，现已移除，改由**外部专用抑郁模型**负责。
 
 ### 睡眠特征（非接触睡眠雷达）
 
@@ -405,7 +360,6 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 |------|------|
 | **语言** | Python 3.10+ |
 | **深度学习** | PyTorch 2.x（CPU推理，<50MB内存） |
-| **语音分析** | FunASR（SenseVoice模型） |
 | **数据处理** | NumPy, pandas, scikit-learn |
 | **调度** | APScheduler |
 | **日志** | loguru |
@@ -421,7 +375,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 | ID | 时间线 | 注入异常 | 验证目标 |
 |------|--------|----------|----------|
-| E001 | 建档1-21 / 观察22-28 / 正常29-39 / **异常40-46** / 恢复47-60 | Day 40-46 抑郁特征注入（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），已避开建档期+观察期 | 连续偏离 → 逐级升到3级预警（抑郁风险）→ 恢复降级 |
+| E001 | 建档1-21 / 观察22-28 / 正常29-39 / **异常40-46** / 恢复47-60 | Day 40-46 睡眠恶化特征注入（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期+观察期 | 连续偏离 → 逐级升到3级预警（睡眠问题）→ 恢复降级 |
 
 > 接入真实老人数据时，可沿用 `E001` 这个 ID，或在 `generate_simulation_data.py` 的
 > `ELDER_ID` 处改成你自己的编号——它只是 `data/features/{ID}/`、`data/raw/*/{ID}/`
@@ -431,16 +385,16 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ## 使用指南
 
-### 1. 仅使用每日系统（GRU + EWMA）
+### 1. 完整工作流（生成 → 训练 → 每日推理）
 
-适用场景：只有传感器数据，无实时音频流
+适用场景：从模拟数据或真实传感器数据（`data/raw/`）跑通每日趋势管道
 
 ```bash
 # 生成模拟数据
 python scripts/generate_simulation_data.py
 
-# 训练基线模型（建档期 Day 21）
-python scripts/train_all_baselines.py
+# 冷启动训练（建档期 Day 21）
+python scripts/train_all_baselines.py      # 或：python -m src.baseline.trainer
 
 # 每日推理（默认老人 E001）
 python scripts/run_daily_pipeline.py --date 2026-08-15
@@ -449,67 +403,26 @@ python scripts/run_daily_pipeline.py --date 2026-08-15
 python scripts/run_daily_pipeline.py --date 2026-08-15 --elder E001
 ```
 
-### 2. 仅运行实时采集前端（不做报警）
+### 2. 端到端验证（合成数据）
 
-适用场景：单独运行语音采集，持续抽取声学特征存为快照。实时轨**不做主动报警**，
-预警需配合每日趋势轨。
+适用场景：不接真机，用合成数据验证算法逻辑与判别力
 
 ```bash
-# 使用麦克风实时采集
-python scripts/start_realtime_monitor.py \
-    --elder-id E001 \
-    --microphone
+# 60天跑通验证（层次A：链路对不对）
+python scripts/validate_synthetic.py
 
-# 使用RTSP摄像头
-python scripts/start_realtime_monitor.py \
-    --elder-id E001 \
-    --rtsp rtsp://192.168.1.100:554/stream
-
-# 使用音频文件测试
-python scripts/start_realtime_monitor.py \
-    --elder-id E001 \
-    --file test_audio.mp3
+# 8场景判别力验证（层次B：设计好不好，含混淆项）
+python scripts/validate_discriminative.py
 ```
 
-### 3. 使用统一系统（推荐）
-
-适用场景：生产环境，实时轨采集 + 每日轨趋势分析
+### 3. 运行测试
 
 ```bash
-# 启动统一系统
-python scripts/start_unified_system.py \
-    --elder-id E001 \
-    --microphone \
-    --daily-time 02:00
+# 所有单元测试（12 个测试文件 / 123 用例）
+python -m pytest
 
-# 效果：
-# - 实时系统24小时采集语音特征（不做实时报警）
-# - 每天凌晨2点自动执行GRU趋势推理
-# - 实时数据自动流入每日系统
-# - 所有预警统一由每日趋势轨发出
-```
-
-### 4. 运行演示（无需硬件）
-
-```bash
-# 实时系统演示（模拟24小时监测场景）
-python scripts/demo_realtime.py
-
-# 系统健康检查
-python scripts/health_check.py
-```
-
-### 5. 运行测试
-
-```bash
-# 所有单元测试
-pytest tests/ -v
-
-# 实时系统测试
-python scripts/test_realtime_system.py
-
-# 统一系统集成测试
-python scripts/test_unified_system.py
+# 更详细输出
+python -m pytest -v
 ```
 
 ---
@@ -518,18 +431,16 @@ python scripts/test_unified_system.py
 
 ### 每日特征向量（features.csv）
 
+> 顺序即 `FEATURE_NAMES`：sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd, daily_activity, social_turns。
+
 | 特征名 | 来源 | 说明 |
 |--------|------|------|
-| sad_ratio | SenseVoice | 悲伤标签占比 [0, 1] |
-| avg_speed | SenseVoice | 平均语速（字/秒） |
-| pitch_variability | SenseVoice | 基频变异性 F0标准差 (Hz)，反映语调单调性（↓=平淡） |
-| distress_events | SenseVoice | 叹气/哭声等非言语痛苦声音频次 |
 | sleep_efficiency | 睡眠雷达 | 睡眠效率 [0, 1] |
 | deep_sleep_ratio | 睡眠雷达 | 深睡占比 [0, 1] |
 | sfi | 睡眠雷达 | 睡眠碎片化指数 |
 | hrv_rmssd | 睡眠雷达 | 心率变异性（自主神经活性） |
 | daily_activity | PIR + IPC | 日间活动量（归一化） |
-| social_turns | 拾音器 + 智能音箱 | 对话轮次（社交参与度） |
+| social_turns | 拾音器（VAD） | 对话轮次（社交参与度） |
 
 ### 每日推理结果（daily_inference/*.json）
 
@@ -543,10 +454,6 @@ python scripts/test_unified_system.py
   "dynamic_threshold": 1.1808,
   "is_deviation": false,
   "feature_residuals": {
-    "sad_ratio": 0.5688,
-    "avg_speed": 0.5944,
-    "pitch_variability": 0.3076,
-    "distress_events": 1.4551,
     "sleep_efficiency": 1.3203,
     "deep_sleep_ratio": 1.174,
     "sfi": 2.2818,
@@ -564,37 +471,9 @@ python scripts/test_unified_system.py
 }
 ```
 
-> 说明：推理层输出的是**加权残差异常分数（anomaly_score）与多档阈值**，而非直接预测值。`feature_residuals` 为各特征的标准化残差（10 维健康特征）。`status` 取值：`success` / `cold_start` / `cold_start_fallback`（GRU未就绪，走滑动均值兜底检测）/ `data_insufficient` / `observation` / `error`。风险等级与风险类型由 `src/risk/judge.py` 在推理结果之上单独判定。
+> 说明：推理层输出的是**加权残差异常分数（anomaly_score）与多档阈值**，而非直接预测值。`feature_residuals` 为各特征的标准化残差（6 维健康特征）。`status` 取值：`success` / `cold_start` / `cold_start_fallback`（GRU未就绪，走滑动均值兜底检测）/ `data_insufficient` / `observation` / `error`。风险等级与风险类型由 `src/risk/judge.py` 在推理结果之上单独判定。
 
-### 实时特征快照（realtime/*/features/snapshot_*.json）
-
-24 小时滑动窗口快照，仅供实时展示 / 调试，**不作为每日轨聚合依据**（原子写入，进程中断不损坏）：
-
-```json
-{
-  "date": "2026-07-18",
-  "elder_id": "E001",
-  "acoustic_data": {
-    "sad_ratio": 0.22,
-    "avg_speed": 3.8,
-    "pitch_variability": 14.0,
-    "distress_events": 6
-  },
-  "n_utterances": 45,
-  "total_duration": 320.5
-}
-```
-
-### 自然日原始语音片段（realtime/*/utterances/{date}.jsonl）
-
-每条语音片段按其**墙上时钟归属的自然日**追加一行（append-only JSONL），是**每日轨聚合声学特征的权威来源**。这样避免了"24 小时滑动窗口"在老人夜间静默、每日轨凌晨 02:00 触发时读到错位/陈旧数据的问题——每日轨聚合的是"某自然日 00:00–23:59"，与 GRU"一天一条"的语义天然对齐。
-
-```jsonl
-{"ts": 1752811200.0, "start_sec": 0, "duration_sec": 3.0, "emotion": "sad", "speech_rate": 3.5, "pitch_mean": 190}
-{"ts": 1752811230.5, "start_sec": 0, "duration_sec": 2.4, "emotion": "neutral", "speech_rate": 4.1, "pitch_mean": 205}
-```
-
-> 某自然日无任何片段时，`UnifiedDataManager.get_daily_acoustic_with_quality` 返回中性默认值并标记 `data_quality="missing"`，交由每日轨的校验/填充链路据实降级，而非用假的"正常值"喂进 GRU 掩盖真实偏离。
+> 某自然日社交数据缺失时，聚合链路返回中性默认值并标记 `data_quality="missing"`，交由每日轨的校验/填充链路据实降级，而非用假的"正常值"喂进 GRU 掩盖真实偏离。
 
 ---
 
@@ -604,7 +483,7 @@ python scripts/test_unified_system.py
 
 ```yaml
 gru:
-  feature_dim: 10          # 特征维度（10维健康特征，已移除时间编码）
+  feature_dim: 6           # 特征维度（6维健康特征，已移除时间编码与语音声学维）
   hidden_dim: 16           # 隐藏层维度
   num_layers: 1            # GRU层数
   window: 7                # 时间窗口（天）
@@ -652,35 +531,10 @@ risk:
   cold_start_observation_days: 7  # 训练后观察期（仅记录不报警）
 ```
 
-### realtime_config.yaml（实时系统配置）
+### realtime_config.yaml（⚠️ 已成孤儿）
 
-```yaml
-system:
-  device: "cuda:0"         # 推理设备（cuda:0 / cpu）
-  output_dir: "./data/realtime"
-
-audio:
-  sample_rate: 16000       # 采样率
-  chunk_duration: 10       # 音频块时长（秒）
-  buffer_size: 100         # 队列缓冲大小
-
-sensevoice:
-  model_cache_dir: "./funasr_models"
-  batch_size: 15           # 批处理大小
-  language: "zh"           # 语言（zh/en/ja/ko/yue）
-
-aggregator:
-  window_hours: 24         # 24小时滑动窗口（实时展示用）
-
-storage:
-  save_interval: 1800      # 特征快照保存间隔（秒）。RealtimeMonitor 从此处读取（不再硬编码）
-
-# ⚠️ risk 段已停用：实时轨不再做主动报警，此段配置当前不被代码读取，
-# 仅作历史参考保留。所有预警统一由每日趋势轨发出（见 settings.yaml 的 risk 段）。
-# risk:
-#   check_interval: 3600
-#   simple_rules: { ... }
-```
+实时采集运行时已在本次重构中删除，`config/realtime_config.yaml` 文件仍在仓库中，
+但**已无任何代码读取**，仅作历史留存。系统当前唯一生效的配置是上文的 `settings.yaml`。
 
 ---
 
@@ -709,50 +563,25 @@ storage:
 - 低延迟（<100ms）
 
 ```bash
-# Jetson上安装CUDA版PyTorch
+# Jetson上安装CUDA版PyTorch（本系统 CPU 推理即可，<50MB 内存）
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# 部署统一系统
-python scripts/start_unified_system.py --elder-id E001 --microphone
+# 用系统定时任务（cron / systemd timer）在每天凌晨触发每日推理
+python scripts/run_daily_pipeline.py --date "$(date +%F)"
 ```
 
 ### 方案B：云端API
 
-**架构**：老人家中设备 → 音频流上传 → 云端SenseVoice推理 → 结果返回
+**架构**：老人家中设备 → 传感器数据上传 → 云端每日趋势推理 → 结果返回
 
-- **优点**：设备简单，只需麦克风+网络
+- **优点**：设备简单，家中只需传感器+网络
 - **缺点**：延迟高、隐私风险、依赖网络
 
 ---
 
 ## 故障排查
 
-### 问题1：麦克风无法打开
-
-```
-[MicrophoneStream] 初始化失败: No Default Input Device Available
-```
-
-**解决方法**：
-```bash
-# 列出可用设备
-python -m pyaudio
-
-# 指定设备索引
-python scripts/start_realtime_monitor.py --elder-id E001 --microphone --device-index 1
-```
-
-### 问题2：CUDA内存不足
-
-```
-RuntimeError: CUDA out of memory
-```
-
-**解决方法**：
-- 降低批处理大小：`realtime_config.yaml` 中 `batch_size: 5`
-- 或使用CPU：`device: "cpu"`
-
-### 问题3：数据缺失导致推理失败
+### 问题1：数据缺失导致推理失败
 
 ```
 [DailyJob] 数据不足，无法推理
@@ -781,8 +610,10 @@ MIT
 
 ---
 
-**最后更新**：2026-07-28  
-**项目版本**：v1.7（在 v1.6 基础上：①冷启动建档期 14→21 天并提为可配置项 `build_days`，附 20-seed 过拟合对比实验；②修复风险类型分类两处缺陷——"永不激活"（日志不写回 risk_types）与"正常日误激活"（类型判定挂靠 is_deviation）；③新增合成数据验证脚本 `validate_synthetic.py`（范围1跑通）与 `validate_discriminative.py`（范围2判别力，含真实噪声+混淆项）；④新增 `docs/TRAINING.md` GRU 训练详解。⑤修复模拟数据异常注入天数（25-30 → 40-46）与总天数（50 → 60），避开新建档期+观察期。测试 134 全绿。已知待办：跨类型"串味"（共享GRU溢出）、真实传感器采集/推送仍为桩。文档：本 README（总览+现状）、`docs/TRAINING.md`（训练详解）、`docs/TODO.md`、`docs/VALIDATION.md`（三层验证+§7执行记录））
+**最后更新**：2026-07-29  
+**项目版本**：v1.8（在 v1.7 基础上：**移除抑郁趋势判断 + 4 路语音声学维**（sad_ratio/avg_speed/pitch_variability/distress_events）**+ SenseVoice 声学子系统**（`src/realtime/*`、`src/unified_*.py`、`adapters/sensevoice.py` 已删除）；健康特征 **10→6 维**（sleep_efficiency / deep_sleep_ratio / sfi / hrv_rmssd / daily_activity / social_turns），风险类型 **3→2**（睡眠问题 + 社交孤独）；social_turns 改由拾音器 VAD 路径提供（该路径保留），social_isolation 不再依赖 sad_ratio；抑郁判断改由**外部专用模型**接入。）
+
+> v1.7 要点（在 v1.6 基础上）：①冷启动建档期 14→21 天并提为可配置项 `build_days`，附 20-seed 过拟合对比实验；②修复风险类型分类两处缺陷——"永不激活"（日志不写回 risk_types）与"正常日误激活"（类型判定挂靠 is_deviation）；③新增合成数据验证脚本 `validate_synthetic.py`（范围1跑通）与 `validate_discriminative.py`（范围2判别力，含真实噪声+混淆项）；④新增 `docs/TRAINING.md` GRU 训练详解。⑤修复模拟数据异常注入天数（25-30 → 40-46）与总天数（50 → 60），避开新建档期+观察期。测试 134 全绿。已知待办：跨类型"串味"（共享GRU溢出）、真实传感器采集/推送仍为桩。文档：本 README（总览+现状）、`docs/TRAINING.md`（训练详解）、`docs/TODO.md`、`docs/VALIDATION.md`（三层验证+§7执行记录）
 
 > v1.6 要点：打通统一系统链路（统一调度器真正调用每日管道）；声学按自然日聚合 + 缺失标记；微调与冷启动共用 early-stopping；统一系统快照原子写；save_interval 走配置。
 

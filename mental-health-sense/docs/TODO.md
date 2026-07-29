@@ -24,6 +24,12 @@
 | P2-2 | ✅ | 抽出 `_train_loop`，冷启动/微调共用 early-stopping+回滚；顺带修 best_state 与 best_loss 差一梯度步的 off-by-one |
 | P2-3 | ✅ | 快照原子写（临时文件 + `os.replace`）；utterance JSONL append-only |
 
+> **补充说明（2026-07-29，已超越）**：其中所有**声学相关的数据流水项**——
+> `UnifiedDataManager` 声学聚合/快照、`sensevoice_engine` 的窗口与 utterance 逻辑、
+> `get_daily_acoustic_data` 的默认常量兜底等（主要涉及 **P0-2 / P1-1 / P1-2**）——
+> 已随"移除抑郁判断 + SenseVoice 声学子系统（10→6 维）"整体删除，不再适用。
+> 下方历史条目仅保留备查，不代表当前代码结构。
+
 > 下方为原始问题记录，保留备查。
 
 ---
