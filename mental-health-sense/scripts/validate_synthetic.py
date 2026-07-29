@@ -10,7 +10,7 @@
     day 1-21   建档期    → 正常数据，攒够 21 天后训练（→14 个样本）
     day 22-28  观察期    → 只记录不报警（验证观察期生效）
     day 29-39  正常运行  → 带噪正常天（测不误报）
-    day 40-46  异常注入  → 抑郁特征，应逐级升到 Level 2/3（测检出+分级）
+    day 40-46  异常注入  → 睡眠恶化特征，应逐级升到 Level 2/3（测检出+分级）
     day 47-60  恢复+正常 → 应降回 Level 0（测不赖着不降）
 
 用独立 elder_id=V001，跑完自动清理，不碰 E001 真实数据。
@@ -41,18 +41,16 @@ BUILD_DAYS = 21          # 与 settings.yaml 的 training.initial.build_days 对
 V001_CONFIG = {
     "name": "验证老人V001",
     "baseline": {
-        "sad_ratio": (0.05, 0.02), "avg_speed": (4.5, 0.3),
-        "pitch_variability": (32, 4), "distress_events": (0.1, 0.2),
         "sleep_efficiency": (0.88, 0.04), "deep_sleep_ratio": (0.30, 0.03),
         "sfi": (5.0, 1.0), "hrv_rmssd": (50, 5),
         "daily_activity": (6000, 800), "social_turns": (35, 5),
     },
     "anomaly": {
         "start_day": 40, "end_day": 46,
-        "features": {"sad_ratio": 0.20, "avg_speed": 2.5,
-                     "pitch_variability": 12.0, "distress_events": 3.0},
+        "features": {"sleep_efficiency": 0.65, "deep_sleep_ratio": 0.15,
+                     "sfi": 14.0, "hrv_rmssd": 28.0},
     },
-    "description": "day40-46 抑郁特征注入（避开建档21天+观察7天）",
+    "description": "day40-46 睡眠恶化特征注入（避开建档21天+观察7天）",
 }
 
 def cleanup_velder():
@@ -64,7 +62,6 @@ def cleanup_velder():
         root / "raw" / "sleep" / VELDER,
         root / "raw" / "activity" / VELDER,
         root / "raw" / "social" / VELDER,
-        root / "raw" / "acoustic" / VELDER,
         root / "realtime" / VELDER,
     ]
     for t in targets:

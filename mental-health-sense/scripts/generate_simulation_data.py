@@ -35,10 +35,6 @@ ELDER_CONFIGS = {
     ELDER_ID: {
         "name": "示例老人",
         "baseline": {
-            "sad_ratio": (0.05, 0.02),
-            "avg_speed": (4.5, 0.3),
-            "pitch_variability": (32, 4),
-            "distress_events": (0.1, 0.2),
             "sleep_efficiency": (0.88, 0.04),
             "deep_sleep_ratio": (0.30, 0.03),
             "sfi": (5.0, 1.0),
@@ -53,19 +49,18 @@ ELDER_CONFIGS = {
             "start_day": 40,
             "end_day": 46,
             "features": {
-                "sad_ratio": 0.20,
-                "avg_speed": 2.5,
-                "pitch_variability": 12.0,
-                "distress_events": 3.0,
+                "sleep_efficiency": 0.65,   # 睡眠效率↓
+                "deep_sleep_ratio": 0.15,   # 深睡占比↓
+                "sfi": 14.0,                # 睡眠碎片化↑
+                "hrv_rmssd": 28.0,          # 心率变异↓
             },
         },
-        "description": "Day 40-46 注入抑郁特征（sad_ratio↑ + avg_speed↓ + pitch_variability↓ + distress_events↑），已避开建档期+观察期，用于演示连续偏离触发预警",
+        "description": "Day 40-46 注入睡眠恶化特征（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期+观察期，用于演示连续偏离触发预警",
     },
 }
 
-# 特征列表（10维健康特征）
+# 特征列表（6维健康特征，顺序须与 scaler_utils.FEATURE_NAMES 完全一致）
 HEALTH_FEATURES = [
-    "sad_ratio", "avg_speed", "pitch_variability", "distress_events",
     "sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd",
     "daily_activity", "social_turns",
 ]
@@ -77,7 +72,7 @@ def generate_daily_vector(
     seed: int = 42,
 ) -> np.ndarray:
     """
-    生成单日10维健康特征向量。
+    生成单日6维健康特征向量。
 
     Args:
         day: 第N天 (1-based)
@@ -85,15 +80,15 @@ def generate_daily_vector(
         seed: 随机种子（保证可复现）
 
     Returns:
-        (10,) numpy数组
+        (6,) numpy数组
     """
     rng = np.random.RandomState((seed + day * 13 + abs(hash(elder_config.get("name", "")))) % (2**31))
 
     baseline = elder_config["baseline"]
     anomaly = elder_config.get("anomaly")
 
-    vector = np.zeros(10, dtype=np.float64)
-    missing_mask = np.zeros(10, dtype=bool)
+    vector = np.zeros(6, dtype=np.float64)
+    missing_mask = np.zeros(6, dtype=bool)
 
     for i, feat in enumerate(HEALTH_FEATURES):
         if feat in baseline:
@@ -128,7 +123,7 @@ def generate_daily_vector(
             if not missing_mask[i]:
                 if feat not in ("hrv_rmssd", "sfi"):
                     value = max(0.0, value)
-                if feat in ("sad_ratio", "sleep_efficiency", "deep_sleep_ratio"):
+                if feat in ("sleep_efficiency", "deep_sleep_ratio"):
                     value = min(max(value, 0.0), 1.0)
 
             vector[i] = value
@@ -148,7 +143,7 @@ def generate_all_data(
         data/features/{elder_id}/features.csv
 
     同时也生成原始传感器数据：
-        data/raw/{sleep|activity|social|acoustic}/{elder_id}/{date}.json
+        data/raw/{sleep|activity|social}/{elder_id}/{date}.json
     """
     output_dir = Path(output_dir)
     features_dir = output_dir / "data" / "features"
@@ -174,7 +169,7 @@ def generate_all_data(
             date_dt = start_dt + timedelta(days=day - 1)
             date_str = date_dt.strftime("%Y-%m-%d")
 
-            # 生成健康特征（10维）
+            # 生成健康特征（6维）
             health_vec = generate_daily_vector(day, config, seed=hash(elder_id) % 10000)
 
             # 统计缺失
@@ -240,14 +235,17 @@ def _generate_raw_data(
     config: dict,
 ):
     """生成原始传感器数据（JSON格式，用于数据管道测试）"""
+    # 索引对应 HEALTH_FEATURES / FEATURE_NAMES 的 6 维顺序：
+    #   0=sleep_efficiency 1=deep_sleep_ratio 2=sfi 3=hrv_rmssd 4=daily_activity 5=social_turns
+
     # 睡眠数据
     sleep_dir = raw_dir / "sleep" / elder_id
     sleep_dir.mkdir(parents=True, exist_ok=True)
     sleep_data = {
-        "sleep_efficiency": float(health_vec[4]) if not np.isnan(health_vec[4]) else None,
-        "deep_sleep_ratio": float(health_vec[5]) if not np.isnan(health_vec[5]) else None,
-        "sfi": float(health_vec[6]) if not np.isnan(health_vec[6]) else None,
-        "hrv_rmssd": float(health_vec[7]) if not np.isnan(health_vec[7]) else None,
+        "sleep_efficiency": float(health_vec[0]) if not np.isnan(health_vec[0]) else None,
+        "deep_sleep_ratio": float(health_vec[1]) if not np.isnan(health_vec[1]) else None,
+        "sfi": float(health_vec[2]) if not np.isnan(health_vec[2]) else None,
+        "hrv_rmssd": float(health_vec[3]) if not np.isnan(health_vec[3]) else None,
         "timestamp": f"{date_str}T06:00:00",
     }
     with open(sleep_dir / f"{date_str}.json", "w", encoding="utf-8") as f:
@@ -257,8 +255,8 @@ def _generate_raw_data(
     activity_dir = raw_dir / "activity" / elder_id
     activity_dir.mkdir(parents=True, exist_ok=True)
     activity_data = {
-        "daily_activity": float(health_vec[8]) if not np.isnan(health_vec[8]) else None,
-        "space_entropy": 2.0 if not np.isnan(health_vec[8]) else None,
+        "daily_activity": float(health_vec[4]) if not np.isnan(health_vec[4]) else None,
+        "space_entropy": 2.0 if not np.isnan(health_vec[4]) else None,
         "timestamp": f"{date_str}T23:59:59",
     }
     with open(activity_dir / f"{date_str}.json", "w", encoding="utf-8") as f:
@@ -268,25 +266,12 @@ def _generate_raw_data(
     social_dir = raw_dir / "social" / elder_id
     social_dir.mkdir(parents=True, exist_ok=True)
     social_data = {
-        "social_turns": float(health_vec[9]) if not np.isnan(health_vec[9]) else None,
+        "social_turns": float(health_vec[5]) if not np.isnan(health_vec[5]) else None,
         "speech_duration_ratio": 0.12,
         "timestamp": f"{date_str}T23:59:59",
     }
     with open(social_dir / f"{date_str}.json", "w", encoding="utf-8") as f:
         json.dump(social_data, f, ensure_ascii=False)
-
-    # 声学/语义数据
-    acoustic_dir = raw_dir / "acoustic" / elder_id
-    acoustic_dir.mkdir(parents=True, exist_ok=True)
-    acoustic_data = {
-        "sad_ratio": float(health_vec[0]) if not np.isnan(health_vec[0]) else None,
-        "avg_speed": float(health_vec[1]) if not np.isnan(health_vec[1]) else None,
-        "pitch_variability": float(health_vec[2]) if not np.isnan(health_vec[2]) else None,
-        "distress_events": float(health_vec[3]) if not np.isnan(health_vec[3]) else None,
-        "timestamp": f"{date_str}T23:59:59",
-    }
-    with open(acoustic_dir / f"{date_str}.json", "w", encoding="utf-8") as f:
-        json.dump(acoustic_data, f, ensure_ascii=False)
 
 
 if __name__ == "__main__":
