@@ -1,0 +1,39 @@
+{
+  "elder_id": "E001",
+  "day_key": "2026-07-03",
+  "sleep": {
+    "track": "sleep",
+    "anomaly_score": 0.0,
+    "static_threshold": 0.0,
+    "ewma_threshold": 0.0,
+    "dynamic_threshold": 0.0,
+    "is_deviation": false,
+    "signed_residuals": {},
+    "abs_residuals": {},
+    "signed_z": {},
+    "signed_available": false,
+    "ewma_pool": "default",
+    "status": "data_insufficient"
+  },
+  "social": {
+    "track": "social",
+    "anomaly_score": 0.0,
+    "static_threshold": 0.0,
+    "ewma_threshold": 0.0,
+    "dynamic_threshold": 0.0,
+    "is_deviation": false,
+    "signed_residuals": {},
+    "abs_residuals": {},
+    "signed_z": {},
+    "signed_available": false,
+    "ewma_pool": "default",
+    "status": "data_insufficient"
+  },
+  "status": "data_insufficient",
+  "track_statuses": {
+    "sleep": "data_insufficient",
+    "social": "data_insufficient"
+  },
+  "is_deviation": false,
+  "consecutive_deviation_days": 0
+}

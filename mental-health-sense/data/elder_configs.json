@@ -1,6 +1,41 @@
 {
   "E001": {
     "name": "示例老人",
-    "description": "Day 40-46 注入睡眠恶化特征（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期+观察期，用于演示连续偏离触发预警"
+    "tracks": [
+      "sleep",
+      "social"
+    ],
+    "sleep_features": [
+      "sleep_efficiency",
+      "waso_min",
+      "sol_min",
+      "bed_exit_count",
+      "deep_sleep_ratio",
+      "sleep_onset_clock",
+      "night_hr_mean",
+      "daytime_nap_min"
+    ],
+    "social_features": [
+      "copresence_min",
+      "out_of_home_min",
+      "rar_amplitude",
+      "rar_iv",
+      "activity_counts"
+    ],
+    "anomalies": [
+      {
+        "track": "sleep",
+        "label": "睡眠恶化",
+        "start_day": 40,
+        "end_day": 46
+      },
+      {
+        "track": "social",
+        "label": "社交退缩",
+        "start_day": 50,
+        "end_day": 58
+      }
+    ],
+    "description": "两段异常刻意错开，用于验证双轨信号隔离：睡眠恶化期社交轨应正常，社交退缩期睡眠轨应正常。"
   }
 }

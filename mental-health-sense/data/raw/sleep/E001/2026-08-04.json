@@ -1,1 +1,1 @@
-{"sleep_efficiency": 0.9395475135217703, "deep_sleep_ratio": 0.2960793220226971, "sfi": 4.886452989054147, "hrv_rmssd": 47.78615370296281, "timestamp": "2026-08-04T06:00:00"}
+{"sleep_efficiency": 0.8873320538506926, "waso_min": 36.90769910519281, "sol_min": 24.735108814645287, "bed_exit_count": 1.0, "deep_sleep_ratio": 0.229508484250135, "sleep_onset_clock": 152.9091439927617, "night_hr_mean": 56.8240673152853, "daytime_nap_min": 36.46056869793744, "timestamp": "2026-08-04T06:00:00"}

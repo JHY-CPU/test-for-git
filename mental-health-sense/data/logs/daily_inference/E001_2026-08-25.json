@@ -1,0 +1,98 @@
+{
+  "elder_id": "E001",
+  "day_key": "2026-08-25",
+  "sleep": {
+    "track": "sleep",
+    "anomaly_score": 0.7362,
+    "static_threshold": 2.2883,
+    "ewma_threshold": 1.3958,
+    "dynamic_threshold": 1.3958,
+    "is_deviation": false,
+    "signed_residuals": {
+      "sleep_efficiency": -0.5705,
+      "waso_min": -1.0499,
+      "sol_min": 1.256,
+      "bed_exit_count": -0.5568,
+      "deep_sleep_ratio": 0.3174,
+      "sleep_onset_clock": -1.2136,
+      "night_hr_mean": -0.3452,
+      "daytime_nap_min": -0.0892
+    },
+    "abs_residuals": {
+      "sleep_efficiency": 0.5705,
+      "waso_min": 1.0499,
+      "sol_min": 1.256,
+      "bed_exit_count": 0.5568,
+      "deep_sleep_ratio": 0.3174,
+      "sleep_onset_clock": 1.2136,
+      "night_hr_mean": 0.3452,
+      "daytime_nap_min": 0.0892
+    },
+    "signed_z": {
+      "sleep_efficiency": -0.704,
+      "waso_min": -0.8328,
+      "sol_min": 0.9874,
+      "bed_exit_count": -0.5968,
+      "deep_sleep_ratio": 0.5409,
+      "sleep_onset_clock": -1.3523,
+      "night_hr_mean": -0.326,
+      "daytime_nap_min": -0.1403
+    },
+    "signed_available": true,
+    "ewma_pool": "default",
+    "ewma_frozen": false,
+    "ewma_n": 68,
+    "ewma_min_samples": 20,
+    "in_observation_period": false,
+    "status": "success"
+  },
+  "social": {
+    "track": "social",
+    "anomaly_score": 9.5217,
+    "static_threshold": 2.2834,
+    "ewma_threshold": 1.3137,
+    "dynamic_threshold": 1.3137,
+    "is_deviation": true,
+    "signed_residuals": {
+      "copresence_min": -1.2193,
+      "out_of_home_min": -2.9604,
+      "rar_amplitude": -6.7251,
+      "rar_iv": 35.8169,
+      "activity_counts": -3.1063
+    },
+    "abs_residuals": {
+      "copresence_min": 1.2193,
+      "out_of_home_min": 2.9604,
+      "rar_amplitude": 6.7251,
+      "rar_iv": 35.8169,
+      "activity_counts": 3.1063
+    },
+    "signed_z": {
+      "copresence_min": -1.4341,
+      "out_of_home_min": -3.7282,
+      "rar_amplitude": -4.7177,
+      "rar_iv": 27.7474,
+      "activity_counts": -2.9918
+    },
+    "signed_available": true,
+    "ewma_pool": "default",
+    "ewma_frozen": true,
+    "ewma_n": 51,
+    "ewma_min_samples": 20,
+    "in_observation_period": false,
+    "status": "success"
+  },
+  "status": "success",
+  "track_statuses": {
+    "sleep": "success",
+    "social": "success"
+  },
+  "is_deviation": true,
+  "consecutive_deviation_days": 7,
+  "risk_type_qualifies": {
+    "sleep_stability": false,
+    "social_decline": true,
+    "circadian_disruption": false
+  },
+  "risk_level": 3
+}

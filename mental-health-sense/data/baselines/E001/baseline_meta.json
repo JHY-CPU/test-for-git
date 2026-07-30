@@ -1,5 +1,39 @@
 {
-  "ewma_n_at_train": 14,
-  "train_date": "2026-07-29",
-  "feature_dim": 6
+  "sleep": {
+    "ewma_n_at_train": 28,
+    "train_date": "2026-07-31",
+    "feature_dim": 8,
+    "hidden_dim": 8,
+    "feature_names": [
+      "sleep_efficiency",
+      "waso_min",
+      "sol_min",
+      "bed_exit_count",
+      "deep_sleep_ratio",
+      "sleep_onset_clock",
+      "night_hr_mean",
+      "daytime_nap_min"
+    ],
+    "build_days": 35,
+    "holdout_days": 7,
+    "threshold_source": "holdout",
+    "last_day_key": "2026-08-04"
+  },
+  "social": {
+    "ewma_n_at_train": 28,
+    "train_date": "2026-07-31",
+    "feature_dim": 5,
+    "hidden_dim": 8,
+    "feature_names": [
+      "copresence_min",
+      "out_of_home_min",
+      "rar_amplitude",
+      "rar_iv",
+      "activity_counts"
+    ],
+    "build_days": 35,
+    "holdout_days": 7,
+    "threshold_source": "holdout",
+    "last_day_key": "2026-08-04"
+  }
 }
