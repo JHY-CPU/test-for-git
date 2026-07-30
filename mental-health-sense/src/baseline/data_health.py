@@ -16,7 +16,7 @@ GRU 会把异常学成"正常基线"，之后再也报不出来。本模块在�
 
 import numpy as np
 
-from src.baseline.scaler_utils import FEATURE_NAMES
+from src.baseline.scaler_utils import get_feature_names
 
 # Consistency constant: 0.6745 = Φ⁻¹(0.75)，使 MAD 在正态分布下等价于标准差
 _MAD_SCALE = 0.6745
@@ -89,23 +89,25 @@ def detect_outlier_days(
     }
 
 
-def describe_outlier_days(data: np.ndarray, report: dict) -> list[str]:
+def describe_outlier_days(data: np.ndarray, report: dict, track: str) -> list[str]:
     """
     把离群检测结果转成人类可读的说明（用于日志）。
 
     Args:
         data: 与 detect_outlier_days 相同的 (n_days, n_features) 矩阵
         report: detect_outlier_days 的返回值
+        track: "sleep" / "social"，决定用哪套特征名
 
     Returns:
         每个离群天一行的描述字符串列表
     """
+    names = get_feature_names(track)
     lines = []
     flags = report["feature_flags"]
     for i in report["outlier_day_indices"]:
         bad_feats = [
-            FEATURE_NAMES[j] for j in range(flags.shape[1])
-            if j < len(FEATURE_NAMES) and flags[i, j]
+            names[j] for j in range(flags.shape[1])
+            if j < len(names) and flags[i, j]
         ]
-        lines.append(f"Day#{i}: 离群特征={bad_feats}")
+        lines.append(f"[{track}] Day#{i}: 离群特征={bad_feats}")
     return lines

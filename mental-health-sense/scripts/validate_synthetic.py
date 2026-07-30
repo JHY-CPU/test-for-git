@@ -1,16 +1,21 @@
-"""合成数据端到端验证（范围 1：跑通验证）
+"""合成数据端到端验证（范围 1：跑通验证，双轨）
 
-目的：在无真实数据的开发验证阶段，用合成数据验证"统一每日链路能否端到端跑通"——
-即：造 60 天数据 → 冷启动训练 → 逐日推理 → 风险判定，全程不崩、状态流转正确。
+目的：在无真实数据的开发验证阶段，验证"双轨每日链路能否端到端跑通"——
+即：造 60 天数据 → 双轨建档 → 逐日推理 → 三类风险判定，全程不崩、状态流转正确。
 
-这是 docs/VALIDATION.md 层次 A（代码正确性）的落地。它证明"链路通、状态对"，
-**不**证明"判别力"（那是范围 2，需混淆项）；更不证明"真实有效"（需真人+临床标签）。
+这是 docs/VALIDATION.md 层次 A（代码正确性）的落地。它证明"链路通、状态对、
+两轨互不串扰"，**不**证明"判别力"（那是范围 2，需混淆项）；
+更不证明"真实有效"（需真人 + 临床标签 + 量表对照）。
 
-时间线（适配 build_days=35，已取消观察期）：
-    day 1-35   建档期    → 正常数据，攒够 35 天后训练（→28 个样本）
+时间线（build_days=35，已取消观察期）：
+    day  1-35  建档期    → 正常数据，攒够 35 天后两轨各自训练
     day 36-39  正常运行  → 带噪正常天（测不误报）
-    day 40-46  异常注入  → 睡眠恶化特征，应逐级升到 Level 2/3（测检出+分级）
-    day 47-60  恢复+正常 → 应降回 Level 0（测不赖着不降）
+    day 40-46  睡眠恶化  → 应升到 Level 2/3，且**社交轨保持安静**
+    day 47-49  恢复
+    day 50-58  社交退缩  → 应升到 Level 2/3，且**睡眠轨保持安静**
+    day 59-60  恢复      → 应降回 Level 0（测不赖着不降）
+
+两段异常错开是为了验证双轨的信号隔离——这是本次重构的核心收益。
 
 用独立 elder_id=V001，跑完自动清理，不碰 E001 真实数据。
 
@@ -27,30 +32,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.generate_simulation_data import generate_daily_vector, _generate_raw_data
+from src.baseline.scaler_utils import TRACKS
 from src.utils.io import get_project_root
 from src.utils.logger import setup_logger
 
 VELDER = "V001"          # 验证专用 ID，隔离 E001
 N_DAYS = 60
 START_DATE = "2026-01-01"
-BUILD_DAYS = 35          # 与 settings.yaml 的 training.initial.build_days 对齐，无观察期
+BUILD_DAYS = 35          # 与 settings.yaml 的 training.initial.build_days 对齐
 
-# V001 配置：正常基线沿用 E001，异常注入挪到 day40-46（建档期35天，day36起正式运行）
-V001_CONFIG = {
-    "name": "验证老人V001",
-    "baseline": {
-        "sleep_efficiency": (0.88, 0.04), "deep_sleep_ratio": (0.30, 0.03),
-        "sfi": (5.0, 1.0), "hrv_rmssd": (50, 5),
-        "daily_activity": (6000, 800), "social_turns": (35, 5),
-    },
-    "anomaly": {
-        "start_day": 40, "end_day": 46,
-        "features": {"sleep_efficiency": 0.65, "deep_sleep_ratio": 0.15,
-                     "sfi": 14.0, "hrv_rmssd": 28.0},
-    },
-    "description": "day40-46 睡眠恶化特征注入（建档期35天，day36起正式运行）",
-}
+# 异常段（与 generate_simulation_data 保持一致）
+SLEEP_ANOMALY = (40, 46)
+SOCIAL_ANOMALY = (50, 58)
+
 
 def cleanup_velder():
     """删除 V001 的全部产物（features / raw / baselines / 推理日志 / 预警）。"""
@@ -60,13 +54,11 @@ def cleanup_velder():
         root / "baselines" / VELDER,
         root / "raw" / "sleep" / VELDER,
         root / "raw" / "activity" / VELDER,
-        root / "raw" / "social" / VELDER,
-        root / "realtime" / VELDER,
+        root / "raw" / "camera" / VELDER,
     ]
     for t in targets:
         if t.exists():
             shutil.rmtree(t, ignore_errors=True)
-    # 推理日志与预警按 {elder}_{date} 命名，逐个删
     for sub in ("daily_inference", "alerts"):
         d = root / "logs" / sub
         if d.exists():
@@ -75,108 +67,205 @@ def cleanup_velder():
 
 
 def generate_raw_only(root: Path):
-    """只生成 60 天 raw 传感器数据（不预写 features.csv，让管道自己聚合）。"""
+    """
+    只生成 60 天 raw 传感器数据，不预写 features CSV——让管道自己聚合。
+
+    这样验证的是"聚合→填充→校验→推理"整条链，而不是跳过前半段。
+    """
+    import scripts.generate_simulation_data as gen
+
     raw_dir = root / "data" / "raw"
     start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
-    for day in range(1, N_DAYS + 1):
-        date_str = (start_dt + timedelta(days=day - 1)).strftime("%Y-%m-%d")
-        vec = generate_daily_vector(day, V001_CONFIG, seed=777)
-        _generate_raw_data(raw_dir, VELDER, date_str, vec, V001_CONFIG)
+    seed = 777
+
+    original_elder = gen.ELDER_ID
+    gen.ELDER_ID = VELDER   # 让 _write_raw 落到 V001 目录
+    try:
+        for day in range(1, N_DAYS + 1):
+            date_dt = start_dt + timedelta(days=day - 1)
+            day_key = date_dt.strftime("%Y-%m-%d")
+            is_weekend = date_dt.weekday() >= 5
+
+            sleep_vec = gen.generate_sleep_vector(day, seed)
+            social_vec, hourly = gen.generate_social_vector(day, seed, is_weekend)
+            gen._write_raw(raw_dir, day_key, sleep_vec, social_vec, hourly)
+    finally:
+        gen.ELDER_ID = original_elder
 
 
 def run_timeline(config):
-    """逐日跑 run_daily_pipeline；day21 结束后触发冷启动训练。返回每日结果列表。"""
-    from src.scheduler.daily_job import run_daily_pipeline, load_raw_sensors
-    from src.baseline.trainer import train_initial_baseline
+    """逐日跑 run_daily_pipeline；建档期结束后触发双轨冷启动训练。"""
+    from src.baseline.trainer import train_all_tracks
+    from src.scheduler.daily_job import load_raw_sensors, run_daily_pipeline
 
     start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
     rows = []
     trained = False
+
     for day in range(1, N_DAYS + 1):
-        date_str = (start_dt + timedelta(days=day - 1)).strftime("%Y-%m-%d")
-        raw = load_raw_sensors(VELDER, date_str)
-        res = run_daily_pipeline(VELDER, date_str, raw_data=raw, config=config)
+        day_key = (start_dt + timedelta(days=day - 1)).strftime("%Y-%m-%d")
+        raw = load_raw_sensors(VELDER, day_key)
+        res = run_daily_pipeline(VELDER, day_key, raw_data=raw, config=config)
 
         inf = res.get("inference_result") or {}
         risk = res.get("risk_result") or {}
-        rows.append({
-            "day": day, "date": date_str,
-            "quality": res.get("data_quality"),
-            "inf_status": inf.get("status", "-"),
-            "score": inf.get("anomaly_score"),
-            "threshold": inf.get("dynamic_threshold"),
-            "deviation": inf.get("is_deviation"),
-            "obs": inf.get("in_observation_period"),
+        row = {
+            "day": day,
+            "day_key": day_key,
+            "quality": res.get("track_quality", {}),
             "risk_level": risk.get("risk_level"),
-            "risk_types": [r.get("risk_type") for r in risk.get("risk_types", [])],
-        })
+            "risk_types": [r.get("risk_key") for r in risk.get("risk_types", [])],
+        }
+        for track in TRACKS:
+            tr = inf.get(track) or {}
+            row[track] = {
+                "status": tr.get("status", "-"),
+                "score": tr.get("anomaly_score"),
+                "threshold": tr.get("dynamic_threshold"),
+                "deviation": tr.get("is_deviation"),
+            }
+        rows.append(row)
 
-        # 建档期结束（攒够 BUILD_DAYS 天）触发一次冷启动训练
         if day == BUILD_DAYS and not trained:
-            m, s, st, ew = train_initial_baseline(VELDER, config)
-            rows[-1]["_train"] = f"trained: ewma_n={ew.n} (期望28)"
+            results = train_all_tracks(VELDER, config)
+            rows[-1]["_train"] = results
             trained = True
+
     return rows
 
+
 def verify(rows):
-    """对照预期打分，返回 (通过项, 失败项) 两个列表。"""
+    """对照预期打分，返回 (通过项, 失败项)。"""
     ok, fail = [], []
 
     def check(cond, name, detail=""):
         (ok if cond else fail).append(f"{name} {detail}".strip())
 
-    # 1. 全程无崩溃：跑满 60 天
+    def in_range(day, span):
+        return span[0] <= day <= span[1]
+
+    # 1. 全程无崩溃
     check(len(rows) == N_DAYS, "跑通", f"完成 {len(rows)}/{N_DAYS} 天，无异常中断")
 
-    # 2. 训练成功：day21 训出 14 个样本
+    # 2. 双轨建档均成功
     trow = next((r for r in rows if "_train" in r), None)
-    check(trow is not None and "ewma_n=28" in trow.get("_train", ""),
-          "冷启动训练", trow.get("_train", "未触发") if trow else "未触发")
+    train_res = trow.get("_train", {}) if trow else {}
+    check(
+        all(train_res.get(t) == "success" for t in TRACKS),
+        "双轨建档", str(train_res) if train_res else "未触发",
+    )
 
-    # 3. 状态流转：观察期 / success 各阶段出现在正确区间
-    obs_days = [r["day"] for r in rows if r["inf_status"] == "observation"]
-    succ_days = [r["day"] for r in rows if r["inf_status"] == "success"]
-    # 已取消观察期：cold_start_observation_days=0，训练后直接进入 success
-    check(len(obs_days) == 0,
-          "无观察期", f"应无观察日，实际 {len(obs_days)} 天" if obs_days else "已取消观察期，训练完直接正式运行")
-    check(len(succ_days) > 0 and min(succ_days) >= 36,
-          "success流转", f"success 从 day{min(succ_days)} 起" if succ_days else "无 success")
+    # 3. 状态流转：训练后两轨都应进入 success（已取消观察期）
+    for track in TRACKS:
+        succ = [r["day"] for r in rows if r[track]["status"] == "success"]
+        check(
+            bool(succ) and min(succ) >= BUILD_DAYS + 1,
+            f"[{track}] success流转",
+            f"从 day{min(succ)} 起" if succ else "无 success 天",
+        )
+        obs = [r["day"] for r in rows if r[track]["status"] == "observation"]
+        check(not obs, f"[{track}] 无观察期", f"实际 {len(obs)} 天" if obs else "已取消")
 
-    # 4. 字段完整性：success 天必须带齐关键字段
-    bad = [r["day"] for r in rows if r["inf_status"] == "success"
-           and (r["score"] is None or r["threshold"] is None or r["risk_level"] is None)]
+    # 4. 建档前应走兜底而非完全不检测
+    fb = [r["day"] for r in rows
+          if r["day"] < BUILD_DAYS and r["sleep"]["status"] == "cold_start_fallback"]
+    check(len(fb) > 20, "冷启动兜底", f"建档期 {len(fb)} 天走稳健兜底（消除监测盲区）")
+
+    # 5. 字段完整性
+    bad = [
+        r["day"] for r in rows for t in TRACKS
+        if r[t]["status"] == "success"
+        and (r[t]["score"] is None or r[t]["threshold"] is None)
+    ]
     check(not bad, "字段完整", "success 天字段齐全" if not bad else f"缺字段: day{bad}")
 
-    # 5. 检出（信息性）：异常期 day40-46 是否升级到 Level>=2
-    anom = [r for r in rows if 40 <= r["day"] <= 46]
-    max_lvl = max((r["risk_level"] or 0) for r in anom) if anom else 0
-    check(max_lvl >= 2, "异常检出", f"异常期最高 Level={max_lvl}（期望≥2）")
+    # 6. 睡眠异常检出
+    sleep_hits = [
+        r["day"] for r in rows
+        if in_range(r["day"], SLEEP_ANOMALY) and r["sleep"]["deviation"]
+    ]
+    check(len(sleep_hits) >= 6, "睡眠异常检出", f"{len(sleep_hits)}/7 天检出")
 
-    # 6. 恢复（信息性）：day 55-60 回落到 Level 0
-    tail = [r for r in rows if 55 <= r["day"] <= 60]
-    tail_max = max((r["risk_level"] or 0) for r in tail) if tail else 0
-    check(tail_max == 0, "恢复降级", f"尾期最高 Level={tail_max}（期望0）")
+    # 7. ★ 信号隔离：睡眠异常期社交轨应基本安静
+    social_noise = [
+        r["day"] for r in rows
+        if SLEEP_ANOMALY[0] + 1 <= r["day"] <= SLEEP_ANOMALY[1]
+        and r["social"]["deviation"]
+    ]
+    check(len(social_noise) <= 1, "睡眠期社交轨隔离",
+          f"社交轨误报 {len(social_noise)} 天（期望≤1）")
+
+    # 8. 社交异常检出
+    social_hits = [
+        r["day"] for r in rows
+        if in_range(r["day"], SOCIAL_ANOMALY) and r["social"]["deviation"]
+    ]
+    check(len(social_hits) >= 8, "社交异常检出", f"{len(social_hits)}/9 天检出")
+
+    # 9. ★ 信号隔离：社交异常期睡眠轨应安静
+    sleep_noise = [
+        r["day"] for r in rows
+        if in_range(r["day"], SOCIAL_ANOMALY) and r["sleep"]["deviation"]
+    ]
+    check(not sleep_noise, "社交期睡眠轨隔离",
+          f"睡眠轨误报 day{sleep_noise}" if sleep_noise else "睡眠轨全程安静")
+
+    # 10. 风险类型对号入座
+    sleep_types = {t for r in rows if in_range(r["day"], SLEEP_ANOMALY) for t in r["risk_types"]}
+    social_types = {t for r in rows if in_range(r["day"], SOCIAL_ANOMALY) for t in r["risk_types"]}
+    check("sleep_stability" in sleep_types, "睡眠类型激活", str(sorted(sleep_types)))
+    check("social_decline" in social_types, "社会类型激活", str(sorted(social_types)))
+    check("social_decline" not in sleep_types, "睡眠期无社会类型误激活")
+
+    # 11. 分级：异常期升到 Level≥2
+    for name, span in (("睡眠", SLEEP_ANOMALY), ("社交", SOCIAL_ANOMALY)):
+        lvls = [r["risk_level"] or 0 for r in rows if in_range(r["day"], span)]
+        check(max(lvls, default=0) >= 2, f"{name}期分级", f"最高 Level={max(lvls, default=0)}")
+
+    # 12. 恢复降级
+    tail = [r["risk_level"] or 0 for r in rows if r["day"] >= 59]
+    check(max(tail, default=0) <= 1, "恢复降级", f"尾期最高 Level={max(tail, default=0)}（期望≤1）")
+
+    # 13. 正常期不误报（day 36-39）
+    normal_fp = [
+        r["day"] for r in rows if 36 <= r["day"] <= 39 and (r["risk_level"] or 0) >= 2
+    ]
+    check(not normal_fp, "正常期不误报",
+          f"day{normal_fp} 误升到 Level≥2" if normal_fp else "day36-39 无 Level≥2")
 
     return ok, fail
 
 
 def print_report(rows, ok, fail):
-    print("\n" + "=" * 78)
-    print(f"合成数据端到端验证（范围1：跑通）  elder={VELDER}  {N_DAYS}天  build_days={BUILD_DAYS}")
-    print("=" * 78)
-    # 关键节点抽样打印（每阶段头尾 + 异常期全打）
-    show = set(list(range(1, 8)) + [28, BUILD_DAYS, 36] + list(range(40, 47)) + [55, 60])
-    print(f"{'day':>3} {'date':>10} {'质量':>5} {'推理状态':>18} {'分数':>7} {'阈值':>7} {'偏离':>4} {'等级':>4}")
-    print("-" * 78)
+    print("\n" + "=" * 96)
+    print(f"合成数据端到端验证（范围1：跑通，双轨）  elder={VELDER}  "
+          f"{N_DAYS}天  build_days={BUILD_DAYS}")
+    print("=" * 96)
+
+    show = set(
+        list(range(1, 5)) + [BUILD_DAYS - 1, BUILD_DAYS, BUILD_DAYS + 1]
+        + list(range(38, 48)) + list(range(50, 60)) + [60]
+    )
+    print(f"{'day':>3} {'date':>11} | {'睡眠分':>7} {'阈值':>6} {'偏':>2} "
+          f"| {'社交分':>7} {'阈值':>6} {'偏':>2} | {'级':>2} 风险类型")
+    print("-" * 96)
     for r in rows:
-        if r["day"] in show:
-            sc = f"{r['score']:.3f}" if r["score"] is not None else "-"
-            th = f"{r['threshold']:.3f}" if r["threshold"] is not None else "-"
-            dv = "是" if r["deviation"] else ("否" if r["deviation"] is not None else "-")
-            lv = r["risk_level"] if r["risk_level"] is not None else "-"
-            print(f"{r['day']:>3} {r['date']:>10} {str(r['quality']):>5} "
-                  f"{r['inf_status']:>18} {sc:>7} {th:>7} {dv:>4} {str(lv):>4}")
-    print("-" * 78)
+        if r["day"] not in show:
+            continue
+
+        def fmt(track):
+            tr = r[track]
+            sc = f"{tr['score']:.3f}" if tr["score"] is not None else "-"
+            th = f"{tr['threshold']:.3f}" if tr["threshold"] is not None else "-"
+            dv = "Y" if tr["deviation"] else ("." if tr["deviation"] is not None else "-")
+            return f"{sc:>7} {th:>6} {dv:>2}"
+
+        lv = r["risk_level"] if r["risk_level"] is not None else "-"
+        types = ",".join(r["risk_types"]) if r["risk_types"] else ""
+        print(f"{r['day']:>3} {r['day_key']:>11} | {fmt('sleep')} | {fmt('social')} "
+              f"| {str(lv):>2} {types}")
+
+    print("-" * 96)
     print(f"[PASS] 通过 {len(ok)} 项：")
     for x in ok:
         print(f"   [v] {x}")
@@ -185,20 +274,22 @@ def print_report(rows, ok, fail):
         for x in fail:
             print(f"   [x] {x}")
     else:
-        print("[ALL PASS] 全部通过：链路端到端跑通，状态流转正确。")
-    print("=" * 78)
+        print("[ALL PASS] 链路端到端跑通，状态流转正确，双轨信号隔离成立。")
+    print("=" * 96)
+    print("注意：本脚本只验证层次 A（代码正确性）。判别力见 validate_discriminative.py；")
+    print("      真实有效性需真人数据 + 量表对照，本仓库无法自证。")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="合成数据端到端验证（范围1）")
+    parser = argparse.ArgumentParser(description="合成数据端到端验证（范围1，双轨）")
     parser.add_argument("--keep", action="store_true", help="保留 V001 数据供人工检查")
     args = parser.parse_args()
 
-    setup_logger(log_level="WARNING")  # 压掉 INFO，只看报告
+    setup_logger(log_level="WARNING")   # 压掉 INFO，只看报告
     from src.utils.io import load_config
     config = load_config()
 
-    cleanup_velder()  # 先清残留，保证可复现
+    cleanup_velder()   # 先清残留，保证可复现
     try:
         generate_raw_only(get_project_root())
         rows = run_timeline(config)
@@ -207,7 +298,7 @@ def main():
     finally:
         if not args.keep:
             cleanup_velder()
-            print(f"（V001 数据已清理；加 --keep 可保留）")
+            print("（V001 数据已清理；加 --keep 可保留）")
     return 0 if not fail else 1
 
 

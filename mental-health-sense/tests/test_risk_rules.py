@@ -1,172 +1,364 @@
 """
-风险判定规则单元测试
+风险判定规则单元测试（三类，双轨）
 """
 
-import numpy as np
 import pytest
 
+from src.baseline.scaler_utils import (
+    SLEEP_FEATURES,
+    SOCIAL_FEATURES,
+    TRACK_SLEEP,
+    TRACK_SOCIAL,
+)
 from src.risk.rules import (
-    classify_risk_type,
-    RISK_RULES,
     RiskRule,
+    build_risk_rules,
+    classify_risk_type,
     get_risk_feature_importance,
     list_risk_types,
 )
 
 
-class TestRiskRule:
-    """测试风险规则定义"""
+def track_result(track: str, overrides: dict | None = None, status: str = "success") -> dict:
+    """构造某轨的推理结果，signed_z 默认全 0（完全正常）"""
+    names = SLEEP_FEATURES if track == TRACK_SLEEP else SOCIAL_FEATURES
+    signed_z = {n: 0.0 for n in names}
+    if overrides:
+        signed_z.update(overrides)
+    return {
+        "track": track,
+        "status": status,
+        "signed_available": True,
+        "signed_z": signed_z,
+        "anomaly_score": 1.0,
+        "is_deviation": True,
+    }
 
-    def test_valid_rule_creation(self):
-        rule = RiskRule(
-            name="测试规则",
-            features=["a", "b"],
-            directions=["up", "down"],
-            weights=[1.0, 2.0],
-        )
-        assert rule.name == "测试规则"
-        assert rule.threshold_ratio == 2.0  # 默认值
 
-    def test_rule_validation_length_mismatch(self):
-        with pytest.raises(ValueError):
-            RiskRule(
-                name="坏规则",
-                features=["a", "b"],
-                directions=["up"],  # 长度不匹配
-                weights=[1.0, 2.0],
-            )
+def both_tracks(sleep_z: dict | None = None, social_z: dict | None = None) -> dict:
+    return {
+        TRACK_SLEEP: track_result(TRACK_SLEEP, sleep_z),
+        TRACK_SOCIAL: track_result(TRACK_SOCIAL, social_z),
+    }
 
-    def test_all_predefined_rules_valid(self):
-        """所有预定义规则应该是合法的"""
-        for key, rule in RISK_RULES.items():
-            assert len(rule.features) == len(rule.directions)
-            assert len(rule.features) == len(rule.weights)
+
+def history(risk_key: str, n_days: int, quality: str = "valid") -> list[dict]:
+    """构造 n 天"该风险类型已达标"的历史日志 + 今天占位一条"""
+    days = [
+        {"day_key": f"2026-08-{i + 1:02d}", "data_quality": quality,
+         "risk_type_qualifies": {risk_key: True}}
+        for i in range(n_days)
+    ]
+    days.append({"day_key": "2026-08-31", "data_quality": quality})  # 今天，尚未写回
+    return days
+
+
+class TestRuleDefinitions:
+    def test_three_rules_exist(self):
+        rules = build_risk_rules()
+        assert set(rules) == {"sleep_stability", "social_decline", "circadian_disruption"}
+
+    def test_rules_wellformed(self):
+        for key, rule in build_risk_rules().items():
+            assert isinstance(rule, RiskRule)
             assert rule.name
+            assert rule.required, f"{key} 必须有必需特征"
             assert rule.consecutive_days >= 1
+            for track, feat, direction in rule.all_features():
+                assert track in (TRACK_SLEEP, TRACK_SOCIAL)
+                assert direction in ("up", "down", "any")
 
+    def test_social_uses_rolling_window(self):
+        """社会连接减弱用 7 天滚动窗 ≥5 天，不用严格连续"""
+        rule = build_risk_rules()["social_decline"]
+        assert rule.uses_rolling()
+        assert rule.rolling_window == 7
+        assert rule.rolling_required == 5
 
-class TestClassifyRiskType:
-    """测试风险类型分类"""
+    def test_social_requires_all_three(self):
+        """三项全中：copresence↓ 且 out_of_home↓ 且 activity↓"""
+        rule = build_risk_rules()["social_decline"]
+        feats = {f for _, f, _ in rule.required}
+        assert feats == {"copresence_min", "out_of_home_min", "activity_counts"}
+        assert rule.optional == []
 
-    def make_residual_stats(self):
-        """构造残差统计（6维）"""
-        return {
-            "mean": np.zeros(6),
-            "std": np.ones(6),
-        }
-
-    def test_normal_day_no_risk(self):
-        """测试正常日：不触发任何风险"""
-        from src.baseline.scaler_utils import FEATURE_NAMES
-
-        # 所有残差都接近0（完全正常）
-        feature_residuals = {name: 0.01 for name in FEATURE_NAMES}
-
-        results = classify_risk_type(
-            feature_residuals=feature_residuals,
-            residual_stats=self.make_residual_stats(),
-        )
-
-        assert all(not r["is_active"] for r in results)
-
-    def test_social_isolation_triggered(self):
-        """测试社交孤独触发（social_turns↓ + daily_activity↓）"""
-        from src.baseline.scaler_utils import FEATURE_NAMES
-
-        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        feature_residuals["social_turns"] = -3.0
-        feature_residuals["daily_activity"] = -3.0
-
-        consecutive = {"social_isolation": 5}
-
-        results = classify_risk_type(
-            feature_residuals=feature_residuals,
-            residual_stats=self.make_residual_stats(),
-            consecutive_days=consecutive,
-        )
-
-        soc_result = next(r for r in results if r["risk_key"] == "social_isolation")
-        assert soc_result["is_active"]
-
-    def test_sleep_problem_triggered(self):
-        """测试睡眠问题触发"""
-        from src.baseline.scaler_utils import FEATURE_NAMES
-
-        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        # sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓
-        feature_residuals["sleep_efficiency"] = -3.0
-        feature_residuals["deep_sleep_ratio"] = -3.0
-        feature_residuals["sfi"] = 3.0
-        feature_residuals["hrv_rmssd"] = -2.5
-
-        consecutive = {"sleep_problem": 3}
-
-        results = classify_risk_type(
-            feature_residuals=feature_residuals,
-            residual_stats=self.make_residual_stats(),
-            consecutive_days=consecutive,
-        )
-
-        sleep_result = next(r for r in results if r["risk_key"] == "sleep_problem")
-        assert sleep_result["is_active"]
-
-    def test_normal_day_positive_abs_mean_stats(self):
-        """回归：残差≈0 且 residual_stats 均值为正（abs 残差统计）时不得误报。
-
-        修复前 classify_risk_type 从带符号残差里减去 abs 均值，导致正常特征
-        （残差≈0）在 down 方向被判为超标，sleep_problem/social_isolation 直接误活跃。
-        """
-        from src.baseline.scaler_utils import FEATURE_NAMES
-
-        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        stats = {"mean": np.full(6, 0.5), "std": np.full(6, 0.3)}
-        results = classify_risk_type(
-            feature_residuals=feature_residuals,
-            residual_stats=stats,
-            consecutive_days={k: 9 for k in ("sleep_problem", "social_isolation")},
-        )
-        assert all(not r["is_active"] for r in results)
-        assert all(r["exceeding_features"] == [] for r in results)
-
-    def test_down_feature_improving_not_flagged(self):
-        """方向性：down 特征"变好"（残差为正）不得计入超标。
-
-        sleep_efficiency 方向为 down（下降才异常）。今日睡眠效率高于预测（residual>0）
-        是好事，不应进入 exceeding_features。
-        """
-        from src.baseline.scaler_utils import FEATURE_NAMES
-
-        feature_residuals = {name: 0.0 for name in FEATURE_NAMES}
-        feature_residuals["sleep_efficiency"] = 3.0  # 睡眠效率比预测更高（正残差）→ 非异常
-        stats = {"mean": np.zeros(6), "std": np.ones(6)}
-        results = classify_risk_type(
-            feature_residuals=feature_residuals,
-            residual_stats=stats,
-            consecutive_days={"sleep_problem": 9},
-        )
-        sleep = next(r for r in results if r["risk_key"] == "sleep_problem")
-        assert "sleep_efficiency" not in sleep["exceeding_features"]
-
-    def test_feature_importance(self):
-        """测试特征重要性获取"""
-        importance = get_risk_feature_importance("sleep_problem")
-        assert len(importance) == 4
-        assert "sleep_efficiency" in importance
-        assert "deep_sleep_ratio" in importance
-        assert "sfi" in importance
-        assert "hrv_rmssd" in importance
-
-        total = sum(importance.values())
-        assert abs(total - 1.0) < 0.01
-
-    def test_unknown_risk_key(self):
-        """测试不存在的风险类型"""
-        importance = get_risk_feature_importance("nonexistent")
-        assert importance == {}
+    def test_circadian_is_cross_track(self):
+        """作息节律紊乱跨轨：RA/IV 在社交轨，sleep_onset_clock 在睡眠轨"""
+        rule = build_risk_rules()["circadian_disruption"]
+        assert {t for t, _, _ in rule.required} == {TRACK_SOCIAL}
+        assert {t for t, _, _ in rule.optional} == {TRACK_SLEEP}
+        assert rule.consecutive_days_degraded == 7
 
     def test_list_risk_types(self):
-        """测试列出所有风险类型"""
         types = list_risk_types()
-        assert "睡眠问题" in types
-        assert "社交孤独" in types
-        assert len(types) == 2
+        assert types == ["睡眠稳定性偏离", "社会连接减弱", "作息节律紊乱"]
+
+
+class TestNormalDay:
+    def test_all_zero_no_risk(self):
+        results = classify_risk_type(both_tracks(), daily_results=[])
+        assert all(not r["is_active"] for r in results)
+        assert all(not r["qualifies"] for r in results)
+        assert all(r["exceeding_features"] == [] for r in results)
+
+    def test_long_history_still_no_risk_when_today_normal(self):
+        """★ 今天不达标 → 连续天数归零，历史再长也不激活"""
+        results = classify_risk_type(
+            both_tracks(), daily_results=history("sleep_stability", 10)
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert not sleep["is_active"]
+        assert sleep["consecutive_days"] == 0
+
+
+class TestDirectionality:
+    def test_down_feature_improving_not_flagged(self):
+        """sleep_efficiency 方向为 down；今日高于预测（signed_z>0）是好事，不算超标"""
+        results = classify_risk_type(
+            both_tracks(sleep_z={"sleep_efficiency": 3.0, "waso_min": 3.0}),
+            daily_results=history("sleep_stability", 5),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert "sleep_efficiency" not in sleep["exceeding_features"]
+        assert not sleep["qualifies"], "必需项未全中时不应达标"
+
+    def test_up_feature_decreasing_not_flagged(self):
+        """waso_min 方向为 up；今日低于预测（睡得更好）不算超标"""
+        results = classify_risk_type(
+            both_tracks(sleep_z={"sleep_efficiency": -3.0, "waso_min": -3.0}),
+            daily_results=history("sleep_stability", 5),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert "waso_min" not in sleep["exceeding_features"]
+
+    def test_any_direction_both_ways(self):
+        """sleep_onset_clock 方向为 any：提前或延后都算漂移"""
+        for onset in (2.5, -2.5):
+            results = classify_risk_type(
+                both_tracks(
+                    sleep_z={"sleep_onset_clock": onset},
+                    social_z={"rar_amplitude": -3.0, "rar_iv": 2.8},
+                ),
+                daily_results=[],
+            )
+            circ = next(r for r in results if r["risk_key"] == "circadian_disruption")
+            assert "sleep_onset_clock" in circ["exceeding_features"], f"onset={onset}"
+
+
+class TestSleepStability:
+    def test_requires_both_se_and_waso(self):
+        """只有 SE↓ 而 WASO 正常 → 不达标（必需项必须全中）"""
+        results = classify_risk_type(
+            both_tracks(sleep_z={"sleep_efficiency": -4.0, "sol_min": 3.0}),
+            daily_results=history("sleep_stability", 5),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert not sleep["qualifies"]
+
+    def test_requires_at_least_one_optional(self):
+        """SE↓ 且 WASO↑ 但三个可选项都正常 → 不达标"""
+        results = classify_risk_type(
+            both_tracks(sleep_z={"sleep_efficiency": -4.0, "waso_min": 4.0}),
+            daily_results=history("sleep_stability", 5),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert not sleep["qualifies"]
+
+    def test_triggers_with_required_plus_one_optional(self):
+        results = classify_risk_type(
+            both_tracks(sleep_z={
+                "sleep_efficiency": -4.0, "waso_min": 4.0, "bed_exit_count": 3.0,
+            }),
+            daily_results=history("sleep_stability", 5),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert sleep["qualifies"]
+        assert sleep["is_active"], "连续 5 天 ≥ 门槛 3 天，应激活"
+        assert set(sleep["exceeding_features"]) >= {
+            "sleep_efficiency", "waso_min", "bed_exit_count"
+        }
+
+    def test_not_active_before_threshold(self):
+        """连续 2 天 < 门槛 3 天 → 达标但不激活"""
+        results = classify_risk_type(
+            both_tracks(sleep_z={
+                "sleep_efficiency": -4.0, "waso_min": 4.0, "bed_exit_count": 3.0,
+            }),
+            daily_results=history("sleep_stability", 1),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert sleep["qualifies"]
+        assert not sleep["is_active"]
+        assert sleep["consecutive_days"] == 2
+
+
+class TestSocialDecline:
+    ALL_DOWN = {"copresence_min": -3.0, "out_of_home_min": -3.0, "activity_counts": -3.0}
+
+    def test_requires_all_three(self):
+        """只有两项下降 → 不达标"""
+        results = classify_risk_type(
+            both_tracks(social_z={"copresence_min": -3.0, "out_of_home_min": -3.0}),
+            daily_results=history("social_decline", 6),
+        )
+        social = next(r for r in results if r["risk_key"] == "social_decline")
+        assert not social["qualifies"]
+
+    def test_triggers_with_all_three(self):
+        results = classify_risk_type(
+            both_tracks(social_z=self.ALL_DOWN),
+            daily_results=history("social_decline", 6),
+        )
+        social = next(r for r in results if r["risk_key"] == "social_decline")
+        assert social["qualifies"]
+        assert social["is_active"]
+
+    def test_rolling_window_tolerates_gap(self):
+        """★ 滚动窗的价值：中间断一天仍能凑满 5/7，严格连续则会归零"""
+        days = [
+            {"day_key": "2026-08-01", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": True}},
+            {"day_key": "2026-08-02", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": True}},
+            {"day_key": "2026-08-03", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": False}},   # 周末探访，断一天
+            {"day_key": "2026-08-04", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": True}},
+            {"day_key": "2026-08-05", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": True}},
+            {"day_key": "2026-08-06", "data_quality": "valid"},   # 今天
+        ]
+        results = classify_risk_type(both_tracks(social_z=self.ALL_DOWN), daily_results=days)
+        social = next(r for r in results if r["risk_key"] == "social_decline")
+        assert social["consecutive_days"] == 5, "4 天历史达标 + 今天 = 5"
+        assert social["is_active"]
+
+    def test_degraded_days_skipped_not_counted(self):
+        """degraded 日既不累加也不打断——传感器抖动不该攒成预警，也不该清零"""
+        days = [
+            {"day_key": "2026-08-01", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": True}},
+            {"day_key": "2026-08-02", "data_quality": "degraded",
+             "risk_type_qualifies": {"social_decline": True}},   # 应被跳过
+            {"day_key": "2026-08-03", "data_quality": "valid",
+             "risk_type_qualifies": {"social_decline": True}},
+            {"day_key": "2026-08-04", "data_quality": "valid"},  # 今天
+        ]
+        results = classify_risk_type(both_tracks(social_z=self.ALL_DOWN), daily_results=days)
+        social = next(r for r in results if r["risk_key"] == "social_decline")
+        assert social["consecutive_days"] == 3, "2 个 valid 历史日 + 今天，degraded 日不计入"
+
+
+class TestCircadianDisruption:
+    RA_IV = {"rar_amplitude": -3.1, "rar_iv": 2.8}
+
+    def test_triggers_with_onset_drift(self):
+        results = classify_risk_type(
+            both_tracks(sleep_z={"sleep_onset_clock": 2.4}, social_z=self.RA_IV),
+            daily_results=history("circadian_disruption", 6),
+        )
+        circ = next(r for r in results if r["risk_key"] == "circadian_disruption")
+        assert circ["qualifies"]
+        assert circ["is_active"]
+        assert circ["threshold_required"] == 5
+
+    def test_no_trigger_without_onset_drift(self):
+        """RA↓ IV↑ 但入睡时刻正常 → 可选项未满足，不达标"""
+        results = classify_risk_type(
+            both_tracks(social_z=self.RA_IV),
+            daily_results=history("circadian_disruption", 6),
+        )
+        circ = next(r for r in results if r["risk_key"] == "circadian_disruption")
+        assert not circ["qualifies"]
+
+    def test_degraded_mode_when_sleep_track_offline(self):
+        """★ 睡眠轨离线 → 免除 onset 要求，但门槛从 5 天提到 7 天"""
+        results = classify_risk_type(
+            {
+                TRACK_SLEEP: {"track": TRACK_SLEEP, "status": "cold_start",
+                              "signed_available": False},
+                TRACK_SOCIAL: track_result(TRACK_SOCIAL, self.RA_IV),
+            },
+            daily_results=history("circadian_disruption", 6),
+        )
+        circ = next(r for r in results if r["risk_key"] == "circadian_disruption")
+        assert circ["qualifies"]
+        assert circ["degraded_mode"]
+        assert circ["threshold_required"] == 7
+
+    def test_degraded_mode_below_threshold_not_active(self):
+        """降级模式下连续 5 天（正常门槛）不足以激活——必须攒到 7 天"""
+        results = classify_risk_type(
+            {
+                TRACK_SLEEP: {"track": TRACK_SLEEP, "status": "cold_start",
+                              "signed_available": False},
+                TRACK_SOCIAL: track_result(TRACK_SOCIAL, self.RA_IV),
+            },
+            daily_results=history("circadian_disruption", 4),
+        )
+        circ = next(r for r in results if r["risk_key"] == "circadian_disruption")
+        assert circ["consecutive_days"] == 5
+        assert circ["threshold_required"] == 7
+        assert not circ["is_active"], "5 天 < 降级门槛 7 天，不应激活"
+
+    def test_degraded_mode_activates_at_seven(self):
+        results = classify_risk_type(
+            {
+                TRACK_SLEEP: {"track": TRACK_SLEEP, "status": "cold_start",
+                              "signed_available": False},
+                TRACK_SOCIAL: track_result(TRACK_SOCIAL, self.RA_IV),
+            },
+            daily_results=history("circadian_disruption", 7),
+        )
+        circ = next(r for r in results if r["risk_key"] == "circadian_disruption")
+        assert circ["consecutive_days"] == 8
+        assert circ["is_active"]
+
+
+class TestTrackAvailability:
+    def test_missing_required_track_not_evaluable(self):
+        """必需轨不可用 → 标记为不可评估，而不是当成『正常』"""
+        results = classify_risk_type(
+            {
+                TRACK_SLEEP: {"track": TRACK_SLEEP, "status": "cold_start",
+                              "signed_available": False},
+                TRACK_SOCIAL: track_result(TRACK_SOCIAL),
+            },
+            daily_results=[],
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert not sleep["evaluable"]
+        assert sleep["skip_reason"] is not None
+        assert not sleep["is_active"]
+
+    def test_old_format_stats_blocks_direction_judgment(self):
+        """旧格式基线（无 signed 统计）→ 不做方向判定，避免用错量纲给出结论"""
+        results = classify_risk_type(
+            {
+                TRACK_SLEEP: {**track_result(TRACK_SLEEP, {
+                    "sleep_efficiency": -4.0, "waso_min": 4.0, "sol_min": 3.0,
+                }), "signed_available": False},
+                TRACK_SOCIAL: track_result(TRACK_SOCIAL),
+            },
+            daily_results=history("sleep_stability", 5),
+        )
+        sleep = next(r for r in results if r["risk_key"] == "sleep_stability")
+        assert not sleep["evaluable"]
+
+
+class TestFeatureImportance:
+    def test_sleep_importance_sums_to_one(self):
+        imp = get_risk_feature_importance("sleep_stability")
+        assert set(imp) == {
+            "sleep_efficiency", "waso_min", "sol_min", "bed_exit_count", "deep_sleep_ratio",
+        }
+        assert abs(sum(imp.values()) - 1.0) < 1e-9
+
+    def test_cross_track_importance(self):
+        """跨轨规则的重要性要能同时取到两轨的权重"""
+        imp = get_risk_feature_importance("circadian_disruption")
+        assert set(imp) == {"rar_amplitude", "rar_iv", "sleep_onset_clock"}
+        assert abs(sum(imp.values()) - 1.0) < 1e-9
+
+    def test_unknown_key(self):
+        assert get_risk_feature_importance("nonexistent") == {}

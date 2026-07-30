@@ -1,10 +1,21 @@
 """
 个人基线GRU模型定义
 
-输入：过去7天的6维特征向量
-输出：第8天的6维特征向量预测
+输入：过去7天的特征向量
+输出：第8天的特征向量预测
 
-系统为被监测的老人独立维护一个GRU模型，预测残差作为"偏离个人常态"的量化依据。
+双轨各自实例化一个（结构相同，维度不同）：
+    睡眠轨   feature_dim=8, hidden_dim=8  → 504 参数
+    社会连接轨 feature_dim=5, hidden_dim=8  → 405 参数
+
+★ hidden_dim 为什么必须远小于常识直觉：GRU 参数量约 3·H·(I+H+2) + H·O+O。
+睡眠轨 hidden=12 时是 896 参数，而 35 天建档期只切得出 21 个训练序列。
+参数远多于样本时，模型会记住训练序列而不是学出基线 → 训练残差趋零 →
+残差统计的 std 趋零 → 阈值分母趋零 → 任何微小波动被放大成巨大 z 分 →
+建档期一过就疯狂误报。降到 hidden=8 并配合"用留出段而非训练集估阈值"
+（见 trainer.py）共同切断这条失效链。
+
+系统为被监测的老人独立维护每轨一个GRU模型，预测残差作为"偏离个人常态"的量化依据。
 """
 
 import torch
@@ -16,28 +27,28 @@ class PersonalBaselineGRU(nn.Module):
     个人基线GRU模型：用过去7天预测第8天。
 
     Architecture:
-        GRU(input_dim=6, hidden_dim=16, num_layers=1)
-        → Linear(16, 6)
+        GRU(input_dim=feature_dim, hidden_dim, num_layers=1)
+        → Linear(hidden_dim, feature_dim)
 
-    Input shape:  (batch, 7, 6)
-    Output shape: (batch, 6)
+    Input shape:  (batch, 7, feature_dim)
+    Output shape: (batch, feature_dim)
 
     Args:
-        feature_dim: 输入特征维度，默认6（健康特征，已移除时间编码）
-        hidden_dim: GRU隐藏层维度，默认16（极轻量，防止过拟合）
+        feature_dim: 输入特征维度（睡眠轨 8 / 社会连接轨 5），必须显式传入
+        hidden_dim: GRU隐藏层维度，默认8（极轻量，防止过拟合）
         num_layers: GRU层数，默认1
         dropout: Dropout比率，默认0.2
 
     Usage:
-        >>> model = PersonalBaselineGRU()
-        >>> x = torch.randn(32, 7, 6)  # (batch, 7天, 6特征)
-        >>> pred = model(x)              # (batch, 6)
+        >>> model = PersonalBaselineGRU(feature_dim=8, hidden_dim=8)
+        >>> x = torch.randn(32, 7, 8)   # (batch, 7天, 8特征)
+        >>> pred = model(x)             # (batch, 8)
     """
 
     def __init__(
         self,
-        feature_dim: int = 6,
-        hidden_dim: int = 16,
+        feature_dim: int,
+        hidden_dim: int = 8,
         num_layers: int = 1,
         dropout: float = 0.2,
     ):

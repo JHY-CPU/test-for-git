@@ -71,10 +71,10 @@ def generate_weekly_report(
         _save_report(elder_id, week_start_str, report)
         return report
 
-    # 过滤到本周范围内
+    # 过滤到本周范围内（day_key 为新字段名，兼容旧日志的 date）
     week_results = [
         r for r in daily_results
-        if week_start_str <= r.get("date", "") <= week_end_str
+        if week_start_str <= (r.get("day_key") or r.get("date") or "") <= week_end_str
     ]
     if not week_results:
         week_results = daily_results[-7:]
@@ -152,66 +152,74 @@ def generate_weekly_report(
     return report
 
 
+# 三条趋势线各自的代表特征：(轨, 特征名)
+# 用 signed_z 而非 abs 残差——abs 只能说"偏离多大"，说不出"升还是降"。
+# 旧实现先取 abs 再判"上升/下降"，得到的结论是"偏离幅度在变大"，
+# 却被写成"社交在上升"，方向信息在进函数之前就丢了。
+_TREND_SOURCES = {
+    "social": ("social", "copresence_min"),
+    "sleep": ("sleep", "sleep_efficiency"),
+    "activity": ("social", "activity_counts"),
+}
+
+_FLAT_TRENDS = {
+    f"{name}_trend": "平稳" for name in _TREND_SOURCES
+} | {
+    f"{name}_week_change": "无明显变化" for name in _TREND_SOURCES
+}
+
+
 def _compute_weekly_trends(week_results: list[dict]) -> dict:
     """
-    从一周的推理结果计算各维度趋势。
+    从一周的双轨推理结果计算各维度趋势。
 
-    判断每条趋势线的方向：上升/下降/平稳
+    取每条趋势线代表特征的 signed_z 序列（observed − predicted，负值=低于个人基线），
+    比较前后半周的均值判方向。
     """
     if len(week_results) < 2:
-        return {
-            "social_trend": "平稳",
-            "sleep_trend": "平稳",
-            "activity_trend": "平稳",
-            "social_week_change": "无明显变化",
-            "sleep_week_change": "无明显变化",
-            "activity_week_change": "无明显变化",
-        }
+        return dict(_FLAT_TRENDS)
 
-    # 从feature_residuals中提取各维度周变化
-    social_vals = []
-    sleep_vals = []
-    activity_vals = []
+    series: dict[str, list[float]] = {name: [] for name in _TREND_SOURCES}
 
     for r in week_results:
-        residuals = r.get("feature_residuals", {})
-        if "social_turns" in residuals:
-            social_vals.append(abs(residuals["social_turns"]))
-        if "sleep_efficiency" in residuals:
-            sleep_vals.append(abs(residuals["sleep_efficiency"]))
-        if "daily_activity" in residuals:
-            activity_vals.append(abs(residuals["daily_activity"]))
+        for name, (track, feature) in _TREND_SOURCES.items():
+            track_result = r.get(track)
+            if not isinstance(track_result, dict):
+                continue
+            if not track_result.get("signed_available", False):
+                continue
+            signed_z = track_result.get("signed_z") or {}
+            if feature in signed_z:
+                series[name].append(float(signed_z[feature]))
 
     def _judge_trend(values: list[float], threshold: float = 0.3) -> str:
+        """前后半周均值之差：正=上升，负=下降"""
         if len(values) < 2:
             return "平稳"
-        first_half = np.mean(values[: len(values) // 2])
-        second_half = np.mean(values[len(values) // 2 :])
-        diff = second_half - first_half
+        mid = len(values) // 2
+        diff = float(np.mean(values[mid:]) - np.mean(values[:mid]))
         if diff > threshold:
             return "上升"
-        elif diff < -threshold:
+        if diff < -threshold:
             return "下降"
         return "平稳"
 
     def _judge_week_change(values: list[float]) -> str:
-        if len(values) == 0:
+        """整周相对个人基线的位置"""
+        if not values:
             return "无明显变化"
-        avg = np.mean(values)
+        avg = float(np.mean(values))
         if avg > 1.0:
             return "有明显增加"
-        elif avg < -1.0:
+        if avg < -1.0:
             return "有明显减少"
         return "无明显变化"
 
-    return {
-        "social_trend": _judge_trend(social_vals),
-        "sleep_trend": _judge_trend(sleep_vals),
-        "activity_trend": _judge_trend(activity_vals),
-        "social_week_change": _judge_week_change(social_vals),
-        "sleep_week_change": _judge_week_change(sleep_vals),
-        "activity_week_change": _judge_week_change(activity_vals),
-    }
+    result = {}
+    for name, values in series.items():
+        result[f"{name}_trend"] = _judge_trend(values)
+        result[f"{name}_week_change"] = _judge_week_change(values)
+    return result
 
 
 def _generate_with_llm(

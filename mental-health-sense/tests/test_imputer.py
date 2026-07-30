@@ -1,91 +1,160 @@
 """
-缺失值处理单元测试
+缺失值处理单元测试（按轨独立）
 """
 
 import numpy as np
 import pytest
 
-from src.data_pipeline.imputer import impute_missing, check_offline_status
+from src.baseline.scaler_utils import (
+    SOCIAL_FEATURES,
+    TRACK_SLEEP,
+    TRACK_SOCIAL,
+    get_feature_dim,
+)
+from src.data_pipeline.imputer import (
+    check_offline_status,
+    impute_missing,
+    impute_sequence,
+)
 
 
-class TestImputer:
-    """测试缺失值填充（特征向量现为6维，已移除时间编码）"""
+def sleep_vec(values) -> np.ndarray:
+    vec = np.array(values, dtype=np.float64)
+    assert vec.shape == (8,)
+    return vec
 
-    def make_vector(self, health_values):
-        """构造6维特征向量"""
-        vec = np.array(health_values, dtype=np.float64)
-        assert vec.shape == (6,)
-        return vec
 
+def social_vec(values) -> np.ndarray:
+    vec = np.array(values, dtype=np.float64)
+    assert vec.shape == (5,)
+    return vec
+
+
+class TestImputeSleepTrack:
     def test_no_missing(self):
-        """测试无缺失值情况"""
-        current = self.make_vector([1.0] * 6)
-        filled, missing_count, missing_names = impute_missing(current)
-
+        current = sleep_vec([1.0] * 8)
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP)
         assert missing_count == 0
         assert missing_names == []
         np.testing.assert_array_almost_equal(filled, current)
 
     def test_single_missing_with_prev(self):
-        """测试单特征缺失 + 前向填充"""
-        current = self.make_vector([1.0, np.nan] + [1.0] * 4)
-        prev = self.make_vector([1.0, 2.0] + [1.0] * 4)
-
-        filled, missing_count, missing_names = impute_missing(current, prev)
-
+        current = sleep_vec([1.0, np.nan] + [1.0] * 6)
+        prev = sleep_vec([1.0, 2.0] + [1.0] * 6)
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP, prev)
         assert missing_count == 0
-        assert filled[1] == 2.0  # 用昨日值填充
+        assert filled[1] == 2.0
 
     def test_single_missing_without_prev(self):
-        """测试单特征缺失 + 无昨日数据"""
-        current = self.make_vector([1.0, np.nan] + [1.0] * 4)
-
-        filled, missing_count, missing_names = impute_missing(current)
-
-        # 无法填充，用0代替，但仍记为缺失
+        current = sleep_vec([1.0, np.nan] + [1.0] * 6)
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP)
         assert filled[1] == 0.0
+        assert missing_count == 1
+        assert missing_names == ["waso_min"]
 
     def test_multiple_missing_partial_fill(self):
-        """测试多特征缺失 + 部分可填充"""
-        current = self.make_vector([np.nan, 1.0, np.nan, np.nan] + [1.0] * 2)
-        prev = self.make_vector([2.0, 1.0, 3.0, np.nan] + [1.0] * 2)
-
-        filled, missing_count, missing_names = impute_missing(current, prev)
-
+        current = sleep_vec([np.nan, 1.0, np.nan, np.nan] + [1.0] * 4)
+        prev = sleep_vec([2.0, 1.0, 3.0, np.nan] + [1.0] * 4)
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP, prev)
         assert filled[0] == 2.0
         assert filled[2] == 3.0
-        assert filled[3] == 0.0  # prev也是NaN，无法填充
+        assert filled[3] == 0.0
+        assert missing_count == 1
+        assert missing_names == ["bed_exit_count"]
 
-    def test_all_health_features_nan(self):
-        """测试全部健康特征缺失（极端情况）"""
-        current = self.make_vector([np.nan] * 6)
-        prev = self.make_vector(list(range(1, 7)))
-
-        filled, missing_count, missing_names = impute_missing(current, prev)
-
-        # 全部可前向填充
+    def test_all_missing_forward_filled(self):
+        current = sleep_vec([np.nan] * 8)
+        prev = sleep_vec(list(range(1, 9)))
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP, prev)
         assert missing_count == 0
-        for i in range(6):
+        for i in range(8):
             assert filled[i] == i + 1
 
-    def test_time_features_never_missing(self):
-        """验证6维向量中不含时间编码（时间编码已移除）"""
-        from src.baseline.scaler_utils import FEATURE_DIM, FEATURE_NAMES
-        assert FEATURE_DIM == 6
-        assert "day_sin" not in FEATURE_NAMES
-        assert "day_cos" not in FEATURE_NAMES
+    def test_wrong_shape_raises(self):
+        with pytest.raises(ValueError, match="expects shape"):
+            impute_missing(social_vec([1.0] * 5), TRACK_SLEEP)
+
+
+class TestImputeSocialTrack:
+    def test_copresence_never_forward_filled(self):
+        """★ copresence_min 禁止前向填充。
+
+        其它特征反映老人自身的行为习惯，昨天的值对今天有预测力；
+        而"今天有没有人来"取决于子女的安排，用昨天填今天等于凭空伪造社会接触。
+        """
+        idx = SOCIAL_FEATURES.index("copresence_min")
+        current = social_vec([np.nan, 90.0, 0.9, 0.3, 180.0])
+        prev = social_vec([120.0, 90.0, 0.9, 0.3, 180.0])
+
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SOCIAL, prev)
+
+        assert filled[idx] == 0.0, "不得用昨日的 120 分钟填充"
+        assert missing_count == 1
+        assert "copresence_min" in missing_names
+
+    def test_other_social_features_do_forward_fill(self):
+        """同一轨的其它维仍正常前向填充"""
+        idx = SOCIAL_FEATURES.index("out_of_home_min")
+        current = social_vec([50.0, np.nan, 0.9, 0.3, 180.0])
+        prev = social_vec([50.0, 95.0, 0.9, 0.3, 180.0])
+
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SOCIAL, prev)
+
+        assert filled[idx] == 95.0
+        assert missing_count == 0
+
+    def test_copresence_present_not_flagged(self):
+        current = social_vec([50.0, 90.0, 0.9, 0.3, 180.0])
+        filled, missing_count, missing_names = impute_missing(current, TRACK_SOCIAL)
+        assert missing_count == 0
+        assert missing_names == []
+
+
+class TestImputeSequence:
+    def test_short_gap_forward_filled(self):
+        seq = np.array([
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+            [np.nan] * 5,
+            [1.5, 2.5, 3.5, 4.5, 5.5],
+        ], dtype=np.float64)
+        filled, degraded = impute_sequence(seq, TRACK_SOCIAL, max_forward_days=3)
+        assert not np.any(np.isnan(filled))
+        np.testing.assert_array_almost_equal(filled[1], seq[0])
+
+    def test_long_gap_interpolated(self):
+        n = 8
+        seq = np.full((n, 5), np.nan, dtype=np.float64)
+        seq[0] = 0.0
+        seq[-1] = 7.0
+        filled, degraded = impute_sequence(seq, TRACK_SOCIAL, max_forward_days=2)
+        assert not np.any(np.isnan(filled))
+        # 线性插值：中间值应递增
+        assert filled[1, 0] < filled[3, 0] < filled[5, 0]
+        assert degraded["copresence_min"] > 0
+
+    def test_leading_gap_zero_filled(self):
+        seq = np.full((4, 8), 1.0, dtype=np.float64)
+        seq[0] = np.nan
+        filled, degraded = impute_sequence(seq, TRACK_SLEEP)
+        assert np.all(filled[0] == 0.0)
+
+    def test_wrong_dim_raises(self):
+        with pytest.raises(ValueError, match="expects"):
+            impute_sequence(np.zeros((5, 5)), TRACK_SLEEP)
+
+
+class TestTrackDims:
+    def test_dims_are_eight_and_five(self):
+        assert get_feature_dim(TRACK_SLEEP) == 8
+        assert get_feature_dim(TRACK_SOCIAL) == 5
 
 
 class TestOfflineCheck:
-    """测试离线状态检测"""
-
     def test_no_offline(self):
-        """测试正常情况：不触发离线"""
         quality = ["valid", "valid", "insufficient", "valid", "valid"]
         assert not check_offline_status(quality, threshold=3)
 
     def test_offline_detected(self):
-        """测试检测到离线"""
         quality = ["valid", "insufficient", "insufficient", "insufficient"]
         assert check_offline_status(quality, threshold=3)
 
@@ -94,7 +163,6 @@ class TestOfflineCheck:
         assert check_offline_status(quality, threshold=3)
 
     def test_not_enough_data(self):
-        """测试数据不足时不误报"""
         quality = ["insufficient", "insufficient"]
         assert not check_offline_status(quality, threshold=3)
 

@@ -1,26 +1,42 @@
 """
-每日定时任务：常态轨（单人系统）
+每日定时任务：常态轨（单人系统，双轨）
 
-每日凌晨 02:00 对被监测的老人执行：
-    1. 聚合昨日传感器数据 → 特征向量
-    2. 缺失值处理 + 数据校验
-    3. 保存特征到CSV
-    4. 每日推理（GRU预测 → 残差 → EWMA更新）
-    5. 风险判定
+每日凌晨 03:00 对被监测的老人执行：
+    1. 聚合昨日传感器数据 → 双轨特征向量
+    2. 按轨做缺失值处理 + 数据校验
+    3. 按轨保存特征到各自的 CSV
+    4. 双轨推理（GRU预测 → signed/abs 双残差 → EWMA更新）
+    5. 风险判定（三类，含跨轨的作息节律紊乱）
     6. 如果偏离，记录预警
+
+调度时刻 02:00 → 03:00：小贝壳的睡眠报告窗口延伸到当日 22:59 之后才最终成型，
+02:00 拉取可能取到未闭合的报告。
+
+★ 按轨独立降级：小贝壳掉线时睡眠轨标 insufficient，社交轨照常出结果。
+这是双轨架构的核心收益，实现上体现为两轨各自走完整的
+聚合→填充→校验→保存→推理链条，任一环失败只影响本轨。
 """
 
 from datetime import datetime, timedelta
 
 import numpy as np
 
+from src.baseline.scaler_utils import TRACKS, get_feature_names
 from src.data_pipeline.aggregator import (
     DataInsufficientError,
-    aggregate_daily_features,
+    aggregate_sleep_features,
+    aggregate_social_features,
+    aggregate_track_features,
 )
 from src.data_pipeline.imputer import impute_missing
-from src.data_pipeline.validator import validate_daily_data
-from src.utils.io import save_daily_features, load_features_csv
+from src.data_pipeline.validator import (
+    QUALITY_INSUFFICIENT,
+    check_prolonged_degradation,
+    describe_track_capability,
+    is_usable_for_inference,
+    validate_daily_data,
+)
+from src.utils.io import DAY_KEY_COL, load_features_csv, save_daily_features
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,108 +44,79 @@ logger = get_logger(__name__)
 
 def run_daily_pipeline(
     elder_id: str,
-    date_str: str | None = None,
+    day_key: str | None = None,
     raw_data: dict | None = None,
     config: dict | None = None,
 ) -> dict:
     """
-    执行单日全流程：聚合 → 填充 → 校验 → 保存 → 推理 → 判定。
+    执行单日全流程：按轨聚合 → 填充 → 校验 → 保存 → 双轨推理 → 判定。
 
     Args:
         elder_id: 老人ID
-        date_str: 日期（默认昨天）
-        raw_data: 原始传感器数据字典，包含:
-            - sleep: 睡眠雷达数据
-            - activity: PIR+IPC数据
-            - social: 拾音+音箱数据
-            None表示自动从data/raw/读取
+        day_key: 自然日（默认昨天）
+        raw_data: 原始传感器数据字典 {"sleep":..., "activity":..., "camera":...}
+                  None 表示自动从 data/raw/ 读取
         config: 全局配置
 
     Returns:
         {
             "elder_id": str,
-            "date": str,
-            "data_quality": str,
+            "day_key": str,
+            "track_quality": {"sleep": str, "social": str},
             "inference_result": dict | None,
             "risk_result": dict | None,
             "status": str,
         }
     """
-    if date_str is None:
-        date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    if day_key is None:
+        day_key = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    logger.info(f"=== 每日管道启动: {elder_id} @ {date_str} ===")
+    logger.info(f"=== 每日管道启动: {elder_id} @ {day_key} ===")
 
-    # 1. 聚合特征
-    try:
-        if raw_data is not None:
-            feature_vec = aggregate_daily_features(
-                date_str=date_str,
-                sleep_data=raw_data.get("sleep"),
-                activity_data=raw_data.get("activity"),
-                social_data=raw_data.get("social"),
-            )
-        else:
-            # 从data/raw/目录自动读取
-            feature_vec = _load_raw_and_aggregate(elder_id, date_str)
-    except DataInsufficientError as e:
-        logger.warning(f"  └─ 数据不足: {e}")
-        # 仍然尝试保存（标记为insufficient）
-        return {
-            "elder_id": elder_id,
-            "date": date_str,
-            "data_quality": "insufficient",
-            "inference_result": None,
-            "risk_result": None,
-            "status": "data_insufficient",
-        }
+    if config is None:
+        from src.utils.io import load_config
+        config = load_config()
 
-    # 2. 缺失值填充
-    prev_vec = None
-    try:
-        df = load_features_csv(elder_id)
-        if len(df) > 0:
-            from src.baseline.scaler_utils import FEATURE_NAMES
-            prev_row = df[df["data_quality"] == "valid"].tail(1)
-            if len(prev_row) > 0:
-                prev_vec = prev_row[FEATURE_NAMES].to_numpy(dtype=np.float64).flatten()
-    except Exception as e:
-        # 拿不到上一条有效特征时，前向填充退化为 imputer 的默认兜底。
-        # 不致命，但要记录——历史上这里曾因 np 未导入静默失效，掩盖了填充失败。
-        logger.warning(f"  └─ 前向填充基准获取失败，将使用默认填充: {e}")
+    if raw_data is None:
+        raw_data = load_raw_sensors(elder_id, day_key)
 
-    filled_vec, missing_count, missing_names = impute_missing(feature_vec, prev_vec)
+    # 1-4. 每轨独立走完聚合→填充→校验→保存
+    track_feature_values = {
+        "sleep": aggregate_sleep_features(raw_data.get("sleep")),
+        "social": aggregate_social_features(
+            raw_data.get("activity"), raw_data.get("camera")
+        ),
+    }
 
-    # 3. 数据校验
-    recent_quality = _get_recent_quality(elder_id)
-    quality = validate_daily_data(filled_vec, missing_count, recent_quality)
+    track_quality: dict[str, str] = {}
+    for track in TRACKS:
+        track_quality[track] = _process_track(
+            elder_id, day_key, track, track_feature_values[track], config
+        )
 
-    logger.info(
-        f"  └─ 数据质量: {quality}, 缺失: {missing_count}/{len(missing_names)}"
-    )
+    logger.info(f"  └─ 数据质量: {track_quality}")
 
-    # 4. 保存特征
-    save_daily_features(elder_id, date_str, filled_vec, missing_count, quality)
-
-    # 5. 每日推理（仅valid数据执行）
+    # 5. 双轨推理（至少一轨可用才跑）
     inference_result = None
     risk_result = None
+    usable_tracks = tuple(t for t in TRACKS if is_usable_for_inference(track_quality[t]))
 
-    if quality == "valid":
+    if usable_tracks:
         try:
             from src.baseline.inference import daily_inference
-            inference_result = daily_inference(elder_id, date_str, config)
+            inference_result = daily_inference(
+                elder_id, day_key, config, tracks=usable_tracks
+            )
 
-            # GRU 基线尚未就绪（冷启动期）：用滑动均值兜底，消除头两周监测盲区
-            if inference_result.get("status") == "cold_start":
-                fb = _cold_start_fallback(elder_id, date_str, filled_vec, config)
-                if fb is not None:
-                    inference_result = fb
+            # 某轨 GRU 基线尚未就绪（冷启动期）：用稳健滑动基线兜底，消除建档期盲区
+            _apply_cold_start_fallbacks(
+                elder_id, day_key, inference_result, usable_tracks, config
+            )
 
-            if inference_result.get("status") == "success":
+            if inference_result.get("status") in ("success", "cold_start_fallback"):
                 # 6. 风险判定
                 from src.risk.judge import quick_judge
-                risk_result = quick_judge(elder_id, date_str)
+                risk_result = quick_judge(elder_id, day_key, config)
 
                 # 7. 需要时触发预警
                 if risk_result.get("risk_level", 0) >= 1:
@@ -141,59 +128,183 @@ def run_daily_pipeline(
                     )
 
         except Exception as e:
-            logger.error(f"  └─ 推理/判定失败: {e}")
+            logger.error(f"  └─ 推理/判定失败: {e}", exc_info=True)
+    else:
+        logger.warning("  └─ 两轨均不可用，跳过推理")
 
-    status = "success" if quality == "valid" else "skipped_inference"
+    # 长期降级检查：连续 5 天非 valid 应升级为运维告警，
+    # 而不是让界面继续显示"一切正常"——长期降级和长期正常必须可区分。
+    for track in TRACKS:
+        history = _get_recent_quality(elder_id, track, n_days=5)
+        if check_prolonged_degradation(history, threshold=5):
+            logger.error(
+                f"  └─ [{track}] 连续 5 天数据质量不佳，系统已失去该轨监测能力，"
+                f"需运维介入并向家属明示『当前数据不足』"
+            )
 
+    status = "success" if usable_tracks else "skipped_inference"
     logger.info(f"=== 每日管道完成: {elder_id}, status={status} ===")
 
     return {
         "elder_id": elder_id,
-        "date": date_str,
-        "data_quality": quality,
+        "day_key": day_key,
+        "track_quality": track_quality,
         "inference_result": inference_result,
         "risk_result": risk_result,
         "status": status,
     }
 
 
-def _get_recent_quality(elder_id: str, n_days: int = 5) -> list[str]:
-    """获取最近N天的数据质量列表"""
-    try:
-        df = load_features_csv(elder_id)
-        recent = df.sort_values("date", ascending=False).head(n_days)
-        recent = recent.sort_values("date")
-        return recent["data_quality"].tolist()
-    except Exception:
-        return []
-
-
-def _cold_start_fallback(
+def _process_track(
     elder_id: str,
-    date_str: str,
-    today_vec,
-    config: dict | None = None,
+    day_key: str,
+    track: str,
+    feature_values: dict,
+    config: dict,
+) -> str:
+    """
+    单轨的聚合→填充→校验→保存。返回该轨的 data_quality。
+
+    聚合失败（缺 ≥3 维）时仍写一行全 NaN 的记录并标 insufficient——
+    留下痕迹比什么都不写好，否则特征表会出现无法解释的日期空洞。
+    """
+    names = get_feature_names(track)
+
+    try:
+        feature_vec = aggregate_track_features(track, feature_values)
+    except DataInsufficientError as e:
+        logger.warning(f"  └─ [{track}] 数据不足: {e}")
+        placeholder = np.full(len(names), np.nan, dtype=np.float64)
+        save_daily_features(
+            elder_id, day_key, np.nan_to_num(placeholder, nan=0.0), track,
+            missing_count=e.missing_count, data_quality=QUALITY_INSUFFICIENT,
+        )
+        return QUALITY_INSUFFICIENT
+
+    # 前向填充基准：该轨最近一条 valid 记录
+    prev_vec = _get_prev_valid_vector(elder_id, track, day_key)
+    filled_vec, missing_count, missing_names = impute_missing(
+        feature_vec, track, prev_vec
+    )
+
+    if missing_names:
+        logger.info(f"  └─ [{track}] 无法填充的特征: {missing_names}")
+
+    recent_quality = _get_recent_quality(elder_id, track)
+    quality = validate_daily_data(
+        filled_vec, missing_count, track, recent_quality,
+        missing_features=missing_names,
+    )
+
+    # 关键特征缺失时必须明示能力受限，不能让"测不到"沉默地显示为"一切正常"
+    capability_note = describe_track_capability(track, missing_names)
+    if capability_note:
+        logger.warning(f"  └─ [{track}] {capability_note}")
+
+    save_daily_features(
+        elder_id, day_key, filled_vec, track,
+        missing_count=missing_count, data_quality=quality,
+    )
+    return quality
+
+
+def _get_prev_valid_vector(elder_id: str, track: str, day_key: str) -> np.ndarray | None:
+    """取该轨在 day_key 之前最近一条 valid 记录的特征向量"""
+    try:
+        df = load_features_csv(elder_id, track)
+    except FileNotFoundError:
+        return None
+
+    names = get_feature_names(track)
+    prev = df[(df["data_quality"] == "valid") & (df[DAY_KEY_COL] < day_key)]
+    prev = prev.sort_values(DAY_KEY_COL).tail(1)
+    if len(prev) == 0:
+        return None
+    return prev[names].to_numpy(dtype=np.float64).flatten()
+
+
+def _get_recent_quality(elder_id: str, track: str, n_days: int = 5) -> list[str]:
+    """获取某轨最近N天的数据质量列表（按 day_key 升序）"""
+    try:
+        df = load_features_csv(elder_id, track)
+    except FileNotFoundError:
+        return []
+    recent = df.sort_values(DAY_KEY_COL, ascending=False).head(n_days)
+    return recent.sort_values(DAY_KEY_COL)["data_quality"].tolist()
+
+
+def _apply_cold_start_fallbacks(
+    elder_id: str,
+    day_key: str,
+    inference_result: dict,
+    tracks: tuple[str, ...],
+    config: dict,
+) -> None:
+    """
+    对处于 cold_start 的轨启用稳健滑动基线兜底，就地改写 inference_result。
+
+    按轨独立：睡眠轨基线已就绪、社交轨还在建档时，只有社交轨走兜底。
+    """
+    changed = False
+    for track in tracks:
+        track_result = inference_result.get(track)
+        if not isinstance(track_result, dict):
+            continue
+        if track_result.get("status") != "cold_start":
+            continue
+
+        fb = _cold_start_fallback_track(elder_id, day_key, track, config)
+        if fb is not None:
+            inference_result[track] = fb
+            changed = True
+
+    if not changed:
+        return
+
+    # 兜底改变了各轨结果，整体状态与连续天数要跟着重算并落盘
+    statuses = {
+        t: inference_result[t].get("status")
+        for t in tracks if isinstance(inference_result.get(t), dict)
+    }
+    inference_result["track_statuses"] = statuses
+    if any(s in ("success", "observation", "cold_start_fallback") for s in statuses.values()):
+        inference_result["status"] = "success"
+
+    inference_result["is_deviation"] = any(
+        isinstance(inference_result.get(t), dict)
+        and inference_result[t].get("is_deviation", False)
+        for t in tracks
+    )
+
+    from src.utils.io import load_daily_results, save_daily_result
+    recent = load_daily_results(elder_id, n_days=7)
+    consecutive = 0
+    for day_result in reversed(recent):
+        if day_result.get("day_key") == day_key:
+            continue
+        if day_result.get("is_deviation", False):
+            consecutive += 1
+        else:
+            break
+    inference_result["consecutive_deviation_days"] = consecutive + (
+        1 if inference_result["is_deviation"] else 0
+    )
+    save_daily_result(elder_id, day_key, inference_result)
+
+
+def _cold_start_fallback_track(
+    elder_id: str,
+    day_key: str,
+    track: str,
+    config: dict,
 ) -> dict | None:
     """
-    冷启动兜底：GRU 基线就绪前，用滑动均值/标准差做基础离群检测。
-
-    消除建档期的监测盲区。一旦 GRU 基线就绪，
-    daily_inference 不再返回 cold_start，本函数也就不会被调用。
-
-    Args:
-        elder_id: 老人ID
-        date_str: 今日日期
-        today_vec: (6,) 今日已填充的特征向量
-        config: 全局配置
+    某轨的冷启动兜底：GRU 基线就绪前，用中位数/MAD 稳健基线做基础离群检测。
 
     Returns:
-        与 daily_inference 结构兼容的结果字典（status="cold_start_fallback"），
+        与 infer_track 结构兼容的结果字典（status="cold_start_fallback"），
         数据不足以兜底时返回 None。
     """
-    if config is None:
-        from src.utils.io import load_config
-        config = load_config()
-
     cs_cfg = config.get("cold_start", {})
     if not cs_cfg.get("fallback_enabled", True):
         return None
@@ -202,68 +313,70 @@ def _cold_start_fallback(
     lookback = cs_cfg.get("fallback_lookback", 14)
     sigma = cs_cfg.get("fallback_sigma", 3.0)
 
-    from src.baseline.scaler_utils import FEATURE_NAMES
-    from src.utils.io import get_feature_weight_array, save_daily_result
+    names = get_feature_names(track)
 
-    # 取今天之前的历史有效特征作为滑动基线
     try:
-        df = load_features_csv(elder_id)
-    except Exception:
+        df = load_features_csv(elder_id, track)
+    except FileNotFoundError:
         return None
 
-    df = df[(df["data_quality"] == "valid") & (df["date"] < date_str)].sort_values("date")
-    df = df.tail(lookback)
+    hist_df = df[(df["data_quality"] == "valid") & (df[DAY_KEY_COL] < day_key)]
+    hist_df = hist_df.sort_values(DAY_KEY_COL).tail(lookback)
 
-    if len(df) < min_days:
-        logger.info(f"  └─ 冷启动兜底：历史有效数据不足（{len(df)}/{min_days}天），暂不检测")
+    if len(hist_df) < min_days:
+        logger.info(
+            f"  └─ [{track}] 冷启动兜底：历史有效数据不足（{len(hist_df)}/{min_days}天），暂不检测"
+        )
         return None
 
-    history = df[FEATURE_NAMES].to_numpy(dtype=np.float64)
-    weights = get_feature_weight_array()
+    today_df = df[df[DAY_KEY_COL] == day_key]
+    if len(today_df) == 0:
+        return None
+
+    history = hist_df[names].to_numpy(dtype=np.float64)
+    today_vec = today_df[names].to_numpy(dtype=np.float64).flatten()
 
     from src.baseline.cold_start_fallback import fallback_deviation_check
-    fb = fallback_deviation_check(history, today_vec, weights, sigma=sigma)
+    from src.utils.io import get_feature_weight_array
 
-    # 统计连续偏离天数（复用 daily_inference 的日志）
-    from src.utils.io import load_daily_results
-    recent_results = load_daily_results(elder_id, n_days=7)
-    consecutive = 0
-    for day_result in reversed(recent_results):
-        if day_result.get("is_deviation", False):
-            consecutive += 1
-        else:
-            break
+    weights = get_feature_weight_array(track)
+    fb = fallback_deviation_check(history, today_vec, weights, track, sigma=sigma)
 
-    result = {
-        "elder_id": elder_id,
-        "date": date_str,
+    is_weekend = datetime.strptime(day_key, "%Y-%m-%d").weekday() >= 5
+
+    logger.info(
+        f"  └─ [{track}] 冷启动兜底: score={fb['anomaly_score']:.4f}, "
+        f"threshold={fb['threshold']:.2f}, deviation={fb['is_deviation']} "
+        f"(稳健基线 n={len(history)}, 跳过维={fb['skipped_features']})"
+    )
+
+    return {
+        "track": track,
         "anomaly_score": fb["anomaly_score"],
         "static_threshold": fb["threshold"],
         "ewma_threshold": fb["threshold"],
         "dynamic_threshold": fb["threshold"],
         "is_deviation": fb["is_deviation"],
-        "feature_residuals": fb["feature_z"],
-        "consecutive_deviation_days": consecutive + (1 if fb["is_deviation"] else 0),
-        "data_quality": "valid",
-        "status": "cold_start_fallback",
+        "signed_residuals": fb["feature_z"],
+        "abs_residuals": fb["feature_z_abs"],
+        "signed_z": fb["feature_z"],
+        # 兜底期的 z 分来自稳健基线而非 GRU 残差，方向可用（这正是修掉 np.abs 的收益）
+        "signed_available": True,
+        "ewma_pool": "weekend" if (track == "social" and is_weekend) else "default",
+        "valid_features": fb["valid_features"],
+        "skipped_features": fb["skipped_features"],
         "in_observation_period": True,
+        "status": "cold_start_fallback",
+        "method": fb["method"],
     }
-    save_daily_result(elder_id, date_str, result)
-
-    logger.info(
-        f"  └─ 冷启动兜底检测: score={fb['anomaly_score']:.4f}, "
-        f"threshold={fb['threshold']:.2f}, deviation={fb['is_deviation']} "
-        f"(滑动基线 n={len(history)})"
-    )
-    return result
 
 
-def load_raw_sensors(elder_id: str, date_str: str) -> dict:
-    """从 data/raw/ 读取四路传感器原始数据。
+def load_raw_sensors(elder_id: str, day_key: str) -> dict:
+    """
+    从 data/raw/ 读取各路传感器原始数据。
 
     Returns:
-        {"sleep":..., "activity":..., "social":...}，
-        缺失的路为 None。供 run_daily_pipeline 的 raw_data 参数使用。
+        {"sleep":..., "activity":..., "camera":...}，缺失的路为 None。
     """
     import json
     from pathlib import Path
@@ -271,7 +384,7 @@ def load_raw_sensors(elder_id: str, date_str: str) -> dict:
     raw_dir = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
 
     def _load_json(subdir: str) -> dict | None:
-        filepath = raw_dir / subdir / elder_id / f"{date_str}.json"
+        filepath = raw_dir / subdir / elder_id / f"{day_key}.json"
         if filepath.exists():
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -280,16 +393,5 @@ def load_raw_sensors(elder_id: str, date_str: str) -> dict:
     return {
         "sleep": _load_json("sleep"),
         "activity": _load_json("activity"),
-        "social": _load_json("social"),
+        "camera": _load_json("camera"),
     }
-
-
-def _load_raw_and_aggregate(elder_id: str, date_str: str):
-    """从 data/raw/ 目录自动读取原始传感器数据并聚合为 6 维特征向量。"""
-    raw = load_raw_sensors(elder_id, date_str)
-    return aggregate_daily_features(
-        date_str=date_str,
-        sleep_data=raw["sleep"],
-        activity_data=raw["activity"],
-        social_data=raw["social"],
-    )

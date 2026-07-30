@@ -168,7 +168,7 @@ def compute_daily_alert_rate(
             alerts = [
                 r for r in results
                 if r.get("risk_level", 0) >= alert_level
-                and start <= r["date"] <= end
+                and start <= (r.get("day_key") or r.get("date") or "") <= end
             ]
             total_alerts += len(alerts)
         except Exception:

@@ -1,250 +1,365 @@
 """
-风险类型判定规则
+风险类型判定规则（三类，双轨）
 
-两种风险类型（全部基于趋势检测）：
-    - 睡眠问题：sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓
-    - 社交孤独：social_turns↓ + daily_activity↓
+| 风险类型         | 方向性逻辑                                          | 持续性门槛        |
+|------------------|-----------------------------------------------------|-------------------|
+| 睡眠稳定性偏离   | SE↓ 且 WASO↑，再叠加 sol↑/bed_exit↑/deep↓ 中 ≥1     | 连续 3 天         |
+| 社会连接减弱     | copresence↓ 且 out_of_home↓ 且 activity↓（三项全中）| 7 天滚动窗内 ≥5 天 |
+| 作息节律紊乱     | RA↓ 且 IV↑，再叠加 sleep_onset_clock 漂移           | 连续 5 天         |
 
-每种类型有独立的特征贡献权重和阈值。
-所有风险均基于连续趋势判定，无单点触发。
+每类都要求**方向性超标 + 幅度门槛 + 持续性门槛**三者同时满足，不做单点触发。
+
+三条设计决定的理由：
+
+1. **为什么社会连接要"三项全中"**
+   没人来（copresence↓）+ 也不出门（out_of_home↓）+ 家里也不怎么动（activity↓），
+   三条同时成立才是真正的社交退缩，误报空间很小。
+   代价是灵敏度：只"没人来但仍照常出门"的情况不触发本预警——这类会被
+   周报层的 copresence 趋势捕捉到。这是为压低误报付出的代价，因为面向单个老人
+   长期运行时，反复误报会直接导致家属关掉通知，届时灵敏度多高都没意义。
+
+2. **为什么社会连接用滚动窗而不是"连续 5 天"**
+   严格连续 5 天必然跨越周末，而周末社交本来就多，会把真实的退缩打断成两截、
+   永远凑不满 5 天。滚动窗能容纳周末起伏，同时保持"不是单日波动"的克制。
+
+3. **为什么作息节律紊乱是跨轨规则**
+   RA/IV 在社交轨，sleep_onset_clock 在睡眠轨。这一类的文献支撑最强
+   （昼夜节律振幅下降 + 碎片化上升是被动传感中与抑郁症状关联最稳定的指标），
+   所以值得跨轨取证。睡眠轨缺失时降级为"仅 RA↓ 且 IV↑ 且持续 7 天"——
+   门槛从 5 天提到 7 天，用更长的持续性换取失去交叉验证后的可信度。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
+
+from src.baseline.scaler_utils import TRACK_SLEEP, TRACK_SOCIAL
 
 
 @dataclass
 class RiskRule:
-    """单条风险判定规则"""
-    name: str                      # 风险类型名称
-    features: list[str]            # 相关特征名（按顺序对应direction和weight）
-    # directions 记录每个特征的"异常方向"而非只看绝对偏离。睡眠效率是"下降"才异常，
-    # 变好不算；睡眠碎片化是"上升"才异常。只看 |残差| 大会把方向相反的正常波动也误判成风险，
-    # 所以必须按方向匹配（见 classify_risk_type 里的 up/down 分支）。
-    directions: list[str]          # 异常方向: "up" / "down" / "any"
-    weights: list[float]           # 特征在风险评分中的权重
-    threshold_ratio: float = 2.0   # 残差超标倍数阈值（对"残差的残差"而非原始残差，见下方二次标准化）
-    consecutive_days: int = 3      # 连续超标天数阈值
+    """
+    单条风险判定规则。
 
-    def __post_init__(self):
-        if len(self.features) != len(self.directions):
-            raise ValueError("features and directions must have same length")
-        if len(self.features) != len(self.weights):
-            raise ValueError("features and weights must have same length")
+    required: 必须全部方向性超标的特征
+    optional: 至少满足 min_optional 项的特征（为空则不要求）
+    """
+    name: str
+    key: str
+    required: list[tuple[str, str, str]]          # (track, feature, direction)
+    optional: list[tuple[str, str, str]] = field(default_factory=list)
+    min_optional: int = 0
+    threshold_ratio: float = 1.5                  # signed_z 的超标倍数门槛
+    consecutive_days: int = 3                     # 连续达标天数门槛
+    rolling_window: int | None = None             # 非 None 时用滚动窗替代连续判定
+    rolling_required: int | None = None
+    # 当某轨数据缺失导致 optional 池为空时，用更长的持续性门槛补偿
+    consecutive_days_degraded: int | None = None
+
+    def uses_rolling(self) -> bool:
+        return self.rolling_window is not None and self.rolling_required is not None
+
+    def all_features(self) -> list[tuple[str, str, str]]:
+        return self.required + self.optional
 
 
-# ===== 预定义规则 =====
+def build_risk_rules(config: dict | None = None) -> dict[str, RiskRule]:
+    """从配置构建三条规则。持续性门槛来自 config.risk.risk_rules。"""
+    if config is None:
+        from src.utils.io import load_config
+        config = load_config()
 
-def _load_risk_rules() -> dict[str, RiskRule]:
-    """从配置文件加载风险规则权重"""
-    from src.utils.io import load_feature_weights
+    rr = config.get("risk", {}).get("risk_rules", {})
+    sleep_cfg = rr.get("sleep_stability", {})
+    social_cfg = rr.get("social_decline", {})
+    circ_cfg = rr.get("circadian_disruption", {})
 
-    weights = load_feature_weights()
-
-    # 两类风险的 threshold_ratio / consecutive_days 刻意不同：
-    #   - 睡眠：雷达生理指标相对稳定可信，门槛放到 1.5 即可捕捉，仍要 3 天连续。
-    #   - 社交孤独：本就是缓变过程（偶尔一两天少说话很正常），要 5 天连续才算趋势，
-    #     否则会把老人正常的"安静日"误报成孤独。
     return {
-        "sleep_problem": RiskRule(
-            name="睡眠问题",
-            features=["sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd"],
-            directions=["down", "down", "up", "down"],
-            weights=[
-                weights["sleep_efficiency"],
-                weights["deep_sleep_ratio"],
-                weights["sfi"],
-                weights["hrv_rmssd"],
+        "sleep_stability": RiskRule(
+            name="睡眠稳定性偏离",
+            key="sleep_stability",
+            required=[
+                (TRACK_SLEEP, "sleep_efficiency", "down"),
+                (TRACK_SLEEP, "waso_min", "up"),
             ],
-            threshold_ratio=1.5,
-            consecutive_days=3,
+            optional=[
+                (TRACK_SLEEP, "sol_min", "up"),
+                (TRACK_SLEEP, "bed_exit_count", "up"),
+                (TRACK_SLEEP, "deep_sleep_ratio", "down"),
+            ],
+            min_optional=1,
+            threshold_ratio=sleep_cfg.get("threshold_ratio", 1.5),
+            consecutive_days=sleep_cfg.get("consecutive_days", 3),
         ),
-        "social_isolation": RiskRule(
-            name="社交孤独",
-            features=["social_turns", "daily_activity"],
-            directions=["down", "down"],
-            weights=[
-                weights["social_turns"],
-                weights["daily_activity"],
+        "social_decline": RiskRule(
+            name="社会连接减弱",
+            key="social_decline",
+            required=[
+                (TRACK_SOCIAL, "copresence_min", "down"),
+                (TRACK_SOCIAL, "out_of_home_min", "down"),
+                (TRACK_SOCIAL, "activity_counts", "down"),
             ],
-            threshold_ratio=1.5,
-            consecutive_days=5,
+            optional=[],
+            min_optional=0,
+            # 1.2 而非 1.5：三项全中且无可选池，门槛可低而联合误报率仍极低。
+            # 另一层原因是 out_of_home_min 的残差 std 被周末双峰抬高（见 settings.yaml 注释）。
+            threshold_ratio=social_cfg.get("threshold_ratio", 1.2),
+            consecutive_days=social_cfg.get("rolling_required", 5),
+            rolling_window=social_cfg.get("rolling_window", 7),
+            rolling_required=social_cfg.get("rolling_required", 5),
+        ),
+        "circadian_disruption": RiskRule(
+            name="作息节律紊乱",
+            key="circadian_disruption",
+            required=[
+                (TRACK_SOCIAL, "rar_amplitude", "down"),
+                (TRACK_SOCIAL, "rar_iv", "up"),
+            ],
+            optional=[
+                (TRACK_SLEEP, "sleep_onset_clock", "any"),
+            ],
+            min_optional=1,
+            threshold_ratio=circ_cfg.get("threshold_ratio", 1.5),
+            consecutive_days=circ_cfg.get("consecutive_days", 5),
+            consecutive_days_degraded=circ_cfg.get("consecutive_days_degraded", 7),
         ),
     }
 
-RISK_RULES = _load_risk_rules()
+
+def _exceeds(signed_z: float, direction: str, threshold: float) -> bool:
+    """
+    带符号方向判定：up 只认正向超标，down 只认负向超标，any 认双向。
+
+    这是"方向匹配"的落点，保证"睡眠变好""活动变多"这类反向偏离不被计入风险。
+    """
+    if direction == "up":
+        return signed_z > threshold
+    if direction == "down":
+        return signed_z < -threshold
+    if direction == "any":
+        return abs(signed_z) > threshold
+    raise ValueError(f"Unknown direction: {direction!r}")
+
+
+def _collect_signed_z(track_results: dict) -> tuple[dict, set[str]]:
+    """
+    从双轨推理结果里汇总 {(track, feature): signed_z}，并记录哪些轨可用。
+
+    某轨 status 不是 success/observation，或 signed 统计不可用（旧格式基线）时，
+    该轨整体视为不可用——不参与方向判定，而不是当成"没超标"。
+    这个区分很重要：把"测不到"当成"正常"会掩盖设备故障。
+    """
+    z_map: dict[tuple[str, str], float] = {}
+    available: set[str] = set()
+
+    for track in (TRACK_SLEEP, TRACK_SOCIAL):
+        tr = track_results.get(track)
+        if not isinstance(tr, dict):
+            continue
+        if tr.get("status") not in ("success", "observation"):
+            continue
+        if not tr.get("signed_available", False):
+            continue
+        signed_z = tr.get("signed_z") or {}
+        if not signed_z:
+            continue
+        available.add(track)
+        for feat, value in signed_z.items():
+            z_map[(track, feat)] = float(value)
+
+    return z_map, available
 
 
 def classify_risk_type(
-    feature_residuals: dict[str, float],
-    residual_stats: dict[str, np.ndarray],
-    consecutive_days: dict[str, int] | None = None,
+    track_results: dict,
     daily_results: list[dict] | None = None,
-    today_is_deviation: bool = True,
+    config: dict | None = None,
 ) -> list[dict]:
     """
-    根据当日特征残差判断风险类型。
+    根据当日双轨残差判断风险类型。
 
     Args:
-        feature_residuals: {feature_name: residual_value} 当日各特征的标准化残差
-        residual_stats: {"mean": np.ndarray(6,), "std": np.ndarray(6,)}
-        consecutive_days: 各特征连续异常天数（可选）
-        daily_results: 近7天推理结果（用于统计连续天数）
+        track_results: daily_inference 的返回（含 "sleep" / "social" 两键）
+        daily_results: 近 N 天推理结果（用于统计连续/滚动天数）
+        config: 全局配置
 
     Returns:
         [
             {
-                "risk_type": "睡眠问题",
-                "risk_key": "sleep_problem",
+                "risk_type": "睡眠稳定性偏离",
+                "risk_key": "sleep_stability",
                 "score": 2.3,
                 "is_active": True,
-                "exceeding_features": ["sleep_efficiency", "sfi"],
+                "qualifies": True,
+                "exceeding_features": ["sleep_efficiency", "waso_min", "sol_min"],
                 "consecutive_days": 3,
+                "threshold_required": 3,
+                "evaluable": True,
+                "skip_reason": None,
             },
             ...
         ]
     """
-    from src.baseline.scaler_utils import FEATURE_NAMES
+    if config is None:
+        from src.utils.io import load_config
+        config = load_config()
 
-    if consecutive_days is None:
-        consecutive_days = {}
-
-    # 只需 std 作为归一尺度（见下方 normalized_residual 说明，不再用 mean 以免破坏符号）
-    if "std" in residual_stats and isinstance(residual_stats["std"], np.ndarray):
-        residual_std = {
-            FEATURE_NAMES[i]: float(residual_stats["std"][i])
-            for i in range(len(FEATURE_NAMES))
-        }
-    else:
-        residual_std = residual_stats.get("std", {})
+    rules = build_risk_rules(config)
+    z_map, available_tracks = _collect_signed_z(track_results)
 
     results = []
 
-    for risk_key, rule in RISK_RULES.items():
-        exceeding_features = []
-        total_score = 0.0
-        weight_sum = 0.0
+    for key, rule in rules.items():
+        needed_tracks = {t for t, _, _ in rule.required}
+        missing_required_tracks = needed_tracks - available_tracks
 
-        for feat, direction, weight in zip(rule.features, rule.directions, rule.weights):
-            feat_value = feature_residuals.get(feat, 0.0)
-            feat_std = residual_std.get(feat, 1.0)
+        # 必需轨缺失 → 该类型本日不可评估（不是"正常"）
+        if missing_required_tracks:
+            results.append({
+                "risk_type": rule.name,
+                "risk_key": key,
+                "score": 0.0,
+                "is_active": False,
+                "qualifies": False,
+                "exceeding_features": [],
+                "consecutive_days": 0,
+                "threshold_required": rule.consecutive_days,
+                "evaluable": False,
+                "skip_reason": f"必需轨不可用: {sorted(missing_required_tracks)}",
+            })
+            continue
 
-            if feat_std < 1e-8:
-                feat_std = 1e-8  # 防除零：某特征训练残差几乎恒定时兜底
+        threshold = rule.threshold_ratio
 
-            # 二次标准化：feature_residuals 是带符号的 GRU 预测残差（actual-pred），
-            # 用"训练期残差尺度(std)"归一，得到带符号的 z 分——幅度表示偏离大小，
-            # 符号表示方向（正=偏高，负=偏低）。
-            # 注意：绝不能减去残差均值。训练残差统计按 |残差| 计（均值恒为正），
-            # 若从带符号残差里减这个正均值，会把符号整体拉偏，导致 down 方向永远误触发、
-            # 正常特征（残差≈0）也被判为 down 超标。只除以 std（尺度、恒正）即可保号。
-            normalized_residual = feat_value / feat_std
-            threshold = rule.threshold_ratio
+        # 必需项：全部都要方向性超标
+        required_hits, required_z = [], []
+        for track, feat, direction in rule.required:
+            z = z_map.get((track, feat))
+            if z is None:
+                continue
+            required_z.append(abs(z))
+            if _exceeds(z, direction, threshold):
+                required_hits.append(feat)
 
-            # 带符号方向判定：up 只认正向超标，down 只认负向超标。这是"方向匹配"的落点，
-            # 保证"语速变快""睡眠变好"这类反向偏离不会被计入风险特征。
-            is_exceeding = False
-            if direction == "up" and normalized_residual > threshold:
-                is_exceeding = True
-            elif direction == "down" and normalized_residual < -threshold:
-                is_exceeding = True
-            elif direction == "any" and abs(normalized_residual) > threshold:
-                is_exceeding = True
+        all_required_met = len(required_hits) == len(rule.required)
 
-            if is_exceeding:
-                exceeding_features.append(feat)
+        # 可选项：只统计所在轨可用的
+        optional_hits, optional_z = [], []
+        optional_evaluable = 0
+        for track, feat, direction in rule.optional:
+            if track not in available_tracks:
+                continue
+            z = z_map.get((track, feat))
+            if z is None:
+                continue
+            optional_evaluable += 1
+            optional_z.append(abs(z))
+            if _exceeds(z, direction, threshold):
+                optional_hits.append(feat)
 
-            # 评分累加用 |z| 而非带符号值：即便某特征方向"不对"，它的波动幅度仍反映整体不稳定，
-            # 计入加权综合分；但它不会进 exceeding_features，故不满足"方向性超标"的激活前提。
-            total_score += abs(normalized_residual) * weight
-            weight_sum += weight
-
-        final_score = total_score / weight_sum if weight_sum > 0 else 0.0
-
-        # 当天"达标"信号：今天整体已判偏离 且 ≥1 特征方向性超标 且 加权综合分 > 1.0。
-        # 刻意不含连续天数——它只回答"今天够不够格"。连续天数另算。
-        #
-        # today_is_deviation 这道闸是关键：风险"类型"是对"今天整体异常"的细化分类，
-        # 若今天整体都不算偏离（anomaly_score 未超动态阈值），就不该分出任何类型。
-        # 否则类型判定用的是固定门槛 final_score>1.0，不受动态阈值保护——正常日
-        # |z| 本就常在 1 附近，会频繁误 qualifies、攒够连续天数后把三类都误激活
-        # （范围2 诊断：纯高斯正常数据也全线误报）。挂靠整体偏离后，正常日直接不分类。
-        qualifies_today = (
-            today_is_deviation
-            and len(exceeding_features) >= 1
-            and final_score > 1.0
-        )
-
-        if daily_results is not None:
-            cons_days = _count_consecutive_risk_type(
-                risk_key, daily_results, qualifies_today
-            )
+        # 可选池为空（如睡眠轨离线导致 sleep_onset_clock 拿不到）→ 用降级门槛
+        degraded = rule.min_optional > 0 and optional_evaluable == 0
+        if degraded and rule.consecutive_days_degraded is not None:
+            required_days = rule.consecutive_days_degraded
+            optional_met = True   # 免除可选项要求，改用更长的持续性补偿
+        elif degraded:
+            required_days = rule.consecutive_days
+            optional_met = False  # 无降级路径的规则：可选池空则无法达标
         else:
-            cons_days = consecutive_days.get(risk_key, 0) + (1 if qualifies_today else 0)
+            required_days = rule.consecutive_days
+            optional_met = len(optional_hits) >= rule.min_optional
 
-        # 激活 = 今天达标 且 连续达标天数 ≥ 门槛（3/3/5 天）。这仍是"克制预警"的闸：
-        # 方向匹配(qualifies 里) + 幅度门槛(qualifies 里) + 连续趋势(cons_days)。
-        is_active = qualifies_today and cons_days >= rule.consecutive_days
+        # 幅度分：全部参与特征的 |z| 加权平均（此处等权，权重已体现在 anomaly_score）
+        all_z = required_z + optional_z
+        score = float(np.mean(all_z)) if all_z else 0.0
+
+        qualifies_today = bool(all_required_met and optional_met and score > 1.0)
+
+        # 持续性统计
+        if rule.uses_rolling():
+            cons_days = _count_rolling_qualifies(
+                key, daily_results, qualifies_today, rule.rolling_window
+            )
+            required_days = rule.rolling_required
+        else:
+            cons_days = _count_consecutive_qualifies(key, daily_results, qualifies_today)
+
+        is_active = bool(qualifies_today and cons_days >= required_days)
 
         results.append({
             "risk_type": rule.name,
-            "risk_key": risk_key,
-            "score": round(final_score, 4),
+            "risk_key": key,
+            "score": round(score, 4),
             "is_active": is_active,
-            "qualifies": qualifies_today,   # 供 quick_judge 写回日志，次日统计连续天数
-            "exceeding_features": exceeding_features,
+            "qualifies": qualifies_today,
+            "exceeding_features": required_hits + optional_hits,
             "consecutive_days": cons_days,
-            "threshold_required": rule.consecutive_days,
+            "threshold_required": required_days,
+            "evaluable": True,
+            "degraded_mode": degraded,
+            "skip_reason": None,
         })
 
     return results
 
 
 def _day_qualifies(day_result: dict, risk_key: str) -> bool:
-    """某历史日志里，该风险类型当天是否"达标"（方向+幅度，不含连续天数）。
+    """某历史日志里，该风险类型当天是否达标（方向+幅度，不含持续性）。
 
-    权威来源是 quick_judge 写回的 `risk_type_qualifies` 字典。为兼容旧日志，
-    退而读 `risk_types` 里该类型的 qualifies/is_active 标志。
+    权威来源是 judge 写回的 `risk_type_qualifies` 字典。
     """
     quals = day_result.get("risk_type_qualifies")
     if isinstance(quals, dict) and risk_key in quals:
         return bool(quals[risk_key])
-    # 兼容旧格式：从 risk_types 列表里找
     for rt in day_result.get("risk_types", []) or []:
         if isinstance(rt, dict) and rt.get("risk_key") == risk_key:
             return bool(rt.get("qualifies", rt.get("is_active", False)))
-        if rt == risk_key:
-            return True
     return False
 
 
-def _count_consecutive_risk_type(
-    risk_key: str,
-    daily_results: list[dict],
-    today_qualifies: bool | None = None,
-) -> int:
-    """统计某风险类型"截至今天"的连续达标天数。
-
-    关键修复：今天的达标信号用**现算的** today_qualifies（今天的日志此刻还没写回
-    risk_type_qualifies，读日志会漏掉今天，导致永远数不到自己 → 死循环）。
-    历史天数从日志的 risk_type_qualifies 读。中间断过即停（真正的"连续"）。
-
-    Args:
-        today_qualifies: 今天是否达标（现算）。None 时退化为纯读日志（如周报回溯场景）。
+def _counts_toward_consecutive(day_result: dict) -> bool:
     """
-    results = daily_results
-    count = 0
+    该历史日是否计入持续性统计。
 
-    # 今天：用现算值。若今天就不达标，连续数直接 0。
-    if today_qualifies is not None:
-        if not today_qualifies:
-            return 0
-        count = 1
-        results = daily_results[:-1] if daily_results else []  # 今天那条已用现算值，往前数
+    degraded / insufficient / offline 的日子被**跳过**（既不累加也不打断）——
+    传感器抖一下不该让攒了 4 天的偏离段清零，也不该凭空算成偏离。
+    """
+    quality = day_result.get("data_quality")
+    if quality is None:
+        return True  # 旧日志无该字段，保守当作有效
+    return quality == "valid"
 
-    # 历史：从近到远，遇到第一个"不达标"就停
-    for day_result in reversed(results):
+
+def _history_before_today(daily_results: list[dict] | None) -> list[dict]:
+    """
+    取"今天之前"的历史日志。
+
+    今天的达标信号必须用现算值——今天的日志此刻还没写回 risk_type_qualifies，
+    读日志会漏掉今天，导致永远数不到自己。
+    """
+    if not daily_results:
+        return []
+    return daily_results[:-1]
+
+
+def _count_consecutive_qualifies(
+    risk_key: str,
+    daily_results: list[dict] | None,
+    today_qualifies: bool,
+) -> int:
+    """
+    统计截至今天的连续达标天数。
+
+    规则：今天不达标直接返回 0；往前数时跳过质量不佳的日子，
+    遇到第一个"质量正常但不达标"的日子即停。
+    """
+    if not today_qualifies:
+        return 0
+
+    count = 1
+    for day_result in reversed(_history_before_today(daily_results)):
+        if not _counts_toward_consecutive(day_result):
+            continue  # 跳过降级日，不累加也不打断
         if _day_qualifies(day_result, risk_key):
             count += 1
         else:
@@ -252,18 +367,51 @@ def _count_consecutive_risk_type(
     return count
 
 
-def get_risk_feature_importance(risk_key: str) -> dict[str, float]:
-    """获取某个风险类型的特征重要性"""
-    rule = RISK_RULES.get(risk_key)
+def _count_rolling_qualifies(
+    risk_key: str,
+    daily_results: list[dict] | None,
+    today_qualifies: bool,
+    window: int,
+) -> int:
+    """
+    统计 window 天滚动窗内的达标天数（含今天）。
+
+    分母只数质量正常的日子；窗口按自然日取最近 window 条记录。
+    """
+    count = 1 if today_qualifies else 0
+
+    history = _history_before_today(daily_results)
+    # 只看最近 window-1 条历史（今天占 1 条）
+    for day_result in reversed(history[-(window - 1):] if window > 1 else []):
+        if not _counts_toward_consecutive(day_result):
+            continue
+        if _day_qualifies(day_result, risk_key):
+            count += 1
+    return count
+
+
+def get_risk_feature_importance(risk_key: str, config: dict | None = None) -> dict[str, float]:
+    """获取某个风险类型各特征的相对重要性（按 feature_weights.json 的权重归一）"""
+    from src.utils.io import get_feature_weight_map
+
+    rules = build_risk_rules(config)
+    rule = rules.get(risk_key)
     if rule is None:
         return {}
-    total = sum(rule.weights)
-    return {
-        feat: weight / total
-        for feat, weight in zip(rule.features, rule.weights)
-    }
+
+    weight_cache: dict[str, dict[str, float]] = {}
+    entries: dict[str, float] = {}
+    for track, feat, _ in rule.all_features():
+        if track not in weight_cache:
+            weight_cache[track] = get_feature_weight_map(track)
+        entries[feat] = weight_cache[track].get(feat, 1.0)
+
+    total = sum(entries.values())
+    if total <= 0:
+        return {}
+    return {feat: w / total for feat, w in entries.items()}
 
 
-def list_risk_types() -> list[str]:
+def list_risk_types(config: dict | None = None) -> list[str]:
     """列出所有风险类型名称"""
-    return [rule.name for rule in RISK_RULES.values()]
+    return [rule.name for rule in build_risk_rules(config).values()]

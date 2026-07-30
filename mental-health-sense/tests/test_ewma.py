@@ -130,3 +130,4 @@ class TestCumulativeEWMABaseline:
         # 加入一个极值后
         ewma.update(100.0)
         assert ewma.std > 1.0
+

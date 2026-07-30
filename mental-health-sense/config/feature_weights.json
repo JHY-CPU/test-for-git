@@ -1,9 +1,32 @@
 {
-  "_comment": "特征权重配置 - 用于加权残差计算和风险类型判定",
-  "sleep_efficiency": 2.5,
-  "deep_sleep_ratio": 2.0,
-  "sfi": 2.0,
-  "hrv_rmssd": 1.5,
-  "daily_activity": 2.0,
-  "social_turns": 3.0
+  "_comment": "双轨特征权重配置（v2.1）。权重用于加权残差与风险判定；direction 是异常方向，rules.py 据此做方向性判定。权重来源：设计文档 4.5 节，与 4.2/4.3 的证据强度列一一对应——强 2.5-3.0 / 中强 2.0-2.5 / 中 1.5 / 弱代理 1.0-1.5。",
+  "_direction_semantics": "down=值下降才算异常；up=值上升才算异常；any=双向偏离都算（仅 sleep_onset_clock，相位漂移无好坏方向）。",
+
+  "sleep_track": {
+    "_source": "小贝壳无感睡眠监测仪（唯一主源）",
+    "_weight_sum": 16.5,
+    "features": [
+      {"name": "sleep_efficiency",  "weight": 3.0, "direction": "down", "unit": "ratio",          "evidence": "强"},
+      {"name": "waso_min",          "weight": 3.0, "direction": "up",   "unit": "min",            "evidence": "强"},
+      {"name": "sol_min",           "weight": 2.0, "direction": "up",   "unit": "min",            "evidence": "中强"},
+      {"name": "bed_exit_count",    "weight": 2.5, "direction": "up",   "unit": "count",          "evidence": "强"},
+      {"name": "deep_sleep_ratio",  "weight": 1.5, "direction": "down", "unit": "ratio",          "evidence": "中（受分期精度限制降权）"},
+      {"name": "sleep_onset_clock", "weight": 2.0, "direction": "any",  "unit": "min_from_20:00", "evidence": "中强"},
+      {"name": "night_hr_mean",     "weight": 1.0, "direction": "up",   "unit": "bpm",            "evidence": "中（hrv_rmssd 的弱代理，不等价于 HRV）"},
+      {"name": "daytime_nap_min",   "weight": 1.5, "direction": "up",   "unit": "min",            "evidence": "中"}
+    ]
+  },
+
+  "social_track": {
+    "_source": "萤石 C6c 摄像机 + T1C 人体移动传感器（不含音频）",
+    "_weight_sum": 13.5,
+    "_note": "5 维权重全部落在 2.5-3.0：删维后留下的每一维都有中强以上文献支撑，不再有权重 1.5 的陪跑维度。",
+    "features": [
+      {"name": "copresence_min",  "weight": 3.0, "direction": "down", "unit": "min",   "evidence": "中强（本轨社会接触的唯一指标）"},
+      {"name": "out_of_home_min", "weight": 2.5, "direction": "down", "unit": "min",   "evidence": "中强（测量为推断，命名保留“疑似”）"},
+      {"name": "rar_amplitude",   "weight": 3.0, "direction": "down", "unit": "ratio", "evidence": "强"},
+      {"name": "rar_iv",          "weight": 2.5, "direction": "up",   "unit": "ratio", "evidence": "强"},
+      {"name": "activity_counts", "weight": 2.5, "direction": "down", "unit": "count", "evidence": "强"}
+    ]
+  }
 }

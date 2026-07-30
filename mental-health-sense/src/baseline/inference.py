@@ -1,14 +1,28 @@
 """
-每日推理引擎
+每日推理引擎（双轨）
 
-每日凌晨执行：
-    1. 加载模型、scaler、残差统计、EWMA
-    2. 获取最近7天 + 今天的特征向量
+每日凌晨对每一轨各执行一遍：
+    1. 加载该轨的模型、scaler、残差统计、EWMA 池
+    2. 获取最近7天 + 今天的该轨特征向量
     3. 归一化 + GRU预测
-    4. 计算加权残差 → anomaly_score
+    4. 计算 signed 与 abs 双残差 → anomaly_score
     5. 动态阈值判断 → is_deviation
-    6. 更新EWMA
+    6. 更新对应的 EWMA 池（社交轨按 is_weekend 选池）
     7. 记录日志
+
+★ 双残差契约（本模块最容易写错的地方）
+
+    signed_residual[i] = observed[i] − predicted[i]      ← 判方向
+    abs_residual[i]    = |signed_residual[i]|            ← 打幅度分
+
+    anomaly_score = Σ(abs_residual · w) / Σw
+    方向判定       = signed_residual 标准化后与 direction 比对
+
+符号约定是 `observed − predicted`（统计学通行定义），好处是名字与符号一致：
+实际值**下降** → signed **为负** → direction="down" 判 `signed_z < −threshold`。
+反过来的约定（pred − observed）会让"下降"对应正数，是反直觉且极易写反的。
+
+两套统计量都在 calibration/holdout 段估计（见 trainer.py），不用训练集。
 """
 
 from datetime import datetime, timedelta
@@ -16,13 +30,22 @@ from datetime import datetime, timedelta
 import numpy as np
 import torch
 
+from src.baseline.ewma import TrackEWMAPools
 from src.baseline.gru_model import PersonalBaselineGRU
-from src.baseline.scaler_utils import FEATURE_DIM, transform_data
+from src.baseline.scaler_utils import (
+    TRACKS,
+    get_feature_names,
+    transform_data,
+    validate_track,
+)
 from src.utils.io import (
     get_baseline_dir,
     get_daily_vector,
     get_feature_vectors,
     get_feature_weight_array,
+    get_model_filename,
+    get_scaler_path,
+    get_track_meta,
     load_daily_results,
     load_residual_stats,
     save_daily_result,
@@ -32,35 +55,67 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def daily_inference(
+def _is_weekend(day_key: str) -> bool:
+    return datetime.strptime(day_key, "%Y-%m-%d").weekday() >= 5
+
+
+def _normalize_stats(residual_stats: dict, dim: int) -> dict:
+    """
+    兼容旧格式的残差统计。
+
+    新格式：{"signed": {"mean","std"}, "abs": {"mean","std"}}
+    旧格式：{"mean","std"}（abs 残差的统计，无方向信息）
+
+    旧格式下 signed 统计不可得——用 abs 的 std 顶替会造成量纲错配，
+    所以这里明确标记 signed 不可用，让上层拒绝做方向判定而不是给出错误结论。
+    """
+    if "signed" in residual_stats and "abs" in residual_stats:
+        return {**residual_stats, "signed_available": True}
+
+    if "mean" in residual_stats and "std" in residual_stats:
+        logger.warning(
+            "  └─ 检测到旧格式残差统计（仅 abs，无方向信息）。"
+            "方向性风险判定将被跳过，请重新建档以获得 signed 统计。"
+        )
+        abs_stats = {
+            "mean": np.asarray(residual_stats["mean"], dtype=np.float64),
+            "std": np.asarray(residual_stats["std"], dtype=np.float64),
+        }
+        return {
+            "signed": {"mean": np.zeros(dim), "std": abs_stats["std"]},
+            "abs": abs_stats,
+            "signed_available": False,
+        }
+
+    raise ValueError(f"Unrecognized residual_stats structure: {list(residual_stats)}")
+
+
+def infer_track(
     elder_id: str,
-    today_date: str,
+    day_key: str,
+    track: str,
     config: dict | None = None,
 ) -> dict:
     """
-    每日推理：检测今日特征是否偏离个人基线。
-
-    Args:
-        elder_id: 老人ID
-        today_date: 今日日期 "YYYY-MM-DD"
-        config: 全局配置字典
+    对某一轨做当日推理。
 
     Returns:
         {
-            "elder_id": str,
-            "date": str,
+            "track": str,
             "anomaly_score": float,
             "static_threshold": float,
             "ewma_threshold": float,
             "dynamic_threshold": float,
             "is_deviation": bool,
-            "feature_residuals": dict,
-            "data_quality": str,
-            "status": str,  # "success" / "cold_start" / "data_insufficient" / "observation"
-            "in_observation_period": bool,  # 是否在冷启动观察期
+            "signed_residuals": dict,   # 带符号（判方向）
+            "abs_residuals": dict,      # 绝对值（打幅度分）
+            "signed_z": dict,           # 标准化后的带符号残差
+            "signed_available": bool,
+            "ewma_pool": str,
+            "status": str,
         }
     """
-    logger.info(f"每日推理开始: elder_id={elder_id}, date={today_date}")
+    track = validate_track(track)
 
     if config is None:
         from src.utils.io import load_config
@@ -68,173 +123,218 @@ def daily_inference(
 
     risk_cfg = config.get("risk", {})
     ewma_cfg = config.get("ewma", {})
-    sigma = risk_cfg.get("sigma_multiplier", 2.5)
-    min_dynamic_samples = ewma_cfg.get("min_samples_for_dynamic", 20)
-    cold_start_days = risk_cfg.get("cold_start_observation_days", 7)
+    gru_cfg = config.get("gru", {})
+    track_gru = gru_cfg.get(track, {})
 
-    # 1. 加载基线文件
+    sigma = risk_cfg.get("sigma_multiplier", 2.5)
+    cold_start_days = risk_cfg.get("cold_start_observation_days", 0)
+    window = gru_cfg.get("window", 7)
+
+    names = get_feature_names(track)
+    dim = len(names)
+    is_weekend = _is_weekend(day_key)
+
+    base = {
+        "track": track,
+        "anomaly_score": 0.0,
+        "static_threshold": 0.0,
+        "ewma_threshold": 0.0,
+        "dynamic_threshold": 0.0,
+        "is_deviation": False,
+        "signed_residuals": {},
+        "abs_residuals": {},
+        "signed_z": {},
+        "signed_available": False,
+        "ewma_pool": "weekend" if (track == "social" and is_weekend) else "default",
+    }
+
+    # 1. 加载该轨基线文件
     try:
         from src.baseline.scaler_utils import load_scaler
         from src.utils.io import load_gru_model
-        scaler = load_scaler(get_baseline_dir(elder_id) / "scaler.pkl")
-        model = load_gru_model(PersonalBaselineGRU, elder_id, "gru.pth")
-        residual_stats = load_residual_stats(elder_id)
+
+        scaler = load_scaler(get_scaler_path(elder_id, track))
+        model = load_gru_model(
+            PersonalBaselineGRU,
+            elder_id,
+            get_model_filename(track),
+            feature_dim=track_gru.get("feature_dim", dim),
+            hidden_dim=track_gru.get("hidden_dim", 8),
+            num_layers=gru_cfg.get("num_layers", 1),
+            dropout=gru_cfg.get("dropout", 0.2),
+        )
+        residual_stats = _normalize_stats(load_residual_stats(elder_id, track), dim)
     except FileNotFoundError as e:
-        logger.warning(f"  └─ 基线文件缺失，处于冷启动阶段: {e}")
-        return {
-            "elder_id": elder_id,
-            "date": today_date,
-            "anomaly_score": 0.0,
-            "static_threshold": 0.0,
-            "ewma_threshold": 0.0,
-            "dynamic_threshold": 0.0,
-            "is_deviation": False,
-            "feature_residuals": {},
-            "data_quality": "cold_start",
-            "status": "cold_start",
-        }
+        logger.info(f"  └─ [{track}] 基线文件缺失，处于冷启动阶段: {e}")
+        return {**base, "status": "cold_start"}
 
-    # 加载EWMA
-    from src.baseline.ewma import CumulativeEWMABaseline
+    ewma = TrackEWMAPools.load(
+        get_baseline_dir(elder_id), track, alpha=ewma_cfg.get("alpha", 0.05)
+    )
+
+    # 2. 获取今日特征与过去 window 天特征
     try:
-        ewma = CumulativeEWMABaseline.load(get_baseline_dir(elder_id) / "ewma.pkl")
-    except FileNotFoundError:
-        ewma = CumulativeEWMABaseline(alpha=ewma_cfg.get("alpha", 0.05))
+        today_vec = get_daily_vector(elder_id, day_key, track)
 
-    # 2. 获取今日特征和过去7天特征
-    try:
-        today_vec = get_daily_vector(elder_id, today_date)
-
-        # 计算7天前到昨天的日期范围
-        today_dt = datetime.strptime(today_date, "%Y-%m-%d")
-        start_dt = today_dt - timedelta(days=7)
+        today_dt = datetime.strptime(day_key, "%Y-%m-%d")
+        start_dt = today_dt - timedelta(days=window)
         end_dt = today_dt - timedelta(days=1)
 
-        past_7 = get_feature_vectors(
+        past = get_feature_vectors(
             elder_id,
             start_dt.strftime("%Y-%m-%d"),
             end_dt.strftime("%Y-%m-%d"),
+            track,
         )
     except (FileNotFoundError, ValueError) as e:
-        logger.warning(f"  └─ 特征数据获取失败: {e}")
-        return {
-            "elder_id": elder_id,
-            "date": today_date,
-            "anomaly_score": 0.0,
-            "status": "data_insufficient",
-            "error": str(e),
-        }
+        logger.warning(f"  └─ [{track}] 特征数据获取失败: {e}")
+        return {**base, "status": "data_insufficient", "error": str(e)}
 
-    # 检查数据量
-    if len(past_7) < 7:
-        logger.warning(f"  └─ 历史数据不足（{len(past_7)}/7天）")
-        return {
-            "elder_id": elder_id,
-            "date": today_date,
-            "anomaly_score": 0.0,
-            "status": "data_insufficient",
-        }
+    if len(past) < window:
+        logger.warning(f"  └─ [{track}] 历史数据不足（{len(past)}/{window}天）")
+        return {**base, "status": "data_insufficient"}
 
-    if len(past_7) > 7:
-        past_7 = past_7[-7:]
+    past = past[-window:]
 
     # 3. 归一化
-    past_7_norm = transform_data(scaler, past_7)  # (7, 6)
-    today_norm = transform_data(scaler, today_vec)  # (6,)
+    past_norm = transform_data(scaler, past, track)
+    today_norm = transform_data(scaler, today_vec, track)
 
     # 4. GRU预测
     input_tensor = torch.tensor(
-        past_7_norm.reshape(1, 7, FEATURE_DIM), dtype=torch.float32
+        past_norm.reshape(1, window, dim), dtype=torch.float32
     )
     model.eval()
     with torch.no_grad():
-        pred_norm = model(input_tensor).numpy().flatten()  # (6,)
+        pred_norm = model(input_tensor).numpy().flatten()
 
-    # 5. 计算加权残差
-    # 带符号残差（actual - pred）保留"偏离方向"，供 classify_risk_type 做 up/down 方向判定；
-    # anomaly_score 只关心"偏离幅度"，用绝对值。二者不可混用：
-    # 若把绝对残差喂给方向判定，down 方向永远无法正确触发，且正常特征（残差≈0）会误判。
-    signed_residual = today_norm - pred_norm
-    residual = np.abs(signed_residual)
-    weights = get_feature_weight_array()
-    anomaly_score = float(np.dot(residual, weights) / np.sum(weights))
+    # 5. 双残差
+    signed_residual = today_norm - pred_norm       # observed − predicted
+    abs_residual = np.abs(signed_residual)
+    weights = get_feature_weight_array(track)
+    anomaly_score = float(np.dot(abs_residual, weights) / np.sum(weights))
 
-    # 6. 判断阈值
-    base_threshold = float(np.dot(residual_stats["mean"], weights) / np.sum(weights))
-    std_threshold = float(np.dot(residual_stats["std"], weights) / np.sum(weights))
+    # 6. 阈值：用 abs 统计（与 anomaly_score 同量纲）
+    abs_mean = np.asarray(residual_stats["abs"]["mean"], dtype=np.float64)
+    abs_std = np.asarray(residual_stats["abs"]["std"], dtype=np.float64)
+    base_threshold = float(np.dot(abs_mean, weights) / np.sum(weights))
+    std_threshold = float(np.dot(abs_std, weights) / np.sum(weights))
     static_threshold = base_threshold + sigma * std_threshold
 
-    # 动态EWMA阈值
-    # 逻辑：取 min 保持敏感度，防止老人自然衰退后系统变得不敏感
-    # 如果 EWMA 阈值上升（老人状态变差），仍然用较低的 static_threshold 兜底
-    if ewma.n >= min_dynamic_samples:
-        ewma_threshold = ewma.get_threshold(sigma)
+    # 动态EWMA阈值：取 min 保持敏感度，防止老人自然衰退后系统变得不敏感。
+    # 如果 EWMA 阈值上升（老人状态变差），仍然用较低的 static_threshold 兜底。
+    min_samples = ewma.min_samples_required(config, is_weekend=is_weekend)
+    pool_n = ewma.n_samples(is_weekend=is_weekend)
+    if pool_n >= min_samples:
+        ewma_threshold = ewma.get_threshold(sigma, is_weekend=is_weekend)
         dynamic_threshold = min(static_threshold, ewma_threshold)
     else:
         ewma_threshold = static_threshold
         dynamic_threshold = static_threshold
 
-    is_deviation = anomaly_score > dynamic_threshold
+    is_deviation = bool(anomaly_score > dynamic_threshold)
 
-    # 7. 更新EWMA
-    ewma.update(anomaly_score)
-    ewma.save(get_baseline_dir(elder_id) / "ewma.pkl")
+    # 7. 更新对应池并落盘
+    ewma.update(anomaly_score, is_weekend=is_weekend)
+    ewma.save(get_baseline_dir(elder_id))
 
-    # 8. 构建特征残差字典（用于可解释性 + 风险类型方向判定）
-    # 存带符号值：正=今日高于预测，负=今日低于预测。classify_risk_type 依赖此符号
-    # 区分"语速变慢(down)""睡眠效率下降(down)"等方向性异常。与 cold_start_fallback
-    # 写入的带符号 z-score 保持一致。
-    from src.baseline.scaler_utils import FEATURE_NAMES
-    feature_residuals = {}
-    for i, name in enumerate(FEATURE_NAMES):
-        feature_residuals[name] = round(float(signed_residual[i]), 4)
+    # 8. 标准化 signed 残差：只除以 std（尺度、恒正）以保号，不减均值。
+    # signed 残差的均值在留出段上估出来接近 0，减掉意义不大；而若误用 abs 的
+    # 正均值去减，会把符号整体拉偏，导致 down 方向永远误触发。
+    signed_std = np.asarray(residual_stats["signed"]["std"], dtype=np.float64)
+    safe_std = np.where(signed_std < 1e-8, 1e-8, signed_std)
+    signed_z = signed_residual / safe_std
 
-    # 9. 统计连续偏离天数
-    recent_results = load_daily_results(elder_id, n_days=7)
-    consecutive = 0
-    for day_result in reversed(recent_results):
-        if day_result.get("is_deviation", False):
-            consecutive += 1
-        else:
-            break
+    signed_residuals = {n: round(float(signed_residual[i]), 4) for i, n in enumerate(names)}
+    abs_residuals = {n: round(float(abs_residual[i]), 4) for i, n in enumerate(names)}
+    signed_z_map = {n: round(float(signed_z[i]), 4) for i, n in enumerate(names)}
 
-    # 10. 检查是否在冷启动观察期
-    # 训练已用建档期样本预热 EWMA（ewma.n≈window），因此不能直接用 ewma.n 判断
-    # 观察期——那样 n 一开始就 > cold_start_days，观察期形同虚设。
-    # 正确口径：训练后经过的推理次数 = 当前 ewma.n - 训练完成时的 ewma.n。
-    # 每次 daily_inference 恰好 update 一次 EWMA，所以该差值即"训练后天数"。
-    from src.utils.io import load_baseline_meta
-    meta = load_baseline_meta(elder_id)
-    ewma_n_at_train = meta.get("ewma_n_at_train", 0) if meta else 0
-    inferences_since_train = ewma.n - ewma_n_at_train  # 含今日这次
+    # 9. 观察期判定：训练后经过的推理次数（不能直接用样本数，训练已预热 EWMA）
+    meta = get_track_meta(elder_id, track)
+    n_at_train = meta.get("ewma_n_at_train", 0)
+    inferences_since_train = ewma.total_samples() - n_at_train
     in_observation = inferences_since_train <= cold_start_days
-    final_status = "observation" if in_observation else "success"
+    status = "observation" if in_observation else "success"
 
-    result = {
-        "elder_id": elder_id,
-        "date": today_date,
+    return {
+        **base,
         "anomaly_score": round(anomaly_score, 4),
         "static_threshold": round(static_threshold, 4),
         "ewma_threshold": round(ewma_threshold, 4),
         "dynamic_threshold": round(dynamic_threshold, 4),
         "is_deviation": is_deviation,
-        "feature_residuals": feature_residuals,
-        "consecutive_deviation_days": consecutive + (1 if is_deviation else 0),
-        "ewma_n": ewma.n,
-        "ewma_mean": round(ewma.mean, 4) if ewma.mean else None,
-        "ewma_std": round(ewma.std, 4),
-        "data_quality": "valid",
-        "status": final_status,
+        "signed_residuals": signed_residuals,
+        "abs_residuals": abs_residuals,
+        "signed_z": signed_z_map,
+        "signed_available": residual_stats["signed_available"],
+        "ewma_n": pool_n + 1,
+        "ewma_min_samples": min_samples,
         "in_observation_period": in_observation,
+        "status": status,
     }
 
-    # 11. 保存结果
-    save_daily_result(elder_id, today_date, result)
 
-    logger.info(
-        f"  └─ 推理完成: score={anomaly_score:.4f}, "
-        f"threshold={dynamic_threshold:.4f}, "
-        f"deviation={is_deviation}"
+def daily_inference(
+    elder_id: str,
+    day_key: str,
+    config: dict | None = None,
+    tracks: tuple[str, ...] = TRACKS,
+) -> dict:
+    """
+    双轨每日推理：每轨独立算分与阈值，互不影响。
+
+    Returns:
+        {
+            "elder_id": str,
+            "day_key": str,
+            "sleep":  {...},           # infer_track 的返回
+            "social": {...},
+            "status": str,             # 至少一轨 success 即 success
+        }
+    """
+    logger.info(f"每日推理开始: elder_id={elder_id}, day_key={day_key}")
+
+    if config is None:
+        from src.utils.io import load_config
+        config = load_config()
+
+    result: dict = {"elder_id": elder_id, "day_key": day_key}
+
+    for track in tracks:
+        result[track] = infer_track(elder_id, day_key, track, config)
+        tr = result[track]
+        logger.info(
+            f"  └─ [{track}] score={tr['anomaly_score']:.4f}, "
+            f"threshold={tr['dynamic_threshold']:.4f}, "
+            f"deviation={tr['is_deviation']}, status={tr['status']}"
+        )
+
+    statuses = {t: result[t]["status"] for t in tracks}
+    if any(s in ("success", "observation") for s in statuses.values()):
+        overall = "success"
+    elif all(s == "cold_start" for s in statuses.values()):
+        overall = "cold_start"
+    else:
+        overall = "data_insufficient"
+
+    result["status"] = overall
+    result["track_statuses"] = statuses
+
+    # 连续偏离天数：任一轨偏离即算当日偏离（各轨自己的连续天数由 rules.py 分别统计）
+    result["is_deviation"] = any(
+        result[t].get("is_deviation", False) for t in tracks
     )
 
+    recent = load_daily_results(elder_id, n_days=7)
+    consecutive = 0
+    for day_result in reversed(recent):
+        if day_result.get("day_key") == day_key:
+            continue  # 跳过今天自己的旧记录（重算场景）
+        if day_result.get("is_deviation", False):
+            consecutive += 1
+        else:
+            break
+    result["consecutive_deviation_days"] = consecutive + (1 if result["is_deviation"] else 0)
+
+    save_daily_result(elder_id, day_key, result)
     return result

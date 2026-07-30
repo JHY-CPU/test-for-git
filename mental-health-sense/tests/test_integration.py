@@ -1,300 +1,417 @@
 """
-端到端集成测试：模拟50天全流程
+端到端集成测试：双轨全流程
 
-验证从 Day1 到 Day50 的完整数据流：
-    冷启动 → 训练 → 每日推理 → 风险判定 → 周度微调 → 周报生成
+在临时目录里跑真实管道，而不是只验证组件接口：
+    生成 60 天双轨数据 → 双轨建档 → 逐日推理 → 风险判定 → 微调
+
+核心验证点是**双轨信号隔离**：睡眠异常段社交轨应保持正常，反之亦然。
+若两轨同时报警，说明残差串轨了。
 """
 
-import json
-import os
 import sys
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-# 将src目录加入路径
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.utils.seeding import stable_hash
+from src.baseline.scaler_utils import (
+    SLEEP_FEATURE_DIM,
+    SOCIAL_FEATURE_DIM,
+    TRACK_SLEEP,
+    TRACK_SOCIAL,
+)
+
+ELDER = "E001"
+START = "2026-07-01"
+N_DAYS = 60
 
 
-class TestEndToEndSimulation:
-    """
-    端到端模拟运行测试（单人系统）
+@pytest.fixture
+def sandbox(tmp_path, monkeypatch):
+    """把项目根目录重定向到 tmp_path，所有产物落在临时目录里"""
+    import src.utils.io as io_mod
 
-    模拟被监测老人50天的数据，验证全流程正确性。
-    """
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    real_root = Path(__file__).resolve().parent.parent
+    for name in ("settings.yaml", "feature_weights.json"):
+        (tmp_path / "config" / name).write_text(
+            (real_root / "config" / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+    monkeypatch.setattr(io_mod, "get_project_root", lambda: tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def simulated_data(sandbox):
+    """用生产用的生成器造数据，保证测试与实际演示走同一条路径"""
+    from scripts.generate_simulation_data import generate_all_data
+
+    generate_all_data(sandbox, n_days=N_DAYS, start_date=START)
+    return sandbox
+
+
+def day_key_of(day: int) -> str:
+    return (datetime.strptime(START, "%Y-%m-%d") + timedelta(days=day - 1)).strftime("%Y-%m-%d")
+
+
+class TestFeatureContract:
+    def test_track_dims(self):
+        assert SLEEP_FEATURE_DIM == 8
+        assert SOCIAL_FEATURE_DIM == 5
+
+    def test_weights_cover_all_features(self):
+        """权重配置必须覆盖两轨全部特征，缺任何一个都应报错而不是默认 1.0"""
+        from src.utils.io import get_feature_directions, get_feature_weight_array
+
+        for track, dim in ((TRACK_SLEEP, 8), (TRACK_SOCIAL, 5)):
+            w = get_feature_weight_array(track)
+            d = get_feature_directions(track)
+            assert w.shape == (dim,)
+            assert len(d) == dim
+            assert np.all(w > 0)
+
+    def test_no_legacy_features_remain(self):
+        """已删除的旧特征不得残留在任何轨里"""
+        from src.baseline.scaler_utils import SLEEP_FEATURES, SOCIAL_FEATURES
+
+        removed = {
+            "sfi", "hrv_rmssd", "daily_activity", "social_turns",
+            "sad_ratio", "avg_speed", "pitch_variability", "distress_events",
+            "voice_active_min", "first_activity_clock", "day_sin", "day_cos",
+        }
+        assert not (set(SLEEP_FEATURES) & removed)
+        assert not (set(SOCIAL_FEATURES) & removed)
+
+
+class TestDataGeneration:
+    def test_both_csvs_written(self, simulated_data):
+        base = simulated_data / "data" / "features" / ELDER
+        assert (base / "features_sleep.csv").exists()
+        assert (base / "features_social.csv").exists()
+
+    def test_no_legacy_csv(self, simulated_data):
+        """旧的单轨 features.csv 不应再被生成"""
+        assert not (simulated_data / "data" / "features" / ELDER / "features.csv").exists()
+
+    def test_anomaly_injected_in_right_track(self, simulated_data):
+        from src.utils.io import load_features_csv
+
+        sleep = load_features_csv(ELDER, TRACK_SLEEP)
+        social = load_features_csv(ELDER, TRACK_SOCIAL)
+
+        # 睡眠异常段（40-46）SE 应显著低于建档期
+        base_se = sleep["sleep_efficiency"].iloc[:35].mean()
+        anom_se = sleep["sleep_efficiency"].iloc[39:46].mean()
+        assert anom_se < base_se - 0.1, f"睡眠异常未注入: {base_se:.3f} → {anom_se:.3f}"
+
+        # 社交异常段（50-58）三个必需维都应下降
+        for feat in ("copresence_min", "out_of_home_min", "activity_counts"):
+            base = social[feat].iloc[:35].mean()
+            anom = social[feat].iloc[49:58].mean()
+            assert anom < base * 0.6, f"{feat} 未下降: {base:.1f} → {anom:.1f}"
+
+        # 节律塌陷：RA↓ 且 IV↑
+        assert social["rar_amplitude"].iloc[49:58].mean() < social["rar_amplitude"].iloc[:35].mean()
+        assert social["rar_iv"].iloc[49:58].mean() > social["rar_iv"].iloc[:35].mean()
+
+    def test_weekend_effect_present(self, simulated_data):
+        """★ 周末效应必须存在，否则测不出分池 EWMA 的收益"""
+        from src.utils.io import load_features_csv
+
+        social = load_features_csv(ELDER, TRACK_SOCIAL).iloc[:35]
+        dates = pd_to_datetime(social["day_key"])
+        weekend = dates.dt.weekday >= 5
+        assert social.loc[weekend, "copresence_min"].mean() > \
+               social.loc[~weekend, "copresence_min"].mean() * 1.5
+
+
+def pd_to_datetime(series):
+    import pandas as pd
+    return pd.to_datetime(series)
+
+
+class TestTrainingAndInference:
+    def test_both_tracks_train(self, simulated_data):
+        from src.baseline.trainer import train_all_tracks
+
+        results = train_all_tracks(ELDER)
+        assert results == {TRACK_SLEEP: "success", TRACK_SOCIAL: "success"}
+
+        baseline_dir = simulated_data / "data" / "baselines" / ELDER
+        for name in (
+            "gru_sleep.pth", "gru_social.pth",
+            "scaler_sleep.pkl", "scaler_social.pkl",
+            "residual_stats_sleep.pkl", "residual_stats_social.pkl",
+            "ewma_sleep.pkl", "ewma_social_weekday.pkl", "ewma_social_weekend.pkl",
+            "baseline_meta.json",
+        ):
+            assert (baseline_dir / name).exists(), f"缺少基线文件: {name}"
+
+    def test_residual_stats_have_both_kinds(self, simulated_data):
+        """★ 双残差契约：signed 与 abs 两套统计都必须落盘"""
+        from src.baseline.trainer import train_initial_baseline
+        from src.utils.io import load_residual_stats
+
+        train_initial_baseline(ELDER, TRACK_SLEEP)
+        stats = load_residual_stats(ELDER, TRACK_SLEEP)
+        assert set(stats) == {"signed", "abs"}
+        assert stats["signed"]["std"].shape == (8,)
+        assert np.all(stats["abs"]["mean"] >= 0), "abs 均值恒非负"
+
+    def test_threshold_from_holdout_not_train(self, simulated_data):
+        """★ 阈值必须用留出段估。
+
+        留出段残差应大于训练段残差——若相反或相等，说明阈值仍在用训练集，
+        那条"残差趋零→阈值分母趋零→疯狂误报"的链条就没被切断。
+        """
+        import torch
+        from src.baseline.gru_model import PersonalBaselineGRU
+        from src.baseline.trainer import _build_windows, train_initial_baseline
+        from src.baseline.scaler_utils import get_feature_names, load_scaler
+        from src.utils.io import get_scaler_path, load_features_csv, load_residual_stats
+
+        model, scaler, stats, _ = train_initial_baseline(ELDER, TRACK_SLEEP)
+
+        df = load_features_csv(ELDER, TRACK_SLEEP)
+        df = df[df["data_quality"] == "valid"].sort_values("day_key").iloc[:35]
+        data = df[get_feature_names(TRACK_SLEEP)].to_numpy(dtype=np.float64)
+        norm = scaler.transform(data)
+
+        X_tr, y_tr, _ = _build_windows(norm, 7, 7, 28)
+        model.eval()
+        with torch.no_grad():
+            train_abs = np.abs((y_tr - model(X_tr)).numpy()).mean()
+
+        holdout_abs = stats["abs"]["mean"].mean()
+        assert holdout_abs > train_abs, (
+            f"留出段残差({holdout_abs:.4f})应大于训练段({train_abs:.4f})，"
+            f"否则阈值仍取自训练集"
+        )
+
+    def test_ewma_social_pools_both_populated(self, simulated_data):
+        from src.baseline.ewma import TrackEWMAPools
+        from src.baseline.trainer import train_initial_baseline
+        from src.utils.io import get_baseline_dir
+
+        train_initial_baseline(ELDER, TRACK_SOCIAL)
+        pools = TrackEWMAPools.load(get_baseline_dir(ELDER), TRACK_SOCIAL)
+        assert pools.n_samples(is_weekend=False) > 0
+        assert pools.n_samples(is_weekend=True) > 0
+
+
+class TestTrackIsolation:
+    """★ 本次重构的核心收益：一轨异常不污染另一轨"""
 
     @pytest.fixture
-    def setup_simulation(self):
-        """设置模拟环境（使用临时目录）"""
-        import src.utils.io as io_mod
+    def run_timeline(self, simulated_data):
+        from src.baseline.trainer import train_all_tracks
+        from src.scheduler.daily_job import run_daily_pipeline
 
-        # 被监测老人：Day25-30 注入睡眠恶化特征，用于验证趋势检测
-        elder_configs = {
-            "E001": {
-                "baseline": {
-                    "sleep_efficiency": (0.88, 0.04),
-                    "deep_sleep_ratio": (0.30, 0.03),
-                    "sfi": (5.0, 1.0),
-                    "hrv_rmssd": (50, 5),
-                    "daily_activity": (6000, 800),
-                    "social_turns": (35, 5),
-                },
-                "anomaly": {
-                    "start_day": 25,
-                    "end_day": 30,
-                    "features": {
-                        "sleep_efficiency": 0.65,
-                        "deep_sleep_ratio": 0.15,
-                        "sfi": 14.0,
-                        "hrv_rmssd": 28.0,
-                    },
-                },
+        train_all_tracks(ELDER)
+
+        timeline = {}
+        for day in range(36, N_DAYS + 1):
+            dk = day_key_of(day)
+            result = run_daily_pipeline(ELDER, dk)
+            inf = result.get("inference_result") or {}
+            timeline[day] = {
+                "sleep": (inf.get(TRACK_SLEEP) or {}).get("is_deviation", False),
+                "social": (inf.get(TRACK_SOCIAL) or {}).get("is_deviation", False),
+                "risk": (result.get("risk_result") or {}).get("risk_level", 0),
+                "types": [
+                    r["risk_key"]
+                    for r in (result.get("risk_result") or {}).get("risk_types", [])
+                ],
+            }
+        return timeline
+
+    def test_sleep_anomaly_detected(self, run_timeline):
+        flagged = [d for d in range(40, 47) if run_timeline[d]["sleep"]]
+        assert len(flagged) >= 6, f"睡眠异常段应几乎全部检出，实际 {flagged}"
+
+    def test_social_quiet_during_sleep_anomaly(self, run_timeline):
+        """睡眠恶化期社交轨不应大面积报警"""
+        noisy = [d for d in range(41, 47) if run_timeline[d]["social"]]
+        assert len(noisy) <= 1, f"睡眠异常期社交轨串轨: {noisy}"
+
+    def test_social_anomaly_detected(self, run_timeline):
+        flagged = [d for d in range(50, 59) if run_timeline[d]["social"]]
+        assert len(flagged) >= 8, f"社交异常段应几乎全部检出，实际 {flagged}"
+
+    def test_sleep_quiet_during_social_anomaly(self, run_timeline):
+        """社交退缩期睡眠轨不应报警"""
+        noisy = [d for d in range(50, 59) if run_timeline[d]["sleep"]]
+        assert noisy == [], f"社交异常期睡眠轨串轨: {noisy}"
+
+    def test_correct_risk_type_activated(self, run_timeline):
+        """睡眠段激活睡眠类型，社交段激活社会类型，不能互相冒名"""
+        sleep_types = {t for d in range(42, 47) for t in run_timeline[d]["types"]}
+        social_types = {t for d in range(54, 59) for t in run_timeline[d]["types"]}
+        assert "sleep_stability" in sleep_types
+        assert "social_decline" not in sleep_types
+        assert "social_decline" in social_types
+        assert "sleep_stability" not in social_types
+
+    def test_recovery_returns_to_normal(self, run_timeline):
+        """恢复期两轨都应回到不偏离"""
+        for day in (59, 60):
+            assert not run_timeline[day]["sleep"], f"Day{day} 睡眠轨未恢复"
+            assert not run_timeline[day]["social"], f"Day{day} 社交轨未恢复"
+
+    def test_risk_escalates_then_clears(self, run_timeline):
+        """等级应在异常段升上去、恢复期落回来"""
+        assert max(run_timeline[d]["risk"] for d in range(42, 47)) >= 2
+        assert max(run_timeline[d]["risk"] for d in range(54, 59)) >= 2
+        assert run_timeline[60]["risk"] <= 1
+
+
+class TestDegradedOperation:
+    def test_sleep_offline_social_still_runs(self, simulated_data):
+        """★ 故障隔离：小贝壳没有数据时社交轨照常出结果"""
+        from src.baseline.trainer import train_all_tracks
+        from src.scheduler.daily_job import run_daily_pipeline
+
+        train_all_tracks(ELDER)
+        dk = day_key_of(40)
+
+        result = run_daily_pipeline(
+            ELDER, dk,
+            raw_data={"sleep": None, "activity": _activity_payload(), "camera": {"copresence_min": 50.0}},
+        )
+        assert result["track_quality"][TRACK_SLEEP] == "insufficient"
+        assert result["track_quality"][TRACK_SOCIAL] == "valid"
+        social = (result.get("inference_result") or {}).get(TRACK_SOCIAL)
+        assert social is not None
+        assert social["status"] in ("success", "observation")
+
+    def test_camera_offline_degrades_social_only(self, simulated_data):
+        """★ copresence 缺失（禁止填充）→ 社交轨降级，睡眠轨不受影响。
+
+        降级而非作废：剩下 4 维对活动/节律仍有效。但绝不能算 valid——
+        那会让系统拿活动量继续输出"社会连接正常"，而它根本测不到社会接触。
+        """
+        from src.baseline.trainer import train_all_tracks
+        from src.data_pipeline.validator import counts_toward_consecutive
+        from src.scheduler.daily_job import run_daily_pipeline
+
+        train_all_tracks(ELDER)
+        dk = day_key_of(41)
+
+        result = run_daily_pipeline(
+            ELDER, dk,
+            raw_data={"sleep": _sleep_payload(), "activity": _activity_payload(), "camera": None},
+        )
+        assert result["track_quality"][TRACK_SLEEP] == "valid"
+        assert result["track_quality"][TRACK_SOCIAL] == "degraded"
+        # 降级日不得计入连续偏离天数，避免不完整证据攒出预警
+        assert not counts_toward_consecutive(result["track_quality"][TRACK_SOCIAL])
+
+    def test_social_contact_rule_cannot_fire_without_copresence(self, simulated_data):
+        """copresence 缺失时「社会连接减弱」必须无法触发，而不是用剩下两维凑合判定"""
+        from src.risk.rules import classify_risk_type
+
+        track_results = {
+            TRACK_SLEEP: {"track": TRACK_SLEEP, "status": "cold_start",
+                          "signed_available": False},
+            TRACK_SOCIAL: {
+                "track": TRACK_SOCIAL, "status": "success", "signed_available": True,
+                # copresence 不在 signed_z 里（缺失）
+                "signed_z": {"out_of_home_min": -4.0, "activity_counts": -4.0,
+                             "rar_amplitude": -0.1, "rar_iv": 0.1},
             },
         }
+        results = classify_risk_type(track_results, daily_results=[])
+        social = next(r for r in results if r["risk_key"] == "social_decline")
+        assert not social["qualifies"], "缺 copresence 时不得凭其余两维判定社会连接减弱"
 
-        return {
-            "elders": elder_configs,
-            "features": [
-                "sleep_efficiency", "deep_sleep_ratio", "sfi", "hrv_rmssd",
-                "daily_activity", "social_turns",
-            ],
+    def test_cold_start_fallback_used_before_baseline(self, simulated_data):
+        """建档前应走稳健兜底而不是完全不检测"""
+        from src.scheduler.daily_job import run_daily_pipeline
+
+        # 未训练任何基线
+        result = run_daily_pipeline(ELDER, day_key_of(20))
+        inf = result.get("inference_result") or {}
+        statuses = {t: (inf.get(t) or {}).get("status") for t in (TRACK_SLEEP, TRACK_SOCIAL)}
+        assert all(s == "cold_start_fallback" for s in statuses.values()), statuses
+
+
+def _sleep_payload() -> dict:
+    return {
+        "sleep_efficiency": 0.88, "waso_min": 34.0, "sol_min": 17.0,
+        "bed_exit_count": 2.0, "deep_sleep_ratio": 0.22,
+        "sleep_onset_clock": 148.0, "night_hr_mean": 62.0, "daytime_nap_min": 38.0,
+    }
+
+
+def _activity_payload() -> dict:
+    return {
+        "activity_counts": 185.0, "out_of_home_min": 92.0,
+        "rar_amplitude": 0.92, "rar_iv": 0.29,
+    }
+
+
+class TestMPDDContract:
+    def test_contract_shape(self, simulated_data):
+        from src.baseline.trainer import train_all_tracks
+        from src.risk.judge import build_mpdd_evidence, quick_judge
+        from src.scheduler.daily_job import run_daily_pipeline
+
+        train_all_tracks(ELDER)
+        dk = day_key_of(44)
+        result = run_daily_pipeline(ELDER, dk)
+
+        payload = build_mpdd_evidence(
+            ELDER, dk, result["inference_result"], result["risk_result"] or {}
+        )
+        assert payload["schema_version"] == "2.1.0"
+        assert set(payload) >= {
+            "sleep_evidence", "circadian_evidence", "social_evidence", "day_key",
         }
+        # 节律块只带 RA/IV，不混入社交接触维
+        assert set(payload["circadian_evidence"]["signed_z"]) <= {"rar_amplitude", "rar_iv"}
+        assert "copresence_min" not in payload["circadian_evidence"]["signed_z"]
+        assert "copresence_min" in payload["social_evidence"]["signed_z"]
 
-    def _generate_daily_vector(
-        self,
-        day: int,
-        elder_config: dict,
-        features: list[str],
-        seed: int = 42,
-    ) -> np.ndarray:
-        """生成模拟的单日特征向量"""
-        rng = np.random.RandomState((seed + day) % (2**31))
+    def test_signed_z_sign_convention(self, simulated_data):
+        """★ signed_z = observed − predicted：社交退缩期 copresence 应为负"""
+        from src.baseline.trainer import train_all_tracks
+        from src.scheduler.daily_job import run_daily_pipeline
 
-        baseline = elder_config["baseline"]
-        anomaly = elder_config.get("anomaly")
+        train_all_tracks(ELDER)
+        for day in range(50, 56):
+            run_daily_pipeline(ELDER, day_key_of(day))
+        result = run_daily_pipeline(ELDER, day_key_of(56))
 
-        vector = np.zeros(6, dtype=np.float64)
+        social = (result["inference_result"] or {}).get(TRACK_SOCIAL) or {}
+        assert social["signed_z"]["copresence_min"] < 0, "共处时长下降应为负 z"
 
-        for i, feat in enumerate(features):
-            if feat in baseline:
-                mean, std = baseline[feat]
-                value = rng.normal(mean, std)
 
-                # 注入异常
-                if anomaly:
-                    if anomaly.get("type") == "missing_data":
-                        if anomaly["start_day"] <= day <= anomaly["end_day"]:
-                            # 部分特征缺失
-                            if rng.random() < 0.5:
-                                value = np.nan
-
-                    elif anomaly.get("type") == "drift":
-                        if day >= anomaly["start_day"]:
-                            drift_features = anomaly.get("drift_features", {})
-                            if feat in drift_features:
-                                days_drifted = day - anomaly["start_day"] + 1
-                                value += drift_features[feat] * days_drifted
-
-                    elif anomaly["start_day"] <= day <= anomaly["end_day"]:
-                        if feat in anomaly.get("features", {}):
-                            # 用异常值替代基线
-                            anomaly_val = anomaly["features"][feat]
-                            value = rng.normal(anomaly_val, abs(anomaly_val) * 0.3)
-
-                # 确保非负
-                if feat not in ("hrv_rmssd", "sfi"):
-                    value = max(0.0, value)
-
-                # 比例类特征限制在[0,1]
-                if feat in ("sleep_efficiency", "deep_sleep_ratio"):
-                    value = min(max(value, 0.0), 1.0)
-
-                vector[i] = value
-
-        return vector
-
-    def test_full_50_day_simulation(self, setup_simulation, tmp_path):
-        """
-        模拟被监测老人50天完整流程。
-
-        验证点：
-        1. 冷启动训练在Day14成功执行
-        2. Day15起每日推理返回有效结果
-        3. 注入异常被正确检测
-        4. 风险等级判定符合预期
-        5. 每周微调顺利执行
-        """
-        # 使用临时目录
-        elders = setup_simulation["elders"]
-        feature_names = setup_simulation["features"]
-
-        # 由于这里测试需要项目结构的完整环境，
-        # 我们改为验证核心逻辑而非完整管道
-        #
-        # 验证各组件独立功能和组件间接口兼容性
-
-        from src.baseline.scaler_utils import FEATURE_NAMES, FEATURE_DIM
-
-        # 1. 验证特征维度（已移除时间编码与语音声学维，现为6维）
-        assert FEATURE_DIM == 6
-        assert len(FEATURE_NAMES) == 6
-
-        # 2. 为每位老人生成模拟数据并验证
-        for elder_id, config in elders.items():
-            all_vectors = []
-            for day in range(1, 51):
-                vec_6d = self._generate_daily_vector(
-                    day, config, feature_names, seed=stable_hash(elder_id)
-                )
-                all_vectors.append(vec_6d)
-
-            all_vectors = np.array(all_vectors)
-
-            # 验证形状
-            assert all_vectors.shape == (50, 6)
-
-            # 验证异常注入 (E001: Day25-30 睡眠恶化 → sleep_efficiency 下降)
-            if elder_id == "E001":
-                se_idx = FEATURE_NAMES.index("sleep_efficiency")
-                normal_se = np.nanmean(all_vectors[0:24, se_idx])
-                anomaly_se = np.nanmean(all_vectors[24:30, se_idx])
-                assert anomaly_se < normal_se, \
-                    f"E001异常注入失败: normal={normal_se:.3f}, anomaly={anomaly_se:.3f}"
-
-        # 3. 验证EWMA正确性
-        from src.baseline.ewma import CumulativeEWMABaseline
-        ewma = CumulativeEWMABaseline(alpha=0.05)
-        for _ in range(30):
-            ewma.update(1.0)
-
-        # 插入异常
-        ewma.update(5.0)
-        threshold = ewma.get_threshold(2.5)
-        assert threshold > 1.0, "异常值应推高阈值"
-
-        # 4. 验证GRU模型（特征维度为6）
-        from src.baseline.gru_model import PersonalBaselineGRU
-        model = PersonalBaselineGRU()
-        x = np.random.randn(1, 7, 6).astype(np.float32)
-        import torch
-        pred = model.predict(torch.tensor(x))
-        assert pred.shape == (1, 6)
-
-        # 5. 验证风险判定逻辑
-        daily_results = []
-        for day in range(1, 8):
-            is_dev = day >= 5  # 最后3天偏离
-            daily_results.append({
-                "date": f"2026-08-{day:02d}",
-                "anomaly_score": 2.5 if is_dev else 0.5,
-                "is_deviation": is_dev,
-            })
-
-        from src.risk.judge import judge_risk_level
-        risk_result = judge_risk_level("E001", daily_results)
-        assert risk_result["risk_level"] == 2, \
-            f"连续3天偏离应触发二级提醒，实际: {risk_result['risk_level']}"
-        assert risk_result["consecutive_deviation"] == 3
-
-        # 6. 验证预警动作
+class TestReportAndAlert:
+    def test_alert_levels(self):
         from src.risk.alert import trigger_alert
-        alert_result = trigger_alert("E001", 2, [{"risk_type": "睡眠问题"}])
-        assert alert_result["alerted"]  # 二级应触发推送
 
-        # 7. 验证规则周报生成
+        assert not trigger_alert(ELDER, 1, [{"risk_type": "睡眠稳定性偏离"}])["alerted"]
+        assert trigger_alert(ELDER, 2, [{"risk_type": "睡眠稳定性偏离"}])["alerted"]
+
+    def test_rule_based_report(self):
         from src.report.templates import generate_rule_based_report
+
         report = generate_rule_based_report(
-            elder_id="E001",
+            elder_id=ELDER,
             week_start="2026-08-01",
             week_end="2026-08-07",
-            social_trend="平稳",
+            social_trend="下降",
             sleep_trend="下降",
             activity_trend="平稳",
             deviation_days=3,
             risk_label="提醒",
-            risk_types=["睡眠问题"],
+            risk_types=["睡眠稳定性偏离"],
         )
-        assert len(report) > 0
-        assert "E001" in report
-
-        print("\n✅ 全部集成测试通过！")
-
-    def test_cold_start_training_simulation(self, setup_simulation, tmp_path):
-        """模拟冷启动训练流程（前14天数据）"""
-        elders = setup_simulation["elders"]
-        feature_names = setup_simulation["features"]
-
-        from src.baseline.scaler_utils import FEATURE_DIM
-
-        for elder_id, config in elders.items():
-            # 生成14天数据
-            vectors_14d = []
-            for day in range(1, 15):
-                vec_6d = self._generate_daily_vector(
-                    day, config, feature_names, seed=stable_hash(elder_id)
-                )
-                vectors_14d.append(vec_6d)
-
-            data = np.array(vectors_14d)
-
-            # 验证数据可用性（6维，已移除时间编码与语音声学维）
-            assert data.shape == (14, FEATURE_DIM)
-            # 正常数据每个样本缺失不超过2个
-            nan_per_row = np.isnan(data[:, :FEATURE_DIM]).sum(axis=1)
-            assert not np.any(nan_per_row > 2), \
-                f"{elder_id}: 每样本缺失不超过2个，实际: {nan_per_row}"
-
-            # 验证数据方差（足够的变异性用于训练）
-            for i in range(FEATURE_DIM):
-                std_i = np.nanstd(data[:, i])
-                assert std_i > 0, f"特征{i} 方差为0，无法训练"
-
-    def test_risk_timeline_accuracy(self, setup_simulation):
-        """验证风险触发时间线准确性"""
-        # 被监测老人的预期风险触发时间线
-        expected_triggers = {
-            "E001": {"first_deviation_day": 25, "warning_day": 27, "severe_day": 29},
-        }
-
-        # 验证E001触发逻辑
-        from src.risk.judge import judge_risk_level
-
-        # 模拟E001逐渐累计偏离天数
-        results = []
-        for day in range(1, 31):
-            is_dev = day >= 25
-            score = 2.0 if is_dev else 0.5
-            results.append({
-                "date": f"2026-08-{day:02d}",
-                "anomaly_score": score,
-                "is_deviation": is_dev,
-            })
-
-        # Day 25: 第1天偏离
-        r25 = judge_risk_level("E001", results[:25])
-        assert r25["risk_level"] == 1, f"Day25应=1(关注), 实际={r25['risk_level']}"
-
-        # Day 27: 连续3天 → 提醒
-        r27 = judge_risk_level("E001", results[:27])
-        assert r27["risk_level"] == 2, f"Day27应=2(提醒), 实际={r27['risk_level']}"
-
-        # Day 29: 连续5天 → 严重
-        r29 = judge_risk_level("E001", results[:29])
-        assert r29["risk_level"] == 3, f"Day29应=3(严重), 实际={r29['risk_level']}"
-
-        # 持续正常数据应始终无预警（0误报）
-        normal_results = []
-        for day in range(1, 31):
-            normal_results.append({
-                "date": f"2026-08-{day:02d}",
-                "anomaly_score": 0.5,
-                "is_deviation": False,
-            })
-
-        r_normal = judge_risk_level("E001", normal_results)
-        assert r_normal["risk_level"] == 0, f"持续正常应无预警, 实际={r_normal['risk_level']}"
+        assert ELDER in report
+        # 措辞约束：不得出现诊断名
+        for banned in ("抑郁症", "睡眠障碍", "孤独症"):
+            assert banned not in report

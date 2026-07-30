@@ -1,29 +1,28 @@
-"""合成数据判别力验证（范围 2：有效果吗）
+"""合成数据判别力验证（范围 2：有效果吗，双轨）
 
 范围 1 只证明"链路跑通"。范围 2 用**更刁钻**的合成数据测判别力：
     - 真阳性(TP)：真异常 → 应检出、且判对类型
     - 真阴性/混淆项(TN)：像异常但不该报 → 应保持安静
+    - 已知漏报(KM)：如实记录规则设计带来的灵敏度代价，不算失败
 
-关键改进（打破范围1的"循环论证"）：
-    1. 正常天带真实噪声：AR(1) 自相关 + 周节律（周末话少），不再是纯 iid 高斯
-    2. 多种异常：睡眠恶化（4特征齐）/ 睡眠部分 / 社交退缩
-    3. 混淆项：单日尖峰（不该升级）、短社交低（<5天不该报孤独）
+关键改进（打破范围 1 的"循环论证"）：
+    1. 正常天带真实噪声：AR(1) 自相关 + 周末效应，不再是纯 iid 高斯
+    2. 三类异常各自独立注入，验证三条规则互不误触
+    3. 混淆项覆盖真实误报源：单日尖峰、短期社交低、纯周末效应、方向反了
 
-关于"串味"（残余的次要成因）：
-    本次已删除"抑郁"风险类型并移除 sad_ratio 的跨类型共享——串味的"维度重叠"主因已消除
-    （见 docs/VALIDATION.md 缺陷③）。但睡眠/社交两类之间仍存在**模型层面**的次要串味：
-    当某一路特征剧烈偏离时，多元 GRU 会通过隐藏状态耦合，使另一路的预测也变得不可靠、
-    残差被放大，从而"顺带"激活另一类型。故 TP 场景只断言"应报的类型确实报了 + 整体检出"，
-    不再强求两类互相绝对静默；真正的"特异度/不误报"由 TN 场景（正常/混淆数据）把关。
+★ 关于"串味"：v2.1 双轨从**结构上**切断了 v2.0 的主要串味源——
+两轨各自独立的 GRU 与 scaler，睡眠残差不再经隐藏状态耦合进社交预测。
+故本脚本对 TP 场景**同时**断言"应报的类型报了"与"另一轨保持安静"，
+这是 v2.0 做不到的（那时只能断言前者）。
 
-指标：TP 检出率 + 判型正确率；TN 特异度（不误报）。这是 docs/VALIDATION.md 层次 B。
-仍**不**证明层次 C（真实有效性需真人+临床标签）。
+指标：TP 检出率 + 判型正确率；TN 特异度。这是 docs/VALIDATION.md 层次 B。
+仍**不**证明层次 C（真实有效性需真人 + 临床标签 + 量表对照）。
 
 用独立 elder_id（每场景一个），跑完自动清理。
 
 Usage:
     python scripts/validate_discriminative.py
-    python scripts/validate_discriminative.py --keep
+    python scripts/validate_discriminative.py --only TP_sleep
 """
 
 import argparse
@@ -37,150 +36,266 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.generate_simulation_data import _generate_raw_data, HEALTH_FEATURES
+from src.baseline.scaler_utils import SLEEP_FEATURES, SOCIAL_FEATURES
 from src.utils.io import get_project_root, load_config
 from src.utils.logger import setup_logger
 
 N_DAYS = 60
-BUILD_DAYS = 35  # 与 settings.yaml training.initial.build_days 对齐
+BUILD_DAYS = 35          # 与 settings.yaml training.initial.build_days 对齐
 START_DATE = "2026-01-01"
 
-# 正常基线（均值, 标准差）——与前面场景一致（6维）
-BASELINE = {
-    "sleep_efficiency": (0.88, 0.04), "deep_sleep_ratio": (0.30, 0.03),
-    "sfi": (5.0, 1.0), "hrv_rmssd": (50, 5),
-    "daily_activity": (6000, 800), "social_turns": (35, 5),
+# 正常基线（均值, 标准差）——与 generate_simulation_data 的 E001 口径一致
+SLEEP_BASELINE = {
+    "sleep_efficiency": (0.88, 0.04),
+    "waso_min": (38.0, 10.0),
+    "sol_min": (18.0, 6.0),
+    "bed_exit_count": (1.2, 0.7),
+    "deep_sleep_ratio": (0.22, 0.04),
+    "sleep_onset_clock": (165.0, 25.0),
+    "night_hr_mean": (62.0, 4.0),
+    "daytime_nap_min": (25.0, 15.0),
 }
-IDX = {name: i for i, name in enumerate(HEALTH_FEATURES)}
+SOCIAL_BASELINE = {
+    "copresence_min": (75.0, 30.0),
+    "out_of_home_min": (95.0, 30.0),
+    "rar_amplitude": (0.82, 0.06),
+    "rar_iv": (0.55, 0.10),
+    "activity_counts": (120.0, 25.0),
+}
 
-def gen_normal_series(seed: int, n: int = N_DAYS) -> np.ndarray:
-    """生成 n 天带真实噪声的正常数据 (n, 6)。
+# 周末效应：子女探访 → 共处涨、外出跌。这是社交轨必须分池的原因。
+WEEKEND_FACTORS = {"copresence_min": 2.4, "out_of_home_min": 0.75}
 
-    真实感来自两点（打破纯 iid 高斯）：
-      - AR(1) 自相关：今天 = 0.5*偏离(昨天) + 新噪声，模拟"连着几天偏高/偏低"
-      - 周节律：周末(第6/7天) social_turns、daily_activity 自然降低
-    """
-    rng = np.random.RandomState(seed)
-    series = np.zeros((n, 6), dtype=np.float64)
-    prev_dev = np.zeros(6)
-    for day in range(n):
-        for name, (mean, std) in BASELINE.items():
-            i = IDX[name]
-            # AR(1)：保留一半昨日偏离 + 新噪声
-            dev = 0.5 * prev_dev[i] + rng.normal(0, std)
-            val = mean + dev
-            prev_dev[i] = dev
-            series[day, i] = val
-        # 周节律：周末社交/活动自然下降（day%7 in {5,6}）——正常现象，不该报孤独
-        if day % 7 in (5, 6):
-            series[day, IDX["social_turns"]] *= 0.75
-            series[day, IDX["daily_activity"]] *= 0.85
-        # 约束合理范围
-        for name in ("sleep_efficiency", "deep_sleep_ratio"):
-            series[day, IDX[name]] = np.clip(series[day, IDX[name]], 0.0, 1.0)
-        for name in ("sfi", "hrv_rmssd", "daily_activity", "social_turns"):
-            series[day, IDX[name]] = max(0.0, series[day, IDX[name]])
+# AR(1) 自相关系数：老人作息有惯性，今天像昨天。纯 iid 会让检出显得过于容易。
+AR1_RHO = 0.35
+
+# 比例类特征的合法区间
+BOUNDED = {
+    "sleep_efficiency": (0.0, 1.0),
+    "deep_sleep_ratio": (0.0, 1.0),
+    "rar_amplitude": (0.0, 1.0),
+    "rar_iv": (0.0, 2.0),
+}
+NON_NEGATIVE = {
+    "waso_min", "sol_min", "bed_exit_count", "daytime_nap_min",
+    "copresence_min", "out_of_home_min", "activity_counts",
+}
+
+
+def _gen_series(baseline: dict, order: list[str], seed: int, weekend: bool) -> np.ndarray:
+    """生成 (N_DAYS, n_features) 正常序列：AR(1) 噪声 + 可选周末效应。"""
+    rng = np.random.default_rng(seed)
+    start = datetime.strptime(START_DATE, "%Y-%m-%d")
+    series = np.zeros((N_DAYS, len(order)))
+
+    for i, name in enumerate(order):
+        mean, std = baseline[name]
+        noise = np.zeros(N_DAYS)
+        for d in range(N_DAYS):
+            innov = rng.normal(0, std * np.sqrt(1 - AR1_RHO ** 2))
+            noise[d] = AR1_RHO * noise[d - 1] + innov if d else rng.normal(0, std)
+        series[:, i] = mean + noise
+
+        if weekend and name in WEEKEND_FACTORS:
+            for d in range(N_DAYS):
+                if (start + timedelta(days=d)).weekday() >= 5:
+                    series[d, i] *= WEEKEND_FACTORS[name]
+
+    return _clip(series, order)
+
+
+def _clip(series: np.ndarray, order: list[str]) -> np.ndarray:
+    """把各维压回物理合法范围。"""
+    for i, name in enumerate(order):
+        if name in BOUNDED:
+            lo, hi = BOUNDED[name]
+            series[:, i] = np.clip(series[:, i], lo, hi)
+        elif name in NON_NEGATIVE:
+            series[:, i] = np.maximum(series[:, i], 0.0)
     return series
 
 
-def apply_injection(series: np.ndarray, spec: dict, seed: int) -> np.ndarray:
-    """按 spec 在指定天段注入异常/混淆。spec:
-        {type: block|drift|spike, start, end, features:{name:target}}
-    """
-    rng = np.random.RandomState(seed + 1)
-    s = series.copy()
-    typ = spec["type"]
-    start, end = spec["start"] - 1, spec["end"] - 1  # 1-based → 0-based
-    feats = spec["features"]
-    for day in range(start, end + 1):
+def apply_injection(
+    sleep: np.ndarray, social: np.ndarray, spec: dict, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """把异常注入两轨序列。spec 里 features 按轨分组。"""
+    if not spec:
+        return sleep, social
+
+    rng = np.random.default_rng(seed + 991)
+    s_idx = {n: i for i, n in enumerate(SLEEP_FEATURES)}
+    so_idx = {n: i for i, n in enumerate(SOCIAL_FEATURES)}
+    typ = spec.get("type", "block")
+    start, end = spec["start"], spec["end"]
+
+    for track, feats in spec.get("features", {}).items():
+        arr = sleep if track == "sleep" else social
+        idx = s_idx if track == "sleep" else so_idx
+        base = SLEEP_BASELINE if track == "sleep" else SOCIAL_BASELINE
+        order = SLEEP_FEATURES if track == "sleep" else SOCIAL_FEATURES
+
         for name, target in feats.items():
-            i = IDX[name]
-            if typ == "block":      # 恒定偏移到 target 附近
-                s[day, i] = rng.normal(target, abs(target) * 0.15 + 1e-6)
-            elif typ == "drift":    # 从正常线性漂到 target
-                frac = (day - start + 1) / (end - start + 1)
-                base = BASELINE[name][0]
-                s[day, i] = base + (target - base) * frac + rng.normal(0, BASELINE[name][1])
-            elif typ == "spike":    # 只这几天尖峰
-                s[day, i] = rng.normal(target, abs(target) * 0.1 + 1e-6)
-        # 约束
-        for name in ("sleep_efficiency", "deep_sleep_ratio"):
-            s[day, IDX[name]] = np.clip(s[day, IDX[name]], 0.0, 1.0)
-    return s
+            i = idx[name]
+            std = base[name][1]
+            for day in range(start - 1, min(end, N_DAYS)):
+                if typ == "block":
+                    arr[day, i] = target + rng.normal(0, std * 0.25)
+                elif typ == "drift":
+                    frac = (day - start + 2) / (end - start + 1)
+                    arr[day, i] = (
+                        base[name][0] + (target - base[name][0]) * frac
+                        + rng.normal(0, std * 0.4)
+                    )
+                elif typ == "spike":
+                    arr[day, i] = target + rng.normal(0, abs(target) * 0.05 + 1e-6)
+        _clip(arr, order)
+
+    return sleep, social
+
 
 # 场景定义。expect_active/expect_silent 是"应/不应激活的风险类型"。
-# expect_max_level：该场景允许达到的最高风险等级（TN 应为 0）。
 SCENARIOS = [
-    # ---------- 真阳性 TP：应检出、判对类型 ----------
+    # ---------- 真阳性 TP ----------
     {
         "id": "TP_sleep", "kind": "TP",
-        "desc": "睡眠问题：4睡眠特征齐恶化，连续7天（应判睡眠）",
-        "inject": {"type": "block", "start": 40, "end": 46,
-                   "features": {"sleep_efficiency": 0.65, "deep_sleep_ratio": 0.15,
-                                "sfi": 14.0, "hrv_rmssd": 28.0}},
-        # 只断言"睡眠确实报了"；不强求 social 绝对静默（强异常下的模型层串味见文件头说明）
-        "expect_active": ["sleep_problem"], "expect_silent": [],
+        "desc": "睡眠稳定性恶化：效率↓ + WASO↑ + 离床↑，连续 7 天",
+        "inject": {
+            "type": "block", "start": 40, "end": 46,
+            "features": {"sleep": {
+                "sleep_efficiency": 0.68, "waso_min": 95.0, "bed_exit_count": 4.5,
+            }},
+        },
+        "expect_active": ["sleep_stability"],
+        "expect_silent": ["social_decline"],
         "expect_detect": True,
     },
     {
-        "id": "TP_sleep_partial", "kind": "TP",
-        "desc": "部分睡眠恶化：只 sleep_efficiency↓ + sfi↑（考验方向匹配鲁棒性）",
-        "inject": {"type": "block", "start": 40, "end": 46,
-                   "features": {"sleep_efficiency": 0.62, "sfi": 15.0}},
-        "expect_active": ["sleep_problem"], "expect_silent": [],
+        "id": "TP_sleep_minimal", "kind": "TP",
+        "desc": "只两个必选维恶化（效率↓ + WASO↑），考验必选/可选的设计",
+        "inject": {
+            "type": "block", "start": 40, "end": 46,
+            "features": {"sleep": {"sleep_efficiency": 0.66, "waso_min": 100.0}},
+        },
+        # 只有 2 必选、0 可选 → 按规则 min_optional=1 不该激活类型，
+        # 但异常分仍应越限（检出）。这正是"检出"与"判型"分离的地方。
+        "expect_active": [], "expect_silent": ["social_decline"],
         "expect_detect": True,
     },
     {
         "id": "TP_sleep_drift", "kind": "TP",
-        "desc": "渐变睡眠恶化：特征缓慢漂移 10 天（考验能否捕捉趋势）",
-        "inject": {"type": "drift", "start": 38, "end": 48,
-                   "features": {"sleep_efficiency": 0.60, "deep_sleep_ratio": 0.12,
-                                "sfi": 16.0, "hrv_rmssd": 25.0}},
-        "expect_active": ["sleep_problem"], "expect_silent": [],
+        "desc": "渐变睡眠恶化：10 天缓慢漂移（考验趋势捕捉，非阶跃）",
+        "inject": {
+            "type": "drift", "start": 38, "end": 48,
+            "features": {"sleep": {
+                "sleep_efficiency": 0.62, "waso_min": 110.0,
+                "bed_exit_count": 5.0, "sol_min": 55.0,
+            }},
+        },
+        "expect_active": ["sleep_stability"],
+        "expect_silent": ["social_decline"],
         "expect_detect": True,
     },
     {
         "id": "TP_social", "kind": "TP",
-        "desc": "社交退缩：对话轮次+活动量大幅走低，连续≥11天（应判社交）",
-        "inject": {"type": "block", "start": 34, "end": 46,
-                   "features": {"social_turns": 4.0, "daily_activity": 1500.0}},
-        # 社交仅 2/6 特征异常，整体异常分被摊薄、更接近检出边界（睡眠有 4/6 特征，轻松越限）。
-        # 故注入幅度取到极强、窗口拉到 13 天，使检出稳健、不受训练随机性影响。
-        # 同样只断言"社交确实报了"，不强求 sleep 静默（模型层串味，见文件头说明）。
-        "expect_active": ["social_isolation"], "expect_silent": [],
+        "desc": "社会连接减弱：共处↓ + 外出↓ + 活动↓，连续 11 天",
+        "inject": {
+            "type": "block", "start": 40, "end": 50,
+            "features": {"social": {
+                "copresence_min": 6.0, "out_of_home_min": 12.0,
+                "activity_counts": 45.0,
+            }},
+        },
+        "expect_active": ["social_decline"],
+        "expect_silent": ["sleep_stability"],
         "expect_detect": True,
     },
-    # ---------- 真阴性/混淆项 TN：不该报 ----------
+    {
+        "id": "TP_circadian", "kind": "TP",
+        "desc": "作息节律紊乱：RA↓ + IV↑ + 入睡相位漂移，连续 8 天",
+        "inject": {
+            "type": "block", "start": 40, "end": 47,
+            "features": {
+                "social": {"rar_amplitude": 0.35, "rar_iv": 1.35},
+                "sleep": {"sleep_onset_clock": 330.0},
+            },
+        },
+        "expect_active": ["circadian_disruption"],
+        "expect_silent": [],
+        "expect_detect": True,
+    },
+    # ---------- 真阴性 / 混淆项 TN ----------
     {
         "id": "TN_all_normal", "kind": "TN",
-        "desc": "全程正常（带AR1噪声+周节律）：测基础误报率",
+        "desc": "全程正常（AR1 噪声 + 周末效应）：测基础误报率",
         "inject": None,
-        "expect_active": [], "expect_silent": ["sleep_problem", "social_isolation"],
+        "expect_active": [],
+        "expect_silent": ["sleep_stability", "social_decline", "circadian_disruption"],
         "expect_detect": False, "expect_max_level": 1,
     },
     {
         "id": "TN_single_spike", "kind": "TN",
-        "desc": "单日剧烈波动后恢复：不该升级到提醒/严重",
-        "inject": {"type": "spike", "start": 43, "end": 43,
-                   "features": {"sleep_efficiency": 0.55, "sfi": 18.0,
-                                "hrv_rmssd": 22.0}},
-        "expect_active": [], "expect_silent": ["sleep_problem"],
+        "desc": "单日剧烈波动后恢复：不该升级（持续性门槛应拦住）",
+        "inject": {
+            "type": "spike", "start": 43, "end": 43,
+            "features": {"sleep": {
+                "sleep_efficiency": 0.48, "waso_min": 150.0, "bed_exit_count": 7.0,
+            }},
+        },
+        "expect_active": [], "expect_silent": ["sleep_stability"],
         "expect_detect": False, "expect_max_level": 1,
     },
     {
-        "id": "TN_weekend_quiet", "kind": "TN",
-        "desc": "连续安静4天（social↓ 但<5天门槛）→ 不该报社交孤独",
-        "inject": {"type": "block", "start": 41, "end": 44,
-                   "features": {"social_turns": 12.0, "daily_activity": 3500.0}},
-        "expect_active": [], "expect_silent": ["social_isolation"],
+        "id": "TN_short_social", "kind": "TN",
+        "desc": "社交低落仅 4 天（<7天窗内5天门槛）→ 不该报社会连接减弱",
+        "inject": {
+            "type": "block", "start": 41, "end": 44,
+            "features": {"social": {
+                "copresence_min": 15.0, "out_of_home_min": 30.0,
+                "activity_counts": 60.0,
+            }},
+        },
+        "expect_active": [], "expect_silent": ["social_decline"],
         "expect_detect": False, "expect_max_level": 2,
+    },
+    {
+        "id": "TN_sleep_improved", "kind": "TN",
+        "desc": "睡眠全面变好（效率↑ WASO↓ 深睡↑ 夜心率↓）→ 方向闸门应封顶",
+        # 必须**生理自洽**地改善所有维：只把效率和 WASO 调好、深睡和夜心率留在基线，
+        # 得到的是一个现实中不存在的组合，且 GRU 会因输入剧变而预测失准，
+        # 在未注入的维上产出朝坏方向的残差假象——那时闸门放行是对的，
+        # 测的却不是"好转"。
+        "inject": {
+            "type": "block", "start": 40, "end": 50,
+            "features": {"sleep": {
+                "sleep_efficiency": 0.97, "waso_min": 8.0, "bed_exit_count": 0.0,
+                "sol_min": 6.0, "deep_sleep_ratio": 0.34, "night_hr_mean": 55.0,
+                "daytime_nap_min": 5.0,
+            }},
+        },
+        "expect_active": [], "expect_silent": ["sleep_stability"],
+        "expect_detect": False, "expect_max_level": 2,
+    },
+    # ---------- 已知漏报 KM：如实记录，不算失败 ----------
+    {
+        "id": "KM_social_partial", "kind": "KM",
+        "desc": "只共处↓、外出照常（子女不来但自己照常出门）",
+        "inject": {
+            "type": "block", "start": 40, "end": 50,
+            "features": {"social": {"copresence_min": 4.0}},
+        },
+        "note": "三项全中的规则必然漏这一类；这是换取低误报的代价，已写入 VALIDATION.md 局限③",
+        "expect_active": [], "expect_silent": [],
+        "expect_detect": False, "expect_max_level": 3,
     },
 ]
 
+
 def cleanup(velder: str):
     root = get_project_root() / "data"
-    for p in ([root / "features" / velder, root / "baselines" / velder]
-              + [root / "raw" / s / velder for s in ("sleep", "activity", "social")]):
+    targets = [root / "features" / velder, root / "baselines" / velder] + [
+        root / "raw" / s / velder for s in ("sleep", "activity", "camera")
+    ]
+    for p in targets:
         shutil.rmtree(p, ignore_errors=True)
     for sub in ("daily_inference", "alerts"):
         d = root / "logs" / sub
@@ -190,112 +305,152 @@ def cleanup(velder: str):
 
 
 def run_scenario(scn: dict, config) -> dict:
-    """跑一个场景：造数据→逐日管道→day21训练。返回观测到的最高等级与激活过的类型。"""
+    """跑一个场景：造数据 → 逐日双轨管道 → 建档期末训练。"""
     import torch
-    from src.scheduler.daily_job import run_daily_pipeline, load_raw_sensors
-    from src.baseline.trainer import train_initial_baseline
+
+    import scripts.generate_simulation_data as gen
+    from src.baseline.trainer import train_all_tracks
+    from src.scheduler.daily_job import load_raw_sensors, run_daily_pipeline
 
     velder = "D_" + scn["id"]
     cleanup(velder)
     root = get_project_root()
-    # 用 hashlib 而非内置 hash()：内置 hash() 对字符串每次进程启动结果都不同
-    # （PYTHONHASHSEED 随机化），会导致每次跑出的合成数据不同、通过数在 4/8~6/8 飘。
-    # hashlib.md5 是确定性的，保证同一场景每次都得到同一个种子 → 结果可复现。
+
+    # 用 hashlib 而非内置 hash()：内置 hash() 受 PYTHONHASHSEED 随机化影响，
+    # 每次进程启动结果不同，会让通过数在场景间来回飘。md5 是确定性的。
     seed = int(hashlib.md5(scn["id"].encode()).hexdigest(), 16) % 100000
-    # 固定 PyTorch 随机种子：GRU 初始权重默认随机，会让每次训出的模型略有不同、
-    # 边界场景通过/不通过翻转。连同上面确定性的数据种子，一起保证整体结果可复现。
+    # GRU 初始权重也要固定，否则边界场景的通过/不通过会翻转。
     torch.manual_seed(seed)
 
-    series = gen_normal_series(seed)
-    if scn.get("inject"):
-        series = apply_injection(series, scn["inject"], seed)
+    sleep = _gen_series(SLEEP_BASELINE, SLEEP_FEATURES, seed, weekend=False)
+    social = _gen_series(SOCIAL_BASELINE, SOCIAL_FEATURES, seed + 1, weekend=True)
+    sleep, social = apply_injection(sleep, social, scn.get("inject"), seed)
 
     start = datetime.strptime(START_DATE, "%Y-%m-%d")
-    for day in range(1, N_DAYS + 1):
-        ds = (start + timedelta(days=day - 1)).strftime("%Y-%m-%d")
-        _generate_raw_data(root / "data" / "raw", velder, ds, series[day - 1], {})
+    original = gen.ELDER_ID
+    gen.ELDER_ID = velder
+    try:
+        for day in range(N_DAYS):
+            date_dt = start + timedelta(days=day)
+            day_key = date_dt.strftime("%Y-%m-%d")
+            # 小时序列只作诊断落盘用（aggregator 直接读 rar_* 标量），
+            # 故复用生成器的作息曲线即可，不必反推自注入后的 RA/IV。
+            hourly = gen.generate_hourly_activity(
+                day + 1, seed, date_dt.weekday() >= 5
+            )
+            gen._write_raw(
+                root / "data" / "raw", day_key, sleep[day], social[day], hourly
+            )
+    finally:
+        gen.ELDER_ID = original
 
     max_level = 0
-    active_types = set()
+    active_types: set[str] = set()
+    track_dev = {"sleep": 0, "social": 0}
     try:
         for day in range(1, N_DAYS + 1):
-            ds = (start + timedelta(days=day - 1)).strftime("%Y-%m-%d")
-            res = run_daily_pipeline(velder, ds, raw_data=load_raw_sensors(velder, ds), config=config)
+            day_key = (start + timedelta(days=day - 1)).strftime("%Y-%m-%d")
+            res = run_daily_pipeline(
+                velder, day_key, raw_data=load_raw_sensors(velder, day_key), config=config
+            )
             if day == BUILD_DAYS:
-                train_initial_baseline(velder, config)
+                train_all_tracks(velder, config)
+                continue
+            if day <= BUILD_DAYS:
+                continue
+
             risk = res.get("risk_result") or {}
-            # 只统计正式运行期（建档期后，day29+）
-            if day > BUILD_DAYS:
-                max_level = max(max_level, risk.get("risk_level") or 0)
-                for rt in risk.get("risk_types", []):
-                    active_types.add(rt.get("risk_key"))
+            max_level = max(max_level, risk.get("risk_level") or 0)
+            for rt in risk.get("risk_types", []):
+                active_types.add(rt.get("risk_key"))
+            inf = res.get("inference_result") or {}
+            for track in track_dev:
+                if (inf.get(track) or {}).get("is_deviation"):
+                    track_dev[track] += 1
     finally:
         cleanup(velder)
-    return {"max_level": max_level, "active_types": active_types}
+
+    return {"max_level": max_level, "active_types": active_types, "track_dev": track_dev}
 
 
 def evaluate(scn: dict, obs: dict) -> tuple[bool, str]:
-    """对照期望打分。返回 (是否通过, 原因)。"""
-    active = obs["active_types"]
-    lvl = obs["max_level"]
+    """对照期望打分。KM 场景只记录，不判失败。"""
+    if scn["kind"] == "KM":
+        return True, f"已知漏报（预期行为）：最高 L{obs['max_level']}"
+
+    active, lvl = obs["active_types"], obs["max_level"]
     problems = []
 
-    # 应激活的类型必须都激活
     for t in scn.get("expect_active", []):
         if t not in active:
             problems.append(f"应报未报:{t}")
-    # 应沉默的类型必须都没激活
     for t in scn.get("expect_silent", []):
         if t in active:
             problems.append(f"误报:{t}")
-    # TN 的等级上限
+
     if scn["kind"] == "TN":
         cap = scn.get("expect_max_level", 1)
         if lvl > cap:
             problems.append(f"等级越限:L{lvl}>{cap}")
-    # TP 必须检出（升到 ≥2）
     if scn.get("expect_detect") and lvl < 2:
         problems.append(f"未检出:最高仅L{lvl}")
 
-    return (len(problems) == 0, "; ".join(problems) if problems else "符合预期")
+    return not problems, "; ".join(problems) if problems else "符合预期"
+
+
+TYPE_ABBR = {
+    "sleep_stability": "睡眠", "social_decline": "社会", "circadian_disruption": "节律",
+}
+
 
 def main():
-    parser = argparse.ArgumentParser(description="合成数据判别力验证（范围2）")
-    parser.add_argument("--keep", action="store_true", help="（本脚本每场景自清，此项预留）")
+    parser = argparse.ArgumentParser(description="合成数据判别力验证（范围2，双轨）")
+    parser.add_argument("--only", help="只跑指定场景 id")
     args = parser.parse_args()
 
     setup_logger(log_level="ERROR")
     config = load_config()
 
-    print("\n" + "=" * 82)
-    print("合成数据判别力验证（范围2：有效果吗）  正常天带AR1噪声+周节律")
-    print("=" * 82)
-    print(f"{'类别':>4} {'场景':>24} {'最高级':>6} {'激活类型':>26} {'判定':>4}")
-    print("-" * 82)
+    scenarios = [s for s in SCENARIOS if not args.only or s["id"] == args.only]
+    if not scenarios:
+        print(f"没有匹配 --only {args.only} 的场景")
+        return 1
 
-    passed, results = 0, []
-    tmap = {"sleep_problem": "睡眠", "social_isolation": "社交"}
-    for scn in SCENARIOS:
+    print("\n" + "=" * 92)
+    print("合成数据判别力验证（范围2：有效果吗，双轨）  正常天带 AR1 噪声 + 周末效应")
+    print("=" * 92)
+    print(f"{'类':>3} {'场景':>20} {'级':>3} {'睡偏':>4} {'社偏':>4} {'激活类型':>14} {'判定':>4}")
+    print("-" * 92)
+
+    results, passed, scored = [], 0, 0
+    for scn in scenarios:
         obs = run_scenario(scn, config)
         ok, reason = evaluate(scn, obs)
-        passed += ok
         results.append((scn, obs, ok, reason))
-        types_str = "、".join(tmap.get(t, t) for t in sorted(obs["active_types"])) or "无"
-        print(f"{scn['kind']:>4} {scn['id']:>24} {'L'+str(obs['max_level']):>6} "
-              f"{types_str:>24} {'[v]' if ok else '[x]':>4}")
+        if scn["kind"] != "KM":
+            scored += 1
+            passed += ok
+        types = "、".join(TYPE_ABBR.get(t, t) for t in sorted(obs["active_types"])) or "无"
+        mark = "[v]" if ok else "[x]"
+        print(f"{scn['kind']:>3} {scn['id']:>20} {'L'+str(obs['max_level']):>3} "
+              f"{obs['track_dev']['sleep']:>4} {obs['track_dev']['social']:>4} "
+              f"{types:>12} {mark:>4}")
 
-    print("-" * 82)
-    print(f"通过 {passed}/{len(SCENARIOS)}")
+    print("-" * 92)
+    print(f"通过 {passed}/{scored}（KM 场景不计分）")
     print("\n逐场景说明：")
     for scn, obs, ok, reason in results:
-        mark = "[v]" if ok else "[x]"
-        print(f"  {mark} {scn['id']}: {scn['desc']}")
+        print(f"  {'[v]' if ok else '[x]'} {scn['id']}: {scn['desc']}")
+        if scn.get("note"):
+            print(f"       └─ 备注: {scn['note']}")
         if not ok:
             print(f"       └─ 问题: {reason}")
-    print("=" * 82)
-    print("注：范围2用合成数据测'判别力'（层次B）。正常天已加噪声/周节律/混淆项，")
-    print("    但仍非真人数据——不证明'真实有效'（层次C需临床标签）。")
-    return 0 if passed == len(SCENARIOS) else 1
+
+    print("=" * 92)
+    print("注：范围2 用合成数据测判别力（层次 B）。已加 AR1 噪声/周末效应/混淆项/方向反例，")
+    print("    但仍非真人数据——不证明真实有效（层次 C 需临床标签 + 量表对照）。")
+    print("    '睡偏/社偏' = 该轨在正式运行期被判偏离的天数，用于看信号是否落在正确的轨。")
+    return 0 if passed == scored else 1
 
 
 if __name__ == "__main__":

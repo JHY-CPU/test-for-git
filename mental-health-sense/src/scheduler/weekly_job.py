@@ -30,7 +30,7 @@ def run_weekly_pipeline(
             "elder_id": str,
             "week_start": str,
             "week_end": str,
-            "retrain_status": str,
+            "retrain_status": dict,   # {"sleep": "success", "social": "failed: ..."}
             "report_path": str | None,
             "risk_label": str,
         }
@@ -41,16 +41,14 @@ def run_weekly_pipeline(
 
     logger.info(f"=== 每周管道启动: {elder_id} ({week_start} ~ {week_end}) ===")
 
-    # 1. 微调模型
-    retrain_status = "skipped"
+    # 1. 微调模型（两轨各一次，一轨失败不影响另一轨）
     try:
-        from src.baseline.trainer import weekly_retrain
-        weekly_retrain(elder_id, config)
-        retrain_status = "success"
-        logger.info(f"  └─ 模型微调完成")
+        from src.baseline.trainer import retrain_all_tracks
+        retrain_status = retrain_all_tracks(elder_id, config)
+        logger.info(f"  └─ 模型微调完成: {retrain_status}")
     except Exception as e:
         logger.warning(f"  └─ 模型微调跳过: {e}")
-        retrain_status = f"failed: {e}"
+        retrain_status = {"sleep": f"failed: {e}", "social": f"failed: {e}"}
 
     # 2. 生成周报
     report_path = None

@@ -27,8 +27,8 @@ DEFAULT_ELDER_ID = "E001"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="每日推理管道")
-    parser.add_argument("--date", type=str, help="日期 (YYYY-MM-DD)，默认昨天")
+    parser = argparse.ArgumentParser(description="每日推理管道（双轨）")
+    parser.add_argument("--date", type=str, help="day_key (YYYY-MM-DD)，默认昨天")
     parser.add_argument(
         "--elder", type=str, default=DEFAULT_ELDER_ID,
         help=f"老人ID（默认: {DEFAULT_ELDER_ID}）",
@@ -39,38 +39,45 @@ def main():
     setup_logger(log_level=args.log_level)
 
     elder_id = args.elder
-    date_str = args.date
+    day_key = args.date
 
-    logger.info(f"{'=' * 40}")
-    logger.info(f"每日推理: {elder_id}, 日期={date_str or '昨天'}")
-    logger.info(f"{'=' * 40}")
+    logger.info("=" * 46)
+    logger.info(f"每日推理: {elder_id}, day_key={day_key or '昨天'}")
+    logger.info("=" * 46)
 
     try:
-        result = run_daily_pipeline(
-            elder_id=elder_id,
-            date_str=date_str,
-        )
+        result = run_daily_pipeline(elder_id=elder_id, day_key=day_key)
 
-        logger.info(f"  数据质量: {result['data_quality']}")
+        logger.info(f"  数据质量: {result['track_quality']}")
         logger.info(f"  管道状态: {result['status']}")
 
-        if result.get("inference_result"):
-            inf = result["inference_result"]
-            logger.info(f"  异常分: {inf['anomaly_score']:.4f}")
-            logger.info(f"  阈值: {inf['dynamic_threshold']:.4f}")
-            logger.info(f"  偏离: {inf['is_deviation']}")
+        inf = result.get("inference_result") or {}
+        for track in ("sleep", "social"):
+            tr = inf.get(track)
+            if isinstance(tr, dict):
+                logger.info(
+                    f"  [{track}] score={tr.get('anomaly_score', 0):.4f} "
+                    f"threshold={tr.get('dynamic_threshold', 0):.4f} "
+                    f"deviation={tr.get('is_deviation')} status={tr.get('status')}"
+                )
 
         if result.get("risk_result"):
             risk = result["risk_result"]
             logger.info(f"  风险等级: {risk['risk_level']}({risk['risk_label']})")
+            for rt in risk.get("risk_types", []):
+                logger.info(
+                    f"    活跃风险: {rt['risk_type']} "
+                    f"(连续{rt['consecutive_days']}/{rt['threshold_required']}天, "
+                    f"超标特征={rt['exceeding_features']})"
+                )
             if risk.get("recommendation"):
                 logger.info(f"  建议: {risk['recommendation']}")
 
     except Exception as e:
-        logger.error(f"  ❌ {elder_id} 推理失败: {e}")
+        logger.error(f"  {elder_id} 推理失败: {e}")
         raise
 
-    logger.info(f"\n{'=' * 40}")
+    logger.info("=" * 46)
     logger.info("每日推理完成")
 
 

@@ -1,190 +1,249 @@
 """
-摄像头适配器（PIR 红外传感器 + IPC 骨骼追踪）
+边缘人形共处检测适配器（copresence_min 的唯一来源）
 
-设备类型：
-    - PIR 被动红外传感器（检测房间内是否有人）
-    - IPC 网络摄像头 + 骨骼追踪算法（如 OpenPose / MediaPipe）
+职责：C6c 视频流 → 逐秒人数 n(t) → copresence_min（画面中人形数 ≥2 的累计分钟）
 
-原始数据：
-    - PIR：各房间的时间序列触发信号
-    - IPC：人体骨骼关键点坐标序列
+★ 这是社会连接轨**唯一**的社会接触指标，也是本方案最大的单点风险。
+其余 4 维（离家、RA、IV、活动量）测的都不是"跟人在一起"。因此：
+  - 该维缺失时整轨降级，且**禁止前向填充**（见 aggregator.NO_FORWARD_FILL_FEATURES）
+    ——"今天有没有人来"取决于子女安排，用昨天填今天等于凭空伪造社会接触。
+  - 云端人形检测抽样校准从"锦上添花"变成必须执行的日常质检。
+  - 摄像头画面 SSIM 突变要触发 ROI 标定失效提醒。
 
-对接步骤：
-    1. 确定摄像头型号和骨骼追踪方案
-    2. 实现 _read_raw() 方法，连接摄像头数据流
-    3. 在 _compute_features() 中实现活动量和空间转移熵的计算
-    4. 将 mode 设为 "live"
+隐私边界（v2.1 硬性约束）：
+  - 视频原始数据**不出户**，边缘设备只上报当日聚合的分钟数
+  - **不取音频流、不解码、不落盘** —— GRU 管线完全不采集音频。
+    这在知情同意环节是实质性差别："根本不录音" ≠ "录了音但只算时长"。
 
-Camera Adapter (PIR + IPC with skeletal tracking)
+30 s 中位数去抖的理由：单帧人形检测在遮挡、侧身、逆光下漏检率不低，
+逐帧判定会把一次连续来访切成几十段。中位数滑窗要求"半分钟里多数时间看得见两个人"，
+这与"社会接触"的语义也更贴合——擦身而过不算接触。
 
-Device type:
-    - PIR passive infrared sensors (room occupancy)
-    - IPC camera with pose estimation (e.g. OpenPose / MediaPipe)
-
-Raw data:
-    - PIR: per-room time-series trigger signals
-    - IPC: human skeletal keypoint coordinate sequences
-
-Integration steps:
-    1. Identify camera model and pose estimation pipeline
-    2. Implement _read_raw() to connect to camera data stream
-    3. Implement _compute_features() for activity level and spatial entropy
-    4. Set mode to "live"
+两类必须承认的误差：
+  1. 漏检（低估）：老人与来访者一同走出客厅时共处仍在继续，但摄像头看不到。
+     单摄像头无解，文案里只能表述为"客厅可见共处时长"。
+  2. 误检（高估）：电视画面里的人、照片、镜面反射被计为人形 → 由 ROI 过滤处理。
 """
-
-from datetime import datetime
 
 import numpy as np
 
 from src.data_pipeline.adapters import SensorAdapter
 
+# 共处判据：画面中人形数 ≥ 此值
+COPRESENCE_MIN_PERSONS = 2
+
+# 去抖窗口（秒）与采样率（fps）
+SMOOTH_WINDOW_SEC = 30
+SAMPLE_FPS = 1
+
+# 云端抽样校准：每日抽样帧数上限与一致率告警线
+CLOUD_CALIBRATION_MAX_FRAMES = 50
+CLOUD_CALIBRATION_MIN_AGREEMENT = 0.90
+
+# 访客日判据：共处时长超过此值标 has_visitor
+VISITOR_DAY_THRESHOLD_MIN = 30
+
+
+def smooth_person_counts(per_second_counts, window_sec: int = SMOOTH_WINDOW_SEC) -> np.ndarray:
+    """
+    对逐秒人数做滑动中位数去抖。
+
+    窗口中心对齐；边界处窗口自动收窄（不做 padding——padding 会在开头结尾
+    引入不存在的人数，而来访往往正好发生在时段边缘）。
+    """
+    counts = np.asarray(per_second_counts, dtype=np.float64).flatten()
+    if counts.size == 0:
+        return counts
+    if np.any(counts < 0):
+        raise ValueError("person counts must be non-negative")
+
+    half = max(window_sec // 2, 1)
+    smoothed = np.empty_like(counts)
+    for i in range(counts.size):
+        lo = max(0, i - half)
+        hi = min(counts.size, i + half + 1)
+        smoothed[i] = np.median(counts[lo:hi])
+    return smoothed
+
+
+def compute_copresence_minutes(
+    per_second_counts,
+    window_sec: int = SMOOTH_WINDOW_SEC,
+    fps: int = SAMPLE_FPS,
+) -> dict:
+    """
+    逐秒人数 → copresence_min。
+
+    Returns:
+        {
+            "copresence_min": float,
+            "copresence_segments": int,   # 分几次共处（周报用）
+            "max_persons": int,
+            "sampled_seconds": int,
+            "has_visitor": bool,
+        }
+    """
+    counts = np.asarray(per_second_counts, dtype=np.float64).flatten()
+    if counts.size == 0:
+        return {
+            "copresence_min": 0.0, "copresence_segments": 0,
+            "max_persons": 0, "sampled_seconds": 0, "has_visitor": False,
+        }
+
+    smoothed = smooth_person_counts(counts, window_sec)
+    is_copresent = smoothed >= COPRESENCE_MIN_PERSONS
+
+    seconds_per_sample = 1.0 / max(fps, 1)
+    total_min = float(is_copresent.sum() * seconds_per_sample / 60.0)
+
+    # 段数：从 False 翻到 True 的次数（含开头即为 True 的情形）
+    segments = int(np.sum(is_copresent[1:] & ~is_copresent[:-1])) + int(is_copresent[0])
+
+    return {
+        "copresence_min": round(total_min, 3),
+        "copresence_segments": segments,
+        "max_persons": int(counts.max()),
+        "sampled_seconds": int(counts.size * seconds_per_sample),
+        "has_visitor": total_min > VISITOR_DAY_THRESHOLD_MIN,
+    }
+
+
+def filter_tv_roi_detections(
+    detections: list[dict],
+    tv_roi: tuple[float, float, float, float] | None,
+) -> list[dict]:
+    """
+    丢弃落在电视屏幕 ROI 内的人形框。
+
+    电视画面里的人、照片、镜面反射会被计为人形，直接抬高 copresence。
+    这是 v2.0 电视门控唯一被保留的部分——只需一次静态标定，
+    不涉及音频停顿结构那套脆弱判别。
+
+    判据用框中心是否落在 ROI 内，而非 IoU：电视里的人往往只占屏幕一部分，
+    IoU 阈值难定且需调参，中心点判据稳定。
+
+    Args:
+        detections: [{"bbox": (x1, y1, x2, y2)}]，坐标归一化到 [0,1]
+        tv_roi: (x1, y1, x2, y2)；None 表示未标定，不过滤
+    """
+    if not tv_roi:
+        return list(detections or [])
+
+    rx1, ry1, rx2, ry2 = tv_roi
+    kept = []
+    for det in detections or []:
+        bbox = det.get("bbox")
+        if not bbox or len(bbox) != 4:
+            kept.append(det)
+            continue
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        if rx1 <= cx <= rx2 and ry1 <= cy <= ry2:
+            continue
+        kept.append(det)
+    return kept
+
+
+def check_cloud_calibration(edge_counts: list[int], cloud_counts: list[int]) -> dict:
+    """
+    边缘模型 vs 云端 human/analysis/detect 的一致率校验。
+
+    copresence_min 是社会接触的唯一来源，这条校准是**必须执行的日常质检**，
+    不是可选项。一致率 <90% 即触发模型复查告警。
+
+    Returns:
+        {"agreement": float, "n_frames": int, "passed": bool, "alert": str | None}
+    """
+    if len(edge_counts) != len(cloud_counts):
+        raise ValueError(
+            f"edge/cloud 帧数不匹配: {len(edge_counts)} vs {len(cloud_counts)}"
+        )
+    n = len(edge_counts)
+    if n == 0:
+        return {
+            "agreement": 0.0, "n_frames": 0, "passed": False,
+            "alert": "无校准样本，无法验证边缘模型"
+                     "（copresence 是唯一社会接触来源，必须校准）",
+        }
+
+    agree = sum(1 for e, c in zip(edge_counts, cloud_counts) if e == c)
+    agreement = agree / n
+
+    return {
+        "agreement": round(agreement, 4),
+        "n_frames": n,
+        "passed": agreement >= CLOUD_CALIBRATION_MIN_AGREEMENT,
+        "alert": None if agreement >= CLOUD_CALIBRATION_MIN_AGREEMENT else (
+            f"边缘人形检测一致率 {agreement:.1%} < {CLOUD_CALIBRATION_MIN_AGREEMENT:.0%}，"
+            f"需复查模型或重标电视 ROI"
+        ),
+    }
+
 
 class CameraAdapter(SensorAdapter):
     """
-    PIR + IPC → 活动特征
-
-    输入：PIR 触发记录 + IPC 骨骼关键点
-    输出：{"daily_activity", "space_entropy"}
+    C6c 边缘人形共处检测 → copresence_min。
 
     Usage:
-        # 开发/测试阶段
         adapter = CameraAdapter(mode="mock")
         features = adapter.extract(source="", date="2026-08-01")
-
-        # 对接真实摄像头后
-        adapter = CameraAdapter(mode="live")
-        features = adapter.extract(
-            source={"pir": "/dev/pir0", "ipc": "rtsp://192.168.1.101/stream"},
-            date="2026-08-01",
-        )
     """
 
-    FEATURE_NAMES = [
-        "daily_activity",   # 日间活动量（步数/活动时长的综合指数）
-        "space_entropy",    # 空间转移熵（房间穿梭的多样性）
-    ]
+    FEATURE_NAMES = ["copresence_min"]
 
-    # 默认房间列表（根据实际部署配置）
-    DEFAULT_ROOMS = ["bedroom", "living_room", "kitchen", "bathroom", "corridor"]
-
-    def __init__(self, mode: str = "mock", rooms: list[str] | None = None):
+    def __init__(
+        self,
+        mode: str = "mock",
+        tv_roi: tuple[float, float, float, float] | None = None,
+    ):
         super().__init__(mode)
-        self.rooms = rooms or self.DEFAULT_ROOMS
+        self.tv_roi = tv_roi
 
-    def _read_raw(self, source: dict | str, date: str) -> dict:
+    def _read_raw(self, source: str, date: str) -> dict:
         """
-        【对接真实摄像头/PIR 时实现此方法】
+        【接入真实设备时实现】边缘取流 → 人形检测 → 当日聚合。
 
-        source 示例：
-            {
-                "pir": "mqtt://sensors/pir/#",        # PIR MQTT topic
-                "ipc": "rtsp://192.168.1.101:554",   # IPC RTSP 流
-            }
+            POST /api/lapp/device/capacity                     → 能力集自检
+            POST /api/lapp/v2/live/address/get                 → 取流地址（本地网络）
+            POST /api/lapp/intelligence/human/analysis/detect  → 云端校准（每日 ≤50 帧）
 
-        原始数据（取决于设备，以下为典型格式）：
-            raw = {
-                "pir_events": [
-                    {"room": "bedroom",   "time": "06:45:12", "duration_sec": 30},
-                    {"room": "kitchen",   "time": "07:30:00", "duration_sec": 120},
-                    ...
-                ],
-                "skeleton_frames": np.ndarray,  # (n_frames, n_joints, 3)  xyz坐标
-                "activity_seconds": 18000,       # 总活动秒数
-            }
-
-        Returns:
-            {"daily_activity": 5500, "space_entropy": 2.1}
+        实现要点：
+          1. **只解码视频轨，不解码音频轨** —— v2.1 硬性约束
+          2. 1 fps 抽帧 → YOLOv8n 或同级轻量模型 → 逐秒人数
+          3. filter_tv_roi_detections 丢弃电视画面里的人形
+          4. compute_copresence_minutes 做 30 s 中位数去抖
+          5. 只向云侧写出当日聚合分钟数，**视频不出户**
+          6. 每日 check_cloud_calibration，一致率 <90% 告警
         """
-        # TODO: 对接真实摄像头/PIR
-        # 方式1：从 MQTT 订阅 PIR 事件 + RTSP 拉流
-        # 方式2：从本地文件读取录制的数据
-        # 方式3：调用 IPC 厂商的 SDK
         raise NotImplementedError(
-            "CameraAdapter._read_raw() — 请实现真实摄像头/PIR 对接逻辑。\n"
-            "参考文档：src/data_pipeline/adapters/camera.py"
+            "边缘人形检测 live 模式尚未接入。依赖 §11 待决问题："
+            "边缘算力选型、电视 ROI 现场标定、C6c 是否支持 app_human_detect 实测。"
+            "已就绪的部分：去抖、ROI 过滤、共处时长计算、云端校准比对逻辑。"
         )
 
-    def _compute_features(self, raw_data: dict) -> dict:
-        """
-        从 PIR 事件和骨骼帧计算活动特征。
-
-        Args:
-            raw_data: SDK 返回的原始数据
-
-        Returns:
-            二维特征值 dict
-        """
-        pir_events = raw_data.get("pir_events", [])
-        activity_seconds = raw_data.get("activity_seconds")
-        skeleton_frames = raw_data.get("skeleton_frames")
-
-        # ===== 日间活动量 =====
-        if activity_seconds is not None:
-            # 直接用 SDK 返回的总活动时长
-            daily_activity = activity_seconds / 36  # 归一化到 0~10000 范围
-        elif pir_events and len(pir_events) > 0:
-            # 从 PIR 事件累计活动时长
-            total_sec = sum(e.get("duration_sec", 0) for e in pir_events)
-            daily_activity = total_sec / 36
-        elif skeleton_frames is not None and len(skeleton_frames) > 0:
-            # 从骨骼关键点位移估算活动量
-            if len(skeleton_frames) > 1:
-                displacement = np.sum(
-                    np.sqrt(np.sum(np.diff(skeleton_frames, axis=0) ** 2, axis=-1))
-                )
-                daily_activity = displacement / 100  # 归一化
-            else:
-                daily_activity = 3000
-        else:
-            daily_activity = 5000  # 默认健康老人典型值
-
-        daily_activity = max(100, min(20000, float(daily_activity)))
-
-        # ===== 空间转移熵 =====
-        if pir_events and len(pir_events) >= 2:
-            room_sequence = [e.get("room", "unknown") for e in pir_events]
-
-            # 统计各房间停留比例
-            room_counts = {}
-            for room in room_sequence:
-                room_counts[room] = room_counts.get(room, 0) + 1
-            total = sum(room_counts.values())
-
-            # 香农熵
-            entropy = 0.0
-            for count in room_counts.values():
-                p = count / total
-                if p > 0:
-                    entropy -= p * np.log2(p)
-
-            # 考虑房间切换次数
-            transitions = sum(
-                1 for i in range(1, len(room_sequence))
-                if room_sequence[i] != room_sequence[i - 1]
-            )
-            space_entropy = entropy * (1 + transitions / max(len(room_sequence), 1))
-            space_entropy = max(0.1, min(space_entropy, 5.0))
-        else:
-            space_entropy = 2.0
-
-        return {
-            "daily_activity": round(float(daily_activity), 1),
-            "space_entropy": round(float(space_entropy), 2),
-        }
-
     def _generate_mock(self, date: str) -> dict:
-        """生成模拟活动数据"""
-        import numpy as np
+        """
+        生成逐秒人数序列并走真实聚合逻辑。
 
-        from src.utils.seeding import stable_seed
+        周末造更长的共处时段（子女探访），使 mock 数据体现周末效应——
+        这是社交轨必须按 is_weekend 分池的原因。
+        """
+        import random
+        from datetime import datetime
 
-        noise = np.random.RandomState(stable_seed(f"activity_{date}"))
+        rng = random.Random(f"{date}-camera")
+        is_weekend = datetime.strptime(date, "%Y-%m-%d").weekday() >= 5
 
-        return {
-            "daily_activity": round(
-                max(500, min(12000, 5500 + noise.normal(0, 800))), 1
-            ),
-            "space_entropy": round(
-                max(0.5, min(4.5, 2.2 + noise.normal(0, 0.3))), 2
-            ),
-        }
+        n_samples = 16 * 3600                          # 16 小时日间窗口，1 fps
+        counts = np.ones(n_samples, dtype=np.float64)  # 平时画面里只有老人
+
+        n_visits = rng.randint(1, 3) if is_weekend else rng.randint(0, 1)
+        for _ in range(n_visits):
+            duration = rng.randint(1800, 7200) if is_weekend else rng.randint(600, 2400)
+            start = rng.randint(0, max(1, n_samples - duration))
+            counts[start:start + duration] = 2
+            # 掺入单帧漏检，用于验证去抖确实起作用
+            for _ in range(duration // 40):
+                counts[start + rng.randint(0, duration - 1)] = 1
+
+        return {"copresence_min": compute_copresence_minutes(counts, fps=SAMPLE_FPS)["copresence_min"]}
