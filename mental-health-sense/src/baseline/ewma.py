@@ -203,7 +203,7 @@ class TrackEWMAPools:
         >>> pools.get_threshold(2.5, is_weekend=False)
     """
 
-    def __init__(self, track: str, alpha: float = 0.05):
+    def __init__(self, track: str, alpha: float = 0.05, max_freeze_days: int = 14):
         from src.baseline.scaler_utils import validate_track
 
         self.track = validate_track(track)
@@ -214,14 +214,48 @@ class TrackEWMAPools:
         self.pools: dict[str, CumulativeEWMABaseline] = {
             name: CumulativeEWMABaseline(alpha=alpha) for name in pool_names
         }
+        # 冻结上限：连续偏离超过这么多天后恢复更新，避免"永久报警"
+        self.max_freeze_days = max_freeze_days
+        self.freeze_streak = 0
 
     def pool_for(self, is_weekend: bool = False) -> CumulativeEWMABaseline:
         """取该天对应的池"""
         return self.pools[get_pool_name(self.track, is_weekend)]
 
-    def update(self, value: float, is_weekend: bool = False) -> None:
-        """把今天的异常分喂给对应的池"""
+    def update(
+        self,
+        value: float,
+        is_weekend: bool = False,
+        is_deviation: bool = False,
+    ) -> bool:
+        """
+        把今天的异常分喂给对应的池。
+
+        ★ 偏离日**不更新**（冻结）。理由：EWMA 是"正常波动"的基线，
+        若把异常日也喂进去，基线会在两三天内学会这次异常，阈值随分数一起抬高，
+        于是持续性异常被自己的历史掩盖——偏离标志开始闪烁，
+        永远凑不满"连续 N 天"，等级卡在 L1。这是自适应基线的经典失效模式。
+
+        实测（TP_social，共处归零 11 天）：不冻结时阈值 1.37→2.02 一路追平分数，
+        11 天里只有 5 天被判偏离且不连续；冻结后阈值稳定在 1.37 附近。
+
+        但不能无限冻结：老人若真的永久性衰退（搬家后再没人来），
+        基线该重新学习，否则会永久报警、家属很快对提醒脱敏。
+        故连续冻结超过 max_freeze_days 天后强制恢复更新——
+        此时"异常"已持续两周，风险规则该报的早已报过，
+        重新基线化是为了让系统对**下一次**变化仍然敏感。
+
+        Returns:
+            True 表示本次实际更新了池，False 表示被冻结跳过。
+        """
+        if is_deviation and self.freeze_streak < self.max_freeze_days:
+            self.freeze_streak += 1
+            return False
+
+        if not is_deviation:
+            self.freeze_streak = 0
         self.pool_for(is_weekend).update(value)
+        return True
 
     def get_threshold(self, sigma_multiplier: float, is_weekend: bool = False) -> float:
         """对应池的动态阈值"""
@@ -252,12 +286,21 @@ class TrackEWMAPools:
         return {
             "track": self.track,
             "alpha": self.alpha,
+            "max_freeze_days": self.max_freeze_days,
+            "freeze_streak": self.freeze_streak,
             "pools": {name: pool.to_dict() for name, pool in self.pools.items()},
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "TrackEWMAPools":
-        obj = cls(track=data["track"], alpha=data["alpha"])
+        obj = cls(
+            track=data["track"],
+            alpha=data["alpha"],
+            max_freeze_days=data.get("max_freeze_days", 14),
+        )
+        # freeze_streak 必须持久化：它跨天累积，每天是独立进程，
+        # 不落盘的话每天都从 0 开始，冻结上限永远触发不到。
+        obj.freeze_streak = data.get("freeze_streak", 0)
         for name, pool_data in data.get("pools", {}).items():
             if name in obj.pools:
                 obj.pools[name] = CumulativeEWMABaseline.from_dict(pool_data)
@@ -275,10 +318,24 @@ class TrackEWMAPools:
         for name, pool in self.pools.items():
             pool.save(dirpath / self._pool_filename(name))
 
+        # 容器级状态（冻结计数）单独落一个小文件：池文件的格式不动，
+        # 老基线目录缺这个文件时按 0 起算，向后兼容。
+        with open(dirpath / self._state_filename(), "wb") as f:
+            pickle.dump(
+                {
+                    "freeze_streak": self.freeze_streak,
+                    "max_freeze_days": self.max_freeze_days,
+                },
+                f,
+            )
+
     def _pool_filename(self, pool_name: str) -> str:
         if pool_name == POOL_DEFAULT:
             return f"ewma_{self.track}.pkl"
         return f"ewma_{self.track}_{pool_name}.pkl"
+
+    def _state_filename(self) -> str:
+        return f"ewma_{self.track}_state.pkl"
 
     @classmethod
     def load(cls, dirpath: str | Path, track: str, alpha: float = 0.05) -> "TrackEWMAPools":
@@ -292,6 +349,20 @@ class TrackEWMAPools:
             filepath = dirpath / obj._pool_filename(name)
             if filepath.exists():
                 obj.pools[name] = CumulativeEWMABaseline.load(filepath)
+
+        state_path = dirpath / obj._state_filename()
+        if state_path.exists():
+            try:
+                with open(state_path, "rb") as f:
+                    state = pickle.load(f)
+                obj.freeze_streak = int(state.get("freeze_streak", 0))
+                obj.max_freeze_days = int(
+                    state.get("max_freeze_days", obj.max_freeze_days)
+                )
+            except Exception:
+                # 状态文件坏了不该让整轨加载失败：冻结计数丢失只是让阈值
+                # 早一天恢复更新，比拿不到基线严重得多。
+                obj.freeze_streak = 0
         return obj
 
     def __repr__(self) -> str:

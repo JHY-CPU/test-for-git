@@ -131,3 +131,85 @@ class TestCumulativeEWMABaseline:
         ewma.update(100.0)
         assert ewma.std > 1.0
 
+
+class TestDeviationFreeze:
+    """偏离日冻结：防止基线学会异常、阈值追平分数把持续异常掩盖掉"""
+
+    def _pools(self, **kw):
+        from src.baseline.ewma import TrackEWMAPools
+        return TrackEWMAPools("sleep", alpha=0.3, **kw)
+
+    def test_deviation_day_does_not_update_pool(self):
+        pools = self._pools()
+        for _ in range(10):
+            pools.update(1.0, is_deviation=False)
+        before = pools.get_threshold(2.0)
+
+        assert pools.update(5.0, is_deviation=True) is False
+        assert pools.get_threshold(2.0) == before, "偏离日不应改变阈值"
+
+    def test_normal_day_still_updates(self):
+        pools = self._pools()
+        assert pools.update(1.0, is_deviation=False) is True
+        assert pools.pool_for().n == 1
+
+    def test_threshold_stays_below_sustained_anomaly(self):
+        """★ 核心回归：持续高分不该把阈值抬到自己头上"""
+        pools = self._pools()
+        for _ in range(20):
+            pools.update(1.0, is_deviation=False)
+
+        # 连续 10 天高分且被判偏离
+        for _ in range(10):
+            score = 3.0
+            th = pools.get_threshold(2.0)
+            assert score > th, "冻结后阈值必须始终低于持续异常分"
+            pools.update(score, is_deviation=True)
+
+    def test_freeze_is_bounded(self):
+        """冻结有上限，否则永久报警、家属会脱敏"""
+        pools = self._pools(max_freeze_days=3)
+        for _ in range(5):
+            pools.update(1.0, is_deviation=False)
+
+        assert [pools.update(9.0, is_deviation=True) for _ in range(3)] == [
+            False, False, False,
+        ]
+        # 第 4 天超过上限 → 恢复更新，基线重新学习
+        assert pools.update(9.0, is_deviation=True) is True
+
+    def test_streak_resets_after_normal_day(self):
+        pools = self._pools(max_freeze_days=3)
+        pools.update(1.0, is_deviation=False)
+        pools.update(9.0, is_deviation=True)
+        pools.update(9.0, is_deviation=True)
+        assert pools.freeze_streak == 2
+
+        pools.update(1.0, is_deviation=False)
+        assert pools.freeze_streak == 0, "恢复正常后冻结计数应清零"
+
+    def test_freeze_streak_survives_roundtrip(self, tmp_path):
+        """每天是独立进程，冻结计数不落盘就永远触发不到上限"""
+        from src.baseline.ewma import TrackEWMAPools
+
+        pools = self._pools(max_freeze_days=5)
+        pools.update(1.0, is_deviation=False)
+        pools.update(9.0, is_deviation=True)
+        pools.update(9.0, is_deviation=True)
+        pools.save(tmp_path)
+
+        loaded = TrackEWMAPools.load(tmp_path, "sleep", alpha=0.3)
+        assert loaded.freeze_streak == 2
+        assert loaded.max_freeze_days == 5
+
+    def test_load_without_state_file_defaults_to_zero(self, tmp_path):
+        """老基线目录没有 state 文件时不该报错"""
+        from src.baseline.ewma import TrackEWMAPools
+
+        pools = self._pools()
+        pools.update(1.0, is_deviation=False)
+        pools.save(tmp_path)
+        (tmp_path / pools._state_filename()).unlink()
+
+        loaded = TrackEWMAPools.load(tmp_path, "sleep", alpha=0.3)
+        assert loaded.freeze_streak == 0

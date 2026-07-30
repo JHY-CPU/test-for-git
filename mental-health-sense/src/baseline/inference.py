@@ -235,7 +235,11 @@ def infer_track(
     is_deviation = bool(anomaly_score > dynamic_threshold)
 
     # 7. 更新对应池并落盘
-    ewma.update(anomaly_score, is_weekend=is_weekend)
+    # 偏离日冻结（不喂给 EWMA）：否则基线两三天就学会这次异常、阈值追平分数，
+    # 持续性异常被自己的历史掩盖，"连续 N 天"永远凑不满。详见 ewma.update 的说明。
+    ewma_updated = ewma.update(
+        anomaly_score, is_weekend=is_weekend, is_deviation=is_deviation
+    )
     ewma.save(get_baseline_dir(elder_id))
 
     # 8. 标准化 signed 残差：只除以 std（尺度、恒正）以保号，不减均值。
@@ -261,6 +265,7 @@ def infer_track(
         "anomaly_score": round(anomaly_score, 4),
         "static_threshold": round(static_threshold, 4),
         "ewma_threshold": round(ewma_threshold, 4),
+        "ewma_frozen": not ewma_updated,   # 今天是否因偏离而冻结了基线更新
         "dynamic_threshold": round(dynamic_threshold, 4),
         "is_deviation": is_deviation,
         "signed_residuals": signed_residuals,
