@@ -171,7 +171,9 @@ class SleepRadarAdapter(SensorAdapter):
         base_sfi = 4.5
         base_hrv = 48.0
 
-        noise = np.random.RandomState(abs(hash(date)) % (2**31))
+        from src.utils.seeding import stable_seed
+
+        noise = np.random.RandomState(stable_seed(date))
 
         return {
             "sleep_efficiency": round(

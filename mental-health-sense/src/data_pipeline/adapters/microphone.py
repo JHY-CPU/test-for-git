@@ -170,7 +170,9 @@ class MicrophoneAdapter(SensorAdapter):
         """生成模拟社交数据"""
         import numpy as np
 
-        noise = np.random.RandomState(abs(hash(f"social_{date}")) % (2**31))
+        from src.utils.seeding import stable_seed
+
+        noise = np.random.RandomState(stable_seed(f"social_{date}"))
 
         return {
             "social_turns": int(

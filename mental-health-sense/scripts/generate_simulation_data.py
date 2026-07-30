@@ -21,6 +21,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.baseline.scaler_utils import FEATURE_NAMES
+from src.utils.seeding import stable_hash
 
 
 # ===== 被监测老人 ID（单人系统）=====
@@ -82,7 +83,7 @@ def generate_daily_vector(
     Returns:
         (6,) numpy数组
     """
-    rng = np.random.RandomState((seed + day * 13 + abs(hash(elder_config.get("name", "")))) % (2**31))
+    rng = np.random.RandomState((seed + day * 13 + stable_hash(elder_config.get("name", ""))) % (2**31))
 
     baseline = elder_config["baseline"]
     anomaly = elder_config.get("anomaly")
@@ -170,7 +171,7 @@ def generate_all_data(
             date_str = date_dt.strftime("%Y-%m-%d")
 
             # 生成健康特征（6维）
-            health_vec = generate_daily_vector(day, config, seed=hash(elder_id) % 10000)
+            health_vec = generate_daily_vector(day, config, seed=stable_hash(elder_id) % 10000)
 
             # 统计缺失
             missing_count = int(np.isnan(health_vec).sum())

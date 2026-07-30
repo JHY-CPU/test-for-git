@@ -18,6 +18,8 @@ import pytest
 # 将src目录加入路径
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.utils.seeding import stable_hash
+
 
 class TestEndToEndSimulation:
     """
@@ -147,7 +149,7 @@ class TestEndToEndSimulation:
             all_vectors = []
             for day in range(1, 51):
                 vec_6d = self._generate_daily_vector(
-                    day, config, feature_names, seed=hash(elder_id)
+                    day, config, feature_names, seed=stable_hash(elder_id)
                 )
                 all_vectors.append(vec_6d)
 
@@ -234,7 +236,7 @@ class TestEndToEndSimulation:
             vectors_14d = []
             for day in range(1, 15):
                 vec_6d = self._generate_daily_vector(
-                    day, config, feature_names, seed=hash(elder_id)
+                    day, config, feature_names, seed=stable_hash(elder_id)
                 )
                 vectors_14d.append(vec_6d)
 

@@ -176,7 +176,9 @@ class CameraAdapter(SensorAdapter):
         """生成模拟活动数据"""
         import numpy as np
 
-        noise = np.random.RandomState(abs(hash(f"activity_{date}")) % (2**31))
+        from src.utils.seeding import stable_seed
+
+        noise = np.random.RandomState(stable_seed(f"activity_{date}"))
 
         return {
             "daily_activity": round(
