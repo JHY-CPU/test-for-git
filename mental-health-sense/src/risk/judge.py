@@ -36,9 +36,86 @@ def _track_history(daily_results: list[dict], track: str) -> list[dict]:
     return out
 
 
+def _has_adverse_movement(
+    track: str,
+    track_history: list[dict],
+    threshold: float = 1.0,
+    any_threshold: float = 2.0,
+) -> bool:
+    """
+    该轨最近的偏离里，是否存在**朝坏方向**的显著变动。
+
+    为什么需要这个判据：anomaly_score 用的是 abs 残差，方向无关——
+    "睡眠效率从 0.88 涨到 0.97" 与 "掉到 0.68" 产生同样大的分数。
+    只靠分数判等级，会把明显好转判成"严重风险"，家属收到一条
+    "您父亲睡眠严重异常"的提醒，而实情是老人睡得更好了。
+    这类误报对信任的破坏比漏报更快。
+
+    风险类型规则本身是有方向的（读 signed_z），但类型未激活并不代表
+    等级该压住——TP_sleep_minimal 那种"只中两个必选维"就该报却无类型。
+    所以这里做的是更宽的判据：只要**有任一维朝坏方向显著动了**就允许升级；
+    只有"所有显著变动都朝好方向"时才封顶在 L1。
+    """
+    from src.utils.io import get_feature_directions, get_feature_names
+
+    try:
+        names = get_feature_names(track)
+        directions = get_feature_directions(track)
+    except Exception:
+        # 拿不到方向元数据时不要静默压低等级——宁可保留原等级（可能误报），
+        # 也不要因为配置读取失败而把真实风险降级成"关注"。
+        return True
+
+    # 闸门只在**有正面证据表明全是好转**时才生效。
+    # 数据缺失不是"好转"的证据——判不出方向就不压等级。
+    saw_any_z = False
+    considered = 0
+    adverse_days = 0
+
+    for day in track_history:
+        if not day.get("is_deviation", False):
+            continue
+        if not day.get("signed_available", False):
+            return True   # 缺 signed 信息无法判方向 → 不压等级
+
+        considered += 1
+        signed_z = day.get("signed_z") or {}
+        day_adverse = False
+        for name, direction in zip(names, directions):
+            z = signed_z.get(name)
+            if z is None:
+                continue
+            saw_any_z = True
+            z = float(z)
+            if direction == "down" and z <= -threshold:
+                day_adverse = True
+            if direction == "up" and z >= threshold:
+                day_adverse = True
+            # direction="any" 的维（如 sleep_onset_clock）本身不含好/坏信息，
+            # 门槛要更高：1.3σ 的就寝时间抖动是正常生活波动，
+            # 若按 1σ 计入"变坏的证据"，闸门几乎永远放行——
+            # 老人睡得全面变好、只是就寝时间挪了一点，就会发"严重风险"。
+            # 2σ 以上才当作真正的相位改变。
+            if direction == "any" and abs(z) >= any_threshold:
+                day_adverse = True
+
+        adverse_days += day_adverse
+
+    # 一个 z 都没读到（signed_z 为空）→ 无从判断，保留原等级
+    if not saw_any_z or considered == 0:
+        return True
+
+    # 升级本身是"持续偏离"换来的，方向证据也该持续：
+    # 要求这段连续偏离里**至少一半**的天数朝坏方向。
+    # 否则一周全面好转中夹一天就寝时间抖动（2.26σ）就能放行 L3，
+    # 家属收到"严重风险"而老人其实睡得更好了。
+    return adverse_days * 2 >= considered
+
+
 def _judge_single_track(
     track_history: list[dict],
     risk_cfg: dict,
+    track: str | None = None,
 ) -> dict:
     """
     对某一轨独立判等级。
@@ -96,11 +173,25 @@ def _judge_single_track(
     else:
         level = 0
 
+    # 方向闸门：L2/L3 会触发家属提醒/网格员介入，代价高。
+    # 若最近的偏离**全部朝好方向**（睡得更好、出门更多），封顶在 L1"关注"——
+    # 变化本身值得留意（可能是躁狂期、也可能是数据问题），但不该发风险提醒。
+    adverse = True
+    if level >= 2 and track is not None:
+        # 只看驱动本次升级的那段**连续偏离**（recent 的尾部），不是整个 7 天窗。
+        # 用整窗会被窗口里一天过渡期的混合信号翻掉：进入好转的第一两天
+        # 预测尚未跟上，个别维会短暂朝坏方向摆，于是闸门永远放行。
+        streak = recent[-consecutive:] if consecutive else []
+        adverse = _has_adverse_movement(track, streak)
+        if not adverse:
+            level = 1
+
     return {
         "risk_level": level,
         "consecutive": consecutive,
         "avg_anomaly": round(avg_anomaly, 4),
         "max_anomaly": round(max_anomaly, 4),
+        "adverse_direction": adverse,
         "evaluable": True,
     }
 
@@ -155,7 +246,7 @@ def judge_risk_level(
     per_track = {}
     for track in TRACKS:
         per_track[track] = _judge_single_track(
-            _track_history(daily_results, track), risk_cfg
+            _track_history(daily_results, track), risk_cfg, track=track
         )
 
     evaluable = [t for t in TRACKS if per_track[t]["evaluable"]]

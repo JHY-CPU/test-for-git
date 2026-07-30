@@ -235,3 +235,101 @@ class TestMPDDEvidence:
         payload = build_mpdd_evidence("E001", "2026-08-05", daily, risk)
         assert payload["sleep_evidence"]["quality"] == "cold_start"
 
+
+class TestDirectionGate:
+    """
+    方向闸门：anomaly_score 用 abs 残差、方向无关，
+    "睡得明显更好" 与 "明显更差" 得同样高的分。
+    L2/L3 会触发家属提醒，不能因为老人好转就发"严重风险"。
+    """
+
+    def _day(self, day_key: str, z: dict, score: float = 1.8) -> dict:
+        d = day(day_key, sleep_score=score, sleep_dev=True)
+        d[TRACK_SLEEP]["signed_z"] = z
+        return d
+
+    def test_all_improvement_capped_at_attention(self):
+        # sleep_efficiency 方向为 down（跌才是坏）；这里大幅上涨 = 好转
+        good = {"sleep_efficiency": 3.5, "waso_min": -3.0}
+        results = [self._day(f"2026-08-0{i}", good) for i in range(1, 7)]
+        result = judge_risk_level("E001", daily_results=results)
+
+        assert result["risk_level"] == 1, "全是好转不该升到提醒/严重"
+        assert result["per_track"][TRACK_SLEEP]["adverse_direction"] is False
+
+    def test_adverse_movement_still_escalates(self):
+        bad = {"sleep_efficiency": -3.5, "waso_min": 3.0}
+        results = [self._day(f"2026-08-0{i}", bad) for i in range(1, 7)]
+        result = judge_risk_level("E001", daily_results=results)
+
+        assert result["risk_level"] == 3
+        assert result["per_track"][TRACK_SLEEP]["adverse_direction"] is True
+
+    def test_mixed_direction_escalates(self):
+        """有一维朝坏方向就够了，不要求全部朝坏"""
+        mixed = {"sleep_efficiency": 3.5, "waso_min": 3.0}
+        results = [self._day(f"2026-08-0{i}", mixed) for i in range(1, 7)]
+        assert judge_risk_level("E001", daily_results=results)["risk_level"] == 3
+
+    def test_missing_signed_z_does_not_cap(self):
+        """判不出方向时保留原等级——数据缺失不是好转的证据"""
+        results = [self._day(f"2026-08-0{i}", {}) for i in range(1, 7)]
+        assert judge_risk_level("E001", daily_results=results)["risk_level"] == 3
+
+    def test_signed_unavailable_does_not_cap(self):
+        results = []
+        for i in range(1, 7):
+            d = self._day(f"2026-08-0{i}", {"sleep_efficiency": 3.5})
+            d[TRACK_SLEEP]["signed_available"] = False
+            results.append(d)
+        assert judge_risk_level("E001", daily_results=results)["risk_level"] == 3
+
+    def test_no_feature_crosses_threshold_caps(self):
+        """
+        总分够高但没有任何一维越过 ±1σ → 拿不到"朝坏方向"的正面证据，封顶 L1。
+
+        这种情形是偏离被摊薄在各维上（每维都只擦线）。此时发"严重风险"
+        缺乏可解释的依据，压到"关注"更诚实。
+        """
+        weak = {"sleep_efficiency": 0.4}
+        results = [self._day(f"2026-08-0{i}", weak) for i in range(1, 7)]
+        assert judge_risk_level("E001", daily_results=results)["risk_level"] == 1
+
+    def test_single_adverse_day_in_improving_streak_still_caps(self):
+        """
+        一周全面好转中夹一天"任意方向"维的抖动，不该放行 L3。
+
+        实测触发点：sleep_onset_clock（direction=any）单日 2.26σ，
+        其余 6 天全是好转。升级本身是"持续偏离"换来的，
+        方向证据也该持续，不能靠一天。
+        """
+        good = {"sleep_efficiency": 3.0, "waso_min": -3.0}
+        results = [self._day(f"2026-08-0{i}", good) for i in range(1, 8)]
+        # 第 2 天插一个越过 any 门槛的就寝时间抖动
+        results[1][TRACK_SLEEP]["signed_z"] = {**good, "sleep_onset_clock": 2.3}
+
+        result = judge_risk_level("E001", daily_results=results)
+        assert result["risk_level"] == 1
+        assert result["per_track"][TRACK_SLEEP]["adverse_direction"] is False
+
+    def test_majority_adverse_days_escalates(self):
+        """过半天数朝坏方向 → 正常升级"""
+        bad = {"sleep_efficiency": -3.0}
+        good = {"sleep_efficiency": 3.0}
+        results = [self._day(f"2026-08-0{i}", bad) for i in range(1, 6)]
+        results += [self._day(f"2026-08-0{i}", good) for i in range(6, 8)]
+        assert judge_risk_level("E001", daily_results=results)["risk_level"] == 3
+
+    def test_any_direction_needs_higher_bar(self):
+        """
+        direction=any 的维不含好/坏信息，门槛更高（2σ）。
+        1.3σ 的就寝时间抖动是正常生活波动，不算"变坏的证据"。
+        """
+        good = {"sleep_efficiency": 3.0}
+        marginal = [self._day(f"2026-08-0{i}", {**good, "sleep_onset_clock": 1.3})
+                    for i in range(1, 8)]
+        assert judge_risk_level("E001", daily_results=marginal)["risk_level"] == 1
+
+        clear = [self._day(f"2026-08-0{i}", {**good, "sleep_onset_clock": 2.5})
+                 for i in range(1, 8)]
+        assert judge_risk_level("E001", daily_results=clear)["risk_level"] == 3
