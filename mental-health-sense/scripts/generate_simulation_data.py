@@ -43,9 +43,9 @@ ELDER_CONFIGS = {
             "social_turns": (35, 5),
         },
         "anomaly": {
-            # 异常注入在 Day 40-46：必须避开"建档期(1-21天)+观察期(22-28天)"，
-            # 否则异常落在观察期内会被"只记录不报警"盖掉，演示看不到预警。
-            # 时间线：建档1-21 / 观察22-28 / 正常29-39 / 异常40-46 / 恢复47-60。
+            # 异常注入在 Day 40-46：必须避开建档期(1-35天)，
+            # 否则异常落在建档期内会被冷启动兜底盖掉，演示看不到预警。
+            # 时间线：建档1-35 / 正常36-39 / 异常40-46 / 恢复47-60。
             "start_day": 40,
             "end_day": 46,
             "features": {
@@ -55,7 +55,7 @@ ELDER_CONFIGS = {
                 "hrv_rmssd": 28.0,          # 心率变异↓
             },
         },
-        "description": "Day 40-46 注入睡眠恶化特征（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期+观察期，用于演示连续偏离触发预警",
+        "description": "Day 40-46 注入睡眠恶化特征（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期(35天)，用于演示连续偏离触发预警",
     },
 }
 

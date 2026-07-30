@@ -2,7 +2,7 @@
 冷启动训练与每周微调
 
 核心函数：
-    - train_initial_baseline(): 建档期（默认21天）冷启动，首次训练GRU + 初始化EWMA
+    - train_initial_baseline(): 建档期（默认35天）冷启动，首次训练GRU + 初始化EWMA
     - weekly_retrain(): 每周微调，用最近30天数据更新模型
 """
 
@@ -91,7 +91,7 @@ def train_initial_baseline(
     建档期（默认 21 天，配置 training.initial.build_days）结束时调用，建立个人基线。
 
     步骤（以默认 21 天为例）：
-        1. 读取前 build_days 天特征 → (21, 6)
+        1. 读取前 build_days 天特征 → (35, 6)
         2. StandardScaler.fit → scaler.pkl
         3. 构建7→1滑动窗口 → (build_days-7)=14 个训练样本
         4. 训练GRU (150 epoch)
@@ -121,7 +121,7 @@ def train_initial_baseline(
     ewma_cfg = config.get("ewma", {})
 
     window = gru_cfg.get("window", 7)
-    build_days = train_cfg.get("build_days", 21)  # 建档期天数（→ build_days-window 个样本）
+    build_days = train_cfg.get("build_days", 35)  # 建档期天数（→ build_days-window 个样本）
     epochs = train_cfg.get("epochs", 150)
     lr = train_cfg.get("lr", 0.001)
     patience = train_cfg.get("patience", 20)

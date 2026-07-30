@@ -6,10 +6,9 @@
 这是 docs/VALIDATION.md 层次 A（代码正确性）的落地。它证明"链路通、状态对"，
 **不**证明"判别力"（那是范围 2，需混淆项）；更不证明"真实有效"（需真人+临床标签）。
 
-时间线（适配 build_days=21）：
-    day 1-21   建档期    → 正常数据，攒够 21 天后训练（→14 个样本）
-    day 22-28  观察期    → 只记录不报警（验证观察期生效）
-    day 29-39  正常运行  → 带噪正常天（测不误报）
+时间线（适配 build_days=35，已取消观察期）：
+    day 1-35   建档期    → 正常数据，攒够 35 天后训练（→28 个样本）
+    day 36-39  正常运行  → 带噪正常天（测不误报）
     day 40-46  异常注入  → 睡眠恶化特征，应逐级升到 Level 2/3（测检出+分级）
     day 47-60  恢复+正常 → 应降回 Level 0（测不赖着不降）
 
@@ -35,9 +34,9 @@ from src.utils.logger import setup_logger
 VELDER = "V001"          # 验证专用 ID，隔离 E001
 N_DAYS = 60
 START_DATE = "2026-01-01"
-BUILD_DAYS = 21          # 与 settings.yaml 的 training.initial.build_days 对齐
+BUILD_DAYS = 35          # 与 settings.yaml 的 training.initial.build_days 对齐，无观察期
 
-# V001 配置：正常基线沿用 E001，异常注入挪到 day40-46（避开观察期 day22-28）
+# V001 配置：正常基线沿用 E001，异常注入挪到 day40-46（建档期35天，day36起正式运行）
 V001_CONFIG = {
     "name": "验证老人V001",
     "baseline": {
@@ -50,7 +49,7 @@ V001_CONFIG = {
         "features": {"sleep_efficiency": 0.65, "deep_sleep_ratio": 0.15,
                      "sfi": 14.0, "hrv_rmssd": 28.0},
     },
-    "description": "day40-46 睡眠恶化特征注入（避开建档21天+观察7天）",
+    "description": "day40-46 睡眠恶化特征注入（建档期35天，day36起正式运行）",
 }
 
 def cleanup_velder():
@@ -115,7 +114,7 @@ def run_timeline(config):
         # 建档期结束（攒够 BUILD_DAYS 天）触发一次冷启动训练
         if day == BUILD_DAYS and not trained:
             m, s, st, ew = train_initial_baseline(VELDER, config)
-            rows[-1]["_train"] = f"trained: ewma_n={ew.n} (期望14)"
+            rows[-1]["_train"] = f"trained: ewma_n={ew.n} (期望28)"
             trained = True
     return rows
 
@@ -131,15 +130,16 @@ def verify(rows):
 
     # 2. 训练成功：day21 训出 14 个样本
     trow = next((r for r in rows if "_train" in r), None)
-    check(trow is not None and "ewma_n=14" in trow.get("_train", ""),
+    check(trow is not None and "ewma_n=28" in trow.get("_train", ""),
           "冷启动训练", trow.get("_train", "未触发") if trow else "未触发")
 
     # 3. 状态流转：观察期 / success 各阶段出现在正确区间
     obs_days = [r["day"] for r in rows if r["inf_status"] == "observation"]
     succ_days = [r["day"] for r in rows if r["inf_status"] == "success"]
-    check(all(22 <= d <= 28 for d in obs_days) and len(obs_days) > 0,
-          "观察期", f"观察期落在 day{min(obs_days)}-{max(obs_days)}（期望22-28）" if obs_days else "无观察期")
-    check(len(succ_days) > 0 and min(succ_days) >= 29,
+    # 已取消观察期：cold_start_observation_days=0，训练后直接进入 success
+    check(len(obs_days) == 0,
+          "无观察期", f"应无观察日，实际 {len(obs_days)} 天" if obs_days else "已取消观察期，训练完直接正式运行")
+    check(len(succ_days) > 0 and min(succ_days) >= 36,
           "success流转", f"success 从 day{min(succ_days)} 起" if succ_days else "无 success")
 
     # 4. 字段完整性：success 天必须带齐关键字段
@@ -165,7 +165,7 @@ def print_report(rows, ok, fail):
     print(f"合成数据端到端验证（范围1：跑通）  elder={VELDER}  {N_DAYS}天  build_days={BUILD_DAYS}")
     print("=" * 78)
     # 关键节点抽样打印（每阶段头尾 + 异常期全打）
-    show = set(list(range(1, 8)) + [BUILD_DAYS, 22, 28, 29] + list(range(40, 47)) + [55, 60])
+    show = set(list(range(1, 8)) + [28, BUILD_DAYS, 36] + list(range(40, 47)) + [55, 60])
     print(f"{'day':>3} {'date':>10} {'质量':>5} {'推理状态':>18} {'分数':>7} {'阈值':>7} {'偏离':>4} {'等级':>4}")
     print("-" * 78)
     for r in rows:

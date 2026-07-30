@@ -42,7 +42,7 @@ from src.utils.io import get_project_root, load_config
 from src.utils.logger import setup_logger
 
 N_DAYS = 60
-BUILD_DAYS = 21
+BUILD_DAYS = 35  # 与 settings.yaml training.initial.build_days 对齐
 START_DATE = "2026-01-01"
 
 # 正常基线（均值, 标准差）——与前面场景一致（6维）
@@ -224,8 +224,8 @@ def run_scenario(scn: dict, config) -> dict:
             if day == BUILD_DAYS:
                 train_initial_baseline(velder, config)
             risk = res.get("risk_result") or {}
-            # 只统计正式运行期（观察期后，day29+）
-            if day >= 29:
+            # 只统计正式运行期（建档期后，day29+）
+            if day > BUILD_DAYS:
                 max_level = max(max_level, risk.get("risk_level") or 0)
                 for rt in risk.get("risk_types", []):
                     active_types.add(rt.get("risk_key"))

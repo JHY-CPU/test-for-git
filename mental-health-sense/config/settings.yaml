@@ -21,10 +21,10 @@ gru:
 # ===== 训练参数 =====
 training:
   initial:
-    build_days: 21           # 建档期天数（→ build_days-7 个训练样本）。14 天(7样本)过拟合明显：
-                             # 多种子实验中训练残差仅为留出残差的一半，单天静态判定 FPR 高；
-                             # 提到 21 天(14样本)后过拟合 gap 减 1/3、FPR 大幅下降、检出率不变。
-                             # 代价是多等 7 天建档盲区（有冷启动兜底顶着）。详见 docs/TRAINING.md。
+    build_days: 35           # 建档期天数（→ build_days-7 个训练样本）。35 天(28样本)：
+                             # 21 样本时过拟合 gap 仍偏大，提到 28 样本后过拟合基本收敛；
+                             # EWMA 初始 n=28（>min_samples=20），动态阈值第一天就稳定。
+                             # 代价：建档盲期从 4 周变 5 周。详见 docs/TRAINING.md。
     epochs: 150
     lr: 0.001
     patience: 20             # early-stopping：连续N轮loss无改善则提前停止（防小样本过拟合）
@@ -67,8 +67,8 @@ risk:
     attention: 1
     warning: 3
     severe: 5
-  # 冷启动观察期（训练后多少天内不触发报警，仅记录）
-  cold_start_observation_days: 7
+  # 冷启动观察期（已取消：建档期延长到 35 天，EWMA 初始 =28 样本，动态阈值直接稳定）
+  cold_start_observation_days: 0
 
 # ===== 调度 =====
 scheduler:
