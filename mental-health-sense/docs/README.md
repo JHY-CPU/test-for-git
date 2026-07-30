@@ -5,20 +5,20 @@
 ## 系统特点
 
 - **单人系统**：面向单一老人的连续监测与趋势预警
-- **单轨每日批处理**：每日读取累积的传感器数据（`data/raw/`），聚合为 6 维特征后做趋势推理与预警，无独立实时运行时
+- **双轨每日批处理**：每日读取累积的传感器数据（`data/raw/`），聚合为双轨特征（睡眠 8 维 / 社交 5 维）后**各自独立**做趋势推理与预警，无独立实时运行时
 - **克制预警**：预警仅在连续多日偏离后发出，避免单日波动过度敏感打扰家人
 - **个人化基线**：为该老人独立建模（PersonalBaselineGRU + EWMA动态阈值），"自己和自己比"
-- **多传感器融合**：睡眠雷达 + PIR/IPC + 拾音器（麦克风 VAD 统计对话轮次）
+- **多传感器融合**：小贝壳无感睡眠监测仪 + 萤石 T1C 人体移动传感器 + C6c 摄像机（边缘侧人形检测，**不出图、不采音频**）
 - **趋势判定**：连续3-5天偏离才触发预警，避免单日波动误报
 - **文件驱动数据流**：各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`，每日管道从此累积读取
 
 ---
 
-## 项目现状（v1.8）
+## 项目现状（v2.1 双轨）
 
 > 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
 
-**核心算法层已完工并验证**：123 个单元测试（12 个测试文件）全部通过；每日趋势管道（批处理：读取 `data/raw/` → 6 维特征聚合 → GRU 残差推理 → EWMA → 连续偏离判定 → 风险判定 → 预警 → 周报）已端到端打通，不依赖任何实时运行时。`docs/TODO.md` 记录的 7 项"实现落差"（P0×2 / P1×2 / P2×3）已全部收口。
+**核心算法层已完工并验证**：312 个单元测试全部通过；范围 1（链路正确性）19/19、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
 
 > ⚠️ **实现成熟度：算法是真的，硬件对接与外部服务大多还是"桩/模拟"。** 这是科研原型阶段的正常状态，但必须讲清楚，避免误以为"能上真机"：
 
@@ -88,7 +88,7 @@ mental-health-sense/
 │   ├── raw/                         # 原始传感器数据（JSON）
 │   │   ├── sleep/                   # 睡眠雷达数据（{date}.json）
 │   │   ├── activity/                # PIR + IPC活动数据（{date}.json）
-│   │   └── social/                  # 拾音器 VAD 对话数据（{date}.json，social_turns 聚合来源）
+│   │   └── camera/                  # C6c 边缘人形检测（{date}.json，copresence_min 聚合来源）
 │   ├── features/                    # 聚合后的每日特征向量（CSV）
 │   │   └── E001/features.csv        # 6维健康特征
 │   ├── baselines/                   # 该老人的个人基线模型
@@ -171,14 +171,14 @@ mental-health-sense/
 
 ## 核心架构
 
-### 单轨每日批处理
+### 双轨每日批处理
 
 | 轨道 | 频率 | 功能 | 判定依据 |
 |------|------|------|----------|
 | **每日趋势轨** | 每日02:00 | 读取累积原始数据 → 6维特征聚合 → 深度趋势分析 → 预警出口 | GRU预测 + EWMA动态阈值 |
 | **周报轨** | 周日03:00 | 汇总一周趋势生成周报 | LLM（fallback: 规则模板） |
 
-**核心理念**：系统是**单轨的每日批处理管道**，没有独立的实时采集运行时。各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`（其中 `social/` 由麦克风 VAD 采集对话轮次），每日趋势轨在累积数据上做判定后统一发出预警。所有心理风险预警仅在**连续多日偏离**后触发，避免因单日波动过度敏感、频繁打扰家人。
+**核心理念**：系统是**双轨的每日批处理管道**（睡眠轨 / 社交轨各自独立推理），没有独立的实时采集运行时。各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`（其中 `social/` 由麦克风 VAD 采集对话轮次），每日趋势轨在累积数据上做判定后统一发出预警。所有心理风险预警仅在**连续多日偏离**后触发，避免因单日波动过度敏感、频繁打扰家人。
 
 ### 数据流架构
 
@@ -218,14 +218,37 @@ data/raw/social/{date}.json     ─┘        ↓（无数据则标 missing）
 
 > **严重级为何也要幅度门槛？** Level 3 会触发社区网格员介入 + 强提醒，代价高。若仅凭连续天数升级，长达数天但每天只"擦线"越过动态阈值的低幅度偏离也会直冲最高级，与提醒级（带幅度门槛）判定不一致，且过度打扰家人和社区。因此严重级与提醒级共用 `avg_anomaly > sustained_avg` 幅度门槛。
 
-### 两种风险类型
+### 三种风险类型
 
-| 类型 | 特征信号 | 连续天数要求 |
-|------|----------|--------------|
-| **睡眠问题** | sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓ | 3天 |
-| **社交孤独** | social_turns↓ + daily_activity↓ | 5天 |
+规则采用"**必选维 + 可选池**"结构（`src/risk/rules.py`）：必选维必须全部方向性超标，
+再从可选池里凑够 `min_optional` 个，才算当天达标。
 
-> **抑郁趋势判断已移除**：原"抑郁风险"类型依赖 4 路语音声学特征（sad_ratio/avg_speed/pitch_variability/distress_events），现整体交由**外部专用抑郁模型**接入，本系统不再直接输出抑郁风险。
+| 类型 | 必选维 | 可选池 | 持续性要求 |
+|------|--------|--------|------------|
+| **睡眠稳定性** `sleep_stability` | `sleep_efficiency`↓ + `waso_min`↑ | `bed_exit_count`↑ / `sol_min`↑ / `deep_sleep_ratio`↓（取 1） | 连续 3 天 |
+| **社会连接减弱** `social_decline` | `copresence_min`↓ + `out_of_home_min`↓ + `activity_counts`↓ | 无 | 7 天窗内 5 天 |
+| **作息节律紊乱** `circadian_disruption` | `rar_amplitude`↓ + `rar_iv`↑ | `sleep_onset_clock` 双向漂移（取 1） | 连续 5 天 |
+
+**每条规则的 `threshold_ratio` 各自可配**（`config/settings.yaml`）。原则是
+**AND 的条件越多，每个条件的门槛可以越低**，联合误报率才可比：
+睡眠/节律为 1.5，`social_decline` 为 **1.0**（三项全中、无可选池）。
+
+`social_decline` 单独降到 1.0 是端到端实测逼出来的：本轨三个必选维的**变异系数
+差一个量级**（`activity_counts` CV≈13%，`copresence_min` CV≈36% 且周末 ×2.4），
+同一个 ratio 对它们不是同一件事。实测社交退缩期两者原始跌幅都在 10 倍上下
+（copresence 57→6 分钟），但 copresence 的 normalized 跌幅被自身大方差摊薄、
+残差 std 又被工作日/周末双峰抬高（残差统计是合池估计的，7 天留出段切不出两个池），
+再叠加 GRU 只看过去 7 天——异常持续到第 3 天后输入窗填满异常日、预测跟着跌，
+残差进一步收缩——z 只剩 −1.09~−1.26，恰好在 1.2 门槛两侧抖动，
+"7 天窗内 5 天"永远凑不满。
+
+降门槛的安全性由**结构**而非单维门槛提供：三项 AND 再叠加"7 天滚动窗需 5 天"。
+`TN_short_social`（社交低落仅 4 天）专门守这条线，确认没有拿误报换灵敏度。
+详见 `config/settings.yaml` 内注释。
+
+> **抑郁趋势判断已移除**：原"抑郁风险"类型依赖 4 路语音声学特征
+> （sad_ratio/avg_speed/pitch_variability/distress_events），现整体交由
+> **外部专用抑郁模型**接入，本系统不再直接输出抑郁风险。
 
 ---
 
@@ -233,15 +256,23 @@ data/raw/social/{date}.json     ─┘        ↓（无数据则标 missing）
 
 系统**不使用分类器直接判断心理疾病**，而是通过"个人化基线偏离 + 加权规则匹配 + 连续趋势确认"三层机制实现映射，刻意回避临床诊断。
 
-### 第一层：多传感器 → 6 维特征向量
+### 第一层：多传感器 → 双轨特征向量（睡眠 8 维 / 社交 5 维）
 
-三路传感器每日聚合成一条特征记录：
+传感器每日聚合成一条特征记录，再按**轨**拆成两个独立向量：
 
 ```
-睡眠雷达 ──────────► sleep_efficiency / deep_sleep_ratio / sfi / hrv_rmssd
-PIR + IPC ─────────► daily_activity
-拾音器（VAD）──────► social_turns
+睡眠轨（8 维，源：小贝壳无感睡眠监测仪）
+  小贝壳 ──────────► sleep_efficiency / waso_min / sol_min / bed_exit_count
+                     deep_sleep_ratio / sleep_onset_clock / night_hr_mean / daytime_nap_min
+
+社交轨（5 维，源：萤石 C6c 摄像机 + T1C 人体移动传感器，不含音频）
+  C6c（边缘人形检测）─► copresence_min
+  T1C + C6c 事件 ────► out_of_home_min / activity_counts / rar_amplitude / rar_iv
 ```
+
+**为什么拆两轨**：v2.0 单轨用一个 GRU 联合预测全部维度，某维剧烈异常时共享隐藏状态
+被带偏，其他维残差虚高，导致"睡眠异常顺带报社交孤独"（串味）。双轨各有独立的
+GRU 与 scaler，从结构上切断这条通道。详见 `docs/VALIDATION.md` 缺陷③。
 
 ### 第二层：GRU 个人基线 → 加权残差异常分数
 
@@ -265,8 +296,9 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 | 风险类型 | 判定逻辑 |
 |---------|---------|
-| 睡眠问题 | sleep_efficiency/deep_sleep_ratio/hrv_rmssd **向下**超标 AND sfi **向上**超标 |
-| 社交孤独 | social_turns/daily_activity **向下**超标 |
+| 睡眠稳定性 | `sleep_efficiency` **向下** AND `waso_min` **向上**（必选）+ 可选池取 1 |
+| 社会连接减弱 | `copresence_min`/`out_of_home_min`/`activity_counts` 三项全部**向下** |
+| 作息节律紊乱 | `rar_amplitude` **向下** AND `rar_iv` **向上**（必选）+ `sleep_onset_clock` 双向漂移 |
 
 激活条件（三者同时满足）：
 - 至少 1 个特征方向性超标
@@ -334,23 +366,37 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 6 个特征聚焦两条可**非接触**监测的公认通路：**自主神经失调**（睡眠 + HRV）、**行为退缩**（活动 + 社交）。抑郁相关的**精神运动迟滞**通路原由语音声学特征承载，现已移除，改由**外部专用抑郁模型**负责。
 
-### 睡眠特征（非接触睡眠雷达）
+### 睡眠轨（8 维，源：小贝壳无感睡眠监测仪）
 
-| 特征 | 异常方向 | 文献支撑 |
-|-----|---------|---------|
-| `sleep_efficiency` 睡眠效率 | ↓ | 强。睡眠障碍是抑郁诊断标准之一，证据极充分 |
-| `deep_sleep_ratio` 深睡占比 | ↓ | 强。抑郁与慢波睡眠减少高度相关 |
-| `sfi` 睡眠碎片化指数 | ↑ | 强。碎片化睡眠是老年抑郁和痴呆的早期信号 |
-| `hrv_rmssd` 心率变异性 | ↓ | **强**。多篇 meta 分析确认抑郁患者 RMSSD、HF-HRV 显著降低，反映迷走神经活性下降 |
+| 特征 | 权重 | 异常方向 | 文献支撑 |
+|-----|------|---------|---------|
+| `sleep_efficiency` 睡眠效率 | 3.0 | ↓ | 强。睡眠障碍是抑郁诊断标准之一，证据极充分 |
+| `waso_min` 入睡后觉醒时长 | 3.0 | ↑ | 强。夜间维持睡眠困难是老年抑郁的核心睡眠表型 |
+| `bed_exit_count` 离床次数 | 2.5 | ↑ | 强。夜间起床频次上升与睡眠碎片化、夜尿、焦虑相关 |
+| `sol_min` 入睡潜伏期 | 2.0 | ↑ | 中强。入睡困难与焦虑/反刍思维相关 |
+| `sleep_onset_clock` 就寝相位 | 2.0 | **any** | 中强。相位漂移（提前或延后）都提示节律失稳，无好坏方向 |
+| `deep_sleep_ratio` 深睡占比 | 1.5 | ↓ | 中。抑郁与慢波睡眠减少相关，但**受雷达分期精度限制已降权** |
+| `daytime_nap_min` 日间小睡 | 1.5 | ↑ | 中。日间补眠增多反映夜间睡眠质量下降 |
+| `night_hr_mean` 夜间平均心率 | 1.0 | ↑ | 中。**是 `hrv_rmssd` 的弱代理，不等价于 HRV**——小贝壳只给 BPM 级聚合值，拿不到逐拍间期，故只能低权重使用 |
 
-> **测量效度提示**：上述指标的**金标准是 PSG（多导睡眠图）**，本系统使用非接触雷达估算。雷达能否精确复现 PSG 级别的 RMSSD 和深睡分期，需要额外的设备验证实验。特征**选择**有据，特征**测量**精度需实测。
+> **测量效度提示**：上述指标的**金标准是 PSG（多导睡眠图）**，本系统使用非接触监测估算。
+> 设备能否复现 PSG 级别的深睡分期，需额外的设备验证实验。特征**选择**有据，特征**测量**精度需实测。
+> `night_hr_mean` 替代 `hrv_rmssd` 是**设备能力所限的降级**，已如实降权到 1.0 并在
+> `adapters/xiaobeike.py` 内注明，不宣称等价于 HRV。
 
-### 行为特征
+### 社交轨（5 维，源：萤石 C6c 摄像机 + T1C 人体移动传感器，不含音频）
 
-| 特征 | 异常方向 | 文献支撑 |
-|-----|---------|---------|
-| `daily_activity` 日间活动量 | ↓ | 强。体动计记录（actigraphy）研究支持活动量下降与抑郁相关 |
-| `social_turns` 对话轮次 | ↓ | **强**（权重最高 = 3.0）。社交退缩是抑郁和老年孤独的核心行为标志 |
+| 特征 | 权重 | 异常方向 | 文献支撑 |
+|-----|------|---------|---------|
+| `copresence_min` 共处时长 | 3.0 | ↓ | 中强。本轨社会接触的**唯一**指标（边缘侧人形检测，不出图不传音） |
+| `rar_amplitude` 节律振幅 | 3.0 | ↓ | 强。RAR（rest-activity rhythm）振幅下降是抑郁的稳健体动学标志 |
+| `rar_iv` 节律日内变异 | 2.5 | ↑ | 强。IV 上升反映作息碎片化 |
+| `activity_counts` 活动计数 | 2.5 | ↓ | 强。体动计（actigraphy）研究支持活动量下降与抑郁相关 |
+| `out_of_home_min` 疑似外出时长 | 2.5 | ↓ | 中强。**测量为推断**（由室内无人推断外出），命名保留"疑似"以示不确定 |
+
+> **对话轮次已移除**：v2.0 的 `social_turns` 依赖拾音器 VAD，音频链路整体删除后，
+> 社会接触改由 C6c 边缘侧人形检测的 `copresence_min` 承担。这是**隐私换指标粒度**的取舍——
+> 不再采集音频，代价是拿不到"是否在交谈"，只能知道"是否有人同处一室"。
 
 ---
 
@@ -375,7 +421,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 | ID | 时间线 | 注入异常 | 验证目标 |
 |------|--------|----------|----------|
-| E001 | 建档1-21 / 观察22-28 / 正常29-39 / **异常40-46** / 恢复47-60 | Day 40-46 睡眠恶化特征注入（sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓），已避开建档期+观察期 | 连续偏离 → 逐级升到3级预警（睡眠问题）→ 恢复降级 |
+| E001 | 建档 1-35 / 正常 36-39 / **睡眠异常 40-46** / 恢复 47-49 / **社交异常 50-58** / 恢复 59-60 | Day 40-46 睡眠恶化（`sleep_efficiency`↓ + `waso_min`↑ + `bed_exit_count`↑）；Day 50-58 社交退缩（`copresence_min`↓ + `out_of_home_min`↓ + `activity_counts`↓），均避开建档期 | 连续偏离 → 升到 L3 → 恢复降级；**两段异常错开以验证双轨信号隔离** |
 
 > 接入真实老人数据时，可沿用 `E001` 这个 ID，或在 `generate_simulation_data.py` 的
 > `ELDER_ID` 处改成你自己的编号——它只是 `data/features/{ID}/`、`data/raw/*/{ID}/`
@@ -431,47 +477,72 @@ python -m pytest -v
 
 ### 每日特征向量（features.csv）
 
-> 顺序即 `FEATURE_NAMES`：sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd, daily_activity, social_turns。
+> 顺序即 `SLEEP_FEATURES` / `SOCIAL_FEATURES`（`src/baseline/scaler_utils.py`）。
 
-| 特征名 | 来源 | 说明 |
-|--------|------|------|
-| sleep_efficiency | 睡眠雷达 | 睡眠效率 [0, 1] |
-| deep_sleep_ratio | 睡眠雷达 | 深睡占比 [0, 1] |
-| sfi | 睡眠雷达 | 睡眠碎片化指数 |
-| hrv_rmssd | 睡眠雷达 | 心率变异性（自主神经活性） |
-| daily_activity | PIR + IPC | 日间活动量（归一化） |
-| social_turns | 拾音器（VAD） | 对话轮次（社交参与度） |
+| 轨 | 特征名 | 来源 | 说明 |
+|----|--------|------|------|
+| 睡眠 | sleep_efficiency | 小贝壳 | 睡眠效率 [0, 1] |
+| 睡眠 | waso_min | 小贝壳 | 入睡后觉醒总时长（分钟） |
+| 睡眠 | sol_min | 小贝壳 | 入睡潜伏期（分钟） |
+| 睡眠 | bed_exit_count | 小贝壳 | 夜间离床次数 |
+| 睡眠 | deep_sleep_ratio | 小贝壳 | 深睡占比 [0, 1] |
+| 睡眠 | sleep_onset_clock | 小贝壳 | 就寝时刻（自 20:00 起的分钟数，跨零点连续） |
+| 睡眠 | night_hr_mean | 小贝壳 | 夜间平均心率（bpm，HRV 的弱代理） |
+| 睡眠 | daytime_nap_min | 小贝壳 | 日间小睡时长（分钟） |
+| 社交 | copresence_min | C6c（边缘人形检测） | 共处时长（分钟） |
+| 社交 | out_of_home_min | T1C + C6c | 疑似外出时长（分钟，由室内无人推断） |
+| 社交 | rar_amplitude | T1C + C6c | 昼夜节律振幅 [0, 1] |
+| 社交 | rar_iv | T1C + C6c | 节律日内变异 |
+| 社交 | activity_counts | T1C + C6c | 日间活动计数 |
 
 ### 每日推理结果（daily_inference/*.json）
+
+**顶层按轨分块**，两轨各自一套分数与阈值（节选自真实输出）：
 
 ```json
 {
   "elder_id": "E001",
-  "date": "2026-07-15",
-  "anomaly_score": 1.0569,
-  "static_threshold": 1.1808,
-  "ewma_threshold": 1.1808,
-  "dynamic_threshold": 1.1808,
-  "is_deviation": false,
-  "feature_residuals": {
-    "sleep_efficiency": 1.3203,
-    "deep_sleep_ratio": 1.174,
-    "sfi": 2.2818,
-    "hrv_rmssd": 1.4244,
-    "daily_activity": 1.7745,
-    "social_turns": 0.6226
+  "day_key": "2026-08-29",
+  "sleep": {
+    "track": "sleep",
+    "anomaly_score": 1.0276,
+    "static_threshold": 2.2486,
+    "ewma_threshold": 5.6056,
+    "dynamic_threshold": 2.2486,
+    "is_deviation": false,
+    "signed_residuals": { "sleep_efficiency": 0.3879, "waso_min": -0.8794, "...": 0 },
+    "abs_residuals":    { "sleep_efficiency": 0.3879, "waso_min":  0.8794, "...": 0 },
+    "signed_z":         { "sleep_efficiency": 0.5258, "waso_min": -0.8236, "...": 0 },
+    "signed_available": true,
+    "ewma_pool": "default",
+    "ewma_n": 53,
+    "ewma_min_samples": 20,
+    "ewma_frozen": false,
+    "in_observation_period": false,
+    "status": "success"
   },
-  "consecutive_deviation_days": 0,
-  "ewma_n": 8,
-  "ewma_mean": 0.4595,
-  "ewma_std": 0.0574,
-  "data_quality": "valid",
-  "status": "success",
-  "in_observation_period": false
+  "social": {
+    "track": "social",
+    "anomaly_score": 0.9538,
+    "dynamic_threshold": 2.3347,
+    "is_deviation": false,
+    "ewma_pool": "weekday",
+    "status": "success"
+  }
 }
 ```
 
-> 说明：推理层输出的是**加权残差异常分数（anomaly_score）与多档阈值**，而非直接预测值。`feature_residuals` 为各特征的标准化残差（6 维健康特征）。`status` 取值：`success` / `cold_start` / `cold_start_fallback`（GRU未就绪，走滑动均值兜底检测）/ `data_insufficient` / `observation` / `error`。风险等级与风险类型由 `src/risk/judge.py` 在推理结果之上单独判定。
+> 说明：推理层输出的是**加权残差异常分数（anomaly_score）与多档阈值**，而非直接预测值。
+>
+> - **三套残差**：`abs_residuals` 用于合成 `anomaly_score`（方向无关）；`signed_z` 保号，
+>   供 `rules.py` 做方向性判定与 `judge.py` 的方向闸门。二者分工不能混——
+>   用 abs 判方向会让"好转"和"恶化"无法区分（见 `docs/VALIDATION.md` 缺陷⑤）。
+> - **`ewma_pool`**：社交轨分 `weekday`/`weekend` 两池（周末有子女探访效应）；睡眠轨单池 `default`。
+> - **`ewma_frozen`**：当天是否因判偏离而冻结了基线更新（见 `docs/VALIDATION.md` 缺陷④）。
+> - `status` 取值：`success` / `cold_start` / `cold_start_fallback`（GRU 未就绪，走滑动均值兜底）/
+>   `data_insufficient` / `observation` / `error`。
+> - 风险**等级**与风险**类型**由 `src/risk/judge.py` 在两轨推理结果之上单独判定，
+>   **每轨各自算等级、取较高者**，绝不跨轨比较绝对分。
 
 > 某自然日社交数据缺失时，聚合链路返回中性默认值并标记 `data_quality="missing"`，交由每日轨的校验/填充链路据实降级，而非用假的"正常值"喂进 GRU 掩盖真实偏离。
 
@@ -611,7 +682,7 @@ MIT
 ---
 
 **最后更新**：2026-07-29  
-**项目版本**：v1.8（在 v1.7 基础上：**移除抑郁趋势判断 + 4 路语音声学维**（sad_ratio/avg_speed/pitch_variability/distress_events）**+ SenseVoice 声学子系统**（`src/realtime/*`、`src/unified_*.py`、`adapters/sensevoice.py` 已删除）；健康特征 **10→6 维**（sleep_efficiency / deep_sleep_ratio / sfi / hrv_rmssd / daily_activity / social_turns），风险类型 **3→2**（睡眠问题 + 社交孤独）；social_turns 改由拾音器 VAD 路径提供（该路径保留），social_isolation 不再依赖 sad_ratio；抑郁判断改由**外部专用模型**接入。）
+**项目版本**：v2.1（在 v1.8 基础上：**单轨 6 维 → 双轨（睡眠 8 维 / 社交 5 维）**，两轨各有独立 GRU 与 scaler，从结构上切断跨类型"串味"；风险类型 2→3（睡眠稳定性 / 社会连接减弱 / 作息节律紊乱），规则改为"必选维 + 可选池"结构，`threshold_ratio` 按规则可配；`social_turns` 随音频链路删除，社会接触改由 C6c 边缘侧人形检测的 `copresence_min` 承担；`hrv_rmssd` 降级为 `night_hr_mean` 弱代理并降权；建档期 21→35 天、取消冷启动观察期；EWMA 增加**偏离日冻结**（上限 14 天），风险判定增加**方向闸门**，`validate_synthetic.py` 补固定 torch 种子——修复了三个一层压一层的缺陷：持续性异常被自适应基线掩盖、好转被判成"严重风险"、以及单维门槛对变异系数不同的维不等价（`copresence_min` 的 z 在门槛上抖动、社交崩塌报不出类型），详见 `docs/VALIDATION.md` 缺陷④⑤⑥。）
 
 > v1.7 要点（在 v1.6 基础上）：①冷启动建档期 14→21 天并提为可配置项 `build_days`，附 20-seed 过拟合对比实验；②修复风险类型分类两处缺陷——"永不激活"（日志不写回 risk_types）与"正常日误激活"（类型判定挂靠 is_deviation）；③新增合成数据验证脚本 `validate_synthetic.py`（范围1跑通）与 `validate_discriminative.py`（范围2判别力，含真实噪声+混淆项）；④新增 `docs/TRAINING.md` GRU 训练详解。⑤修复模拟数据异常注入天数（25-30 → 40-46）与总天数（50 → 60），避开新建档期+观察期。测试 134 全绿。已知待办：跨类型"串味"（共享GRU溢出）、真实传感器采集/推送仍为桩。文档：本 README（总览+现状）、`docs/TRAINING.md`（训练详解）、`docs/TODO.md`、`docs/VALIDATION.md`（三层验证+§7执行记录）
 

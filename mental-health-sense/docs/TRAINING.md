@@ -42,24 +42,28 @@
 
 `src/baseline/gru_model.py::PersonalBaselineGRU`
 
+**★ 双轨：睡眠轨与社交轨各训一个独立模型**，结构相同、维度不同。
+两轨不共享权重也不共享 scaler——这正是切断"串味"的关键（见 `docs/VALIDATION.md` 缺陷③）。
+
 ```
-输入 (batch, 7, 6)           过去 7 天 × 6 维健康特征
+                睡眠轨 D=8                     社交轨 D=5
+输入 (batch, 7, D)          过去 7 天 × 该轨 D 维特征
    │
    ▼
-GRU(input=6, hidden=16, layers=1)    → (batch, 7, 16)
+GRU(input=D, hidden=16, layers=1)    → (batch, 7, 16)
    │  取最后时刻隐藏状态
    ▼
 Dropout(0.2)                 → (batch, 16)
    │
    ▼
-Linear(16 → 6)               → (batch, 6)    第 8 天的 6 维预测
+Linear(16 → D)               → (batch, D)    第 8 天的 D 维预测
 ```
 
 **超参数**（`config/settings.yaml` 的 `gru` 段）：
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| `feature_dim` | 6 | 6 维健康特征（已移除时间编码） |
+| `feature_dim` | 8 / 5 | 按轨取：睡眠 8 维、社交 5 维（不含时间编码） |
 | `hidden_dim` | 16 | 隐藏层维度，刻意取小以防过拟合 |
 | `num_layers` | 1 | 单层 GRU |
 | `window` | 7 | 用过去 7 天预测第 8 天 |
@@ -67,17 +71,19 @@ Linear(16 → 6)               → (batch, 6)    第 8 天的 6 维预测
 
 **参数量拆解（实测总计 1254）：**
 
-| 模块 | 形状 | 参数数 |
-|------|------|--------|
-| `gru.weight_ih_l0` | (48, 6) | 288 |
-| `gru.weight_hh_l0` | (48, 16) | 768 |
-| `gru.bias_ih_l0` | (48,) | 48 |
-| `gru.bias_hh_l0` | (48,) | 48 |
-| `fc.weight` | (6, 16) | 96 |
-| `fc.bias` | (6,) | 6 |
-| **合计** | | **1254** |
+| 模块 | 形状 | 睡眠轨 (D=8) | 社交轨 (D=5) |
+|------|------|--------------|--------------|
+| `gru.weight_ih_l0` | (48, D) | 384 | 240 |
+| `gru.weight_hh_l0` | (48, 16) | 768 | 768 |
+| `gru.bias_ih_l0` | (48,) | 48 | 48 |
+| `gru.bias_hh_l0` | (48,) | 48 | 48 |
+| `fc.weight` | (D, 16) | 128 | 80 |
+| `fc.bias` | (D,) | 8 | 5 |
+| **合计** | | **1384** | **1189** |
 
 > GRU 的 48 = 3 × 16，对应 GRU 的重置门/更新门/候选状态三组权重。
+> 两轨合计 2573 个参数——仍然极小，这是刻意的：单个老人只有几十天数据，
+> 模型必须小到不会把噪声记成规律。
 
 ---
 
@@ -85,13 +91,17 @@ Linear(16 → 6)               → (batch, 6)    第 8 天的 6 维预测
 
 ### 3.1 数据来源与特征
 
-训练数据是**该老人自己的**每日 6 维特征向量，从 `data/features/{elder_id}/features.csv`
-读取，只取 `data_quality == "valid"` 的天。6 维特征见 `src/baseline/scaler_utils.py::FEATURE_NAMES`：
+训练数据是**该老人自己的**每日特征向量，从 `data/features/{elder_id}/features.csv`
+读取，只取 `data_quality == "valid"` 的天。两轨特征见
+`src/baseline/scaler_utils.py::SLEEP_FEATURES` / `SOCIAL_FEATURES`：
 
 ```
-睡眠(4): sleep_efficiency, deep_sleep_ratio, sfi, hrv_rmssd
-行为(2): daily_activity, social_turns
+睡眠轨(8): sleep_efficiency, waso_min, sol_min, bed_exit_count,
+           deep_sleep_ratio, sleep_onset_clock, night_hr_mean, daytime_nap_min
+社交轨(5): copresence_min, out_of_home_min, rar_amplitude, rar_iv, activity_counts
 ```
+
+两轨从同一份 `features.csv` 取各自的列，各自独立走 scaler → 滑窗 → 训练 → 留出段统计。
 
 ### 3.2 样本如何构造：7→1 滑动窗口
 
@@ -373,26 +383,34 @@ CPU 是这个规模模型的最优选择。
 
 | # | 基线 | 作用 | 数量 | 文件 |
 |---|------|------|------|------|
-| 1 | **GRU 个人基线** | 预测"今天该什么样"（输出 6 维） | 1 个模型 | `gru.pth`（+`gru.prev.pth` 备份） |
-| 2 | **残差基线** | "平时预测能差多少"的尺子 | 每维一条，6 条 | `residual_stats.pkl` |
-| 3 | **EWMA 动态基线** | 总异常分的动态阈值 | 1 条（标量） | `ewma.pkl` |
-| 4 | **归一化基线 (Scaler)** | 把 6 维拉到同一量纲的预处理基准 | 每维一条，6 条 | `scaler.pkl` |
+| 1 | **GRU 个人基线** | 预测"今天该什么样" | **每轨一个**（睡眠 8 维 / 社交 5 维） | `gru_sleep.pth` / `gru_social.pth`（+`.prev` 备份） |
+| 2 | **残差基线** | "平时预测能差多少"的尺子 | 每轨每维一条（8 + 5） | `residual_stats_<track>.pkl` |
+| 3 | **EWMA 动态基线** | 该轨总异常分的动态阈值 | 睡眠 1 池；社交 2 池（工作日/周末） | `ewma_<track>[_<pool>].pkl` + `_state.pkl` |
+| 4 | **归一化基线 (Scaler)** | 把各维拉到同一量纲的预处理基准 | 每轨每维一条（8 + 5） | `scaler_<track>.pkl` |
 | 5 | **冷启动兜底基线** | GRU 就绪前（前 21 天）临时顶班 | 即时计算，无文件 | —（`cold_start_fallback.py`） |
 
 > `baseline_meta.json` 不是基线，是配套元信息（训练日期、观察期计数基准）。
 
-**判定主链（用到 1/2/3）**：GRU 基线(1) 预测 → 减真实值得残差 → 残差基线(2) 判该维
-反不反常 → 6 维加权合成总分 → 与 EWMA 基线(3) 的动态阈值比较。归一化基线(4) 在最前
-统一量纲；冷启动兜底(5) 只在头三周顶班。
+**判定主链（用到 1/2/3，两轨各走一遍）**：GRU 基线(1) 预测 → 减真实值得残差 →
+残差基线(2) 判该维反不反常 → 该轨各维加权合成总分 → 与 EWMA 基线(3) 的动态阈值比较。
+归一化基线(4) 在最前统一量纲；冷启动兜底(5) 只在建档期顶班。
+
+> **两轨绝不跨轨比较绝对分**：睡眠 8 维与社交 5 维的权重和不同、残差尺度不同，
+> 取最大或求平均都没有统计意义。等级判定是"每轨各自算，取较高者"（`judge.py`）。
+>
+> EWMA 在偏离日**冻结更新**（`is_deviation=True` 时不喂），否则基线会学会异常、
+> 阈值追平分数，持续性异常被自己的历史掩盖。详见 `docs/VALIDATION.md` 缺陷④。
 
 ### 10.1 归一化基线（Scaler）是什么
 
-**问题**：6 个特征量纲天差地别——`sleep_efficiency` 是 0~1 的小数，`hrv_rmssd` 是几十的数，
-`daily_activity` 是几千。直接混在一起算残差，大数值特征会天然主导，小数值特征被淹没。
+**问题**：各特征量纲天差地别——`sleep_efficiency` 是 0~1 的小数，`night_hr_mean` 是几十，
+`waso_min` / `copresence_min` 是几十到几百。直接混在一起算残差，大数值特征会天然主导，
+小数值特征被淹没。
 
 **做法**：Scaler 记下建档期每一维的"平均值"和"波动幅度"，把每个特征都换算成
 "偏离自己均值几个标准差"这种**统一尺度**（正数=高于平时，负数=低于平时，量级都在 ±3 上下）。
-之后所有预测、残差都在这个统一尺度上算，6 维才能公平比较、加权。
+之后所有预测、残差都在这个统一尺度上算，同轨各维才能公平比较、加权。
+**两轨各有自己的 scaler**，互不影响。
 
 **关键**：Scaler 在建档期拟合后**永久冻结**，推理只用不重算。因为 GRU 是在这把尺子上
 学到"正常态"的；若换新数据重新拟合，尺子会随数据漂移，残差量纲跟着变，异常检测直接失真
