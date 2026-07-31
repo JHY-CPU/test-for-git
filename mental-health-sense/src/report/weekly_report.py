@@ -25,6 +25,9 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 找目标周时往回捞多少天的日志。给足冗余量，让"补算某个历史周"也能命中。
+_LOOKBACK_DAYS = 60
+
 
 def generate_weekly_report(
     elder_id: str,
@@ -62,24 +65,33 @@ def generate_weekly_report(
 
     logger.info(f"周报生成: elder_id={elder_id}, {week_start_str} -> {week_end_str}")
 
-    # 1. 加载本周推理结果
+    # 1. 加载推理结果。
+    # 取的天数要明显多于 7：load_daily_results 拿的是最近 N 个**文件**，
+    # 只取 7 个的话，一旦最新日志比目标周更新（补算历史周、或最近几天没跑），
+    # 目标周的记录根本不在候选里。
     try:
-        daily_results = load_daily_results(elder_id, n_days=7)
+        daily_results = load_daily_results(elder_id, n_days=_LOOKBACK_DAYS)
     except Exception:
         daily_results = []
-
-    if not daily_results:
-        report = _empty_report(elder_id, week_start_str, week_end_str)
-        _save_report(elder_id, week_start_str, report)
-        return report
 
     # 过滤到本周范围内（day_key 为新字段名，兼容旧日志的 date）
     week_results = [
         r for r in daily_results
         if week_start_str <= (r.get("day_key") or r.get("date") or "") <= week_end_str
     ]
+
+    # ★ 本周确实没有数据时出"数据不足"周报，绝不拿别的周顶替。
+    # 旧实现在这里回落到 daily_results[-7:]，于是周报**标题写着这一周、
+    # 正文却是另一周的数据**——实测标题 2026-07-25~07-31，内容是 8 月下旬
+    # 社交异常期的分。家属看到的是一份日期与内容对不上的报告，
+    # 而这正是"测不到"被静默呈现成"有结论"的又一种形态。
     if not week_results:
-        week_results = daily_results[-7:]
+        logger.warning(
+            f"  └─ {week_start_str}~{week_end_str} 无推理记录，出数据不足周报"
+        )
+        report = _empty_report(elder_id, week_start_str, week_end_str)
+        _save_report(elder_id, week_start_str, report)
+        return report
 
     # 2. 计算各维度趋势
     trends = _compute_weekly_trends(week_results)
