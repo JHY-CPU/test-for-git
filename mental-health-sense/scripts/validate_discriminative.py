@@ -82,22 +82,29 @@ NON_NEGATIVE = {
 }
 
 
-def _gen_series(baseline: dict, order: list[str], seed: int, weekend: bool) -> np.ndarray:
-    """生成 (N_DAYS, n_features) 正常序列：AR(1) 噪声 + 可选周末效应。"""
+def _gen_series(
+    baseline: dict, order: list[str], seed: int, weekend: bool, n_days: int = N_DAYS
+) -> np.ndarray:
+    """生成 (n_days, n_features) 正常序列：AR(1) 噪声 + 可选周末效应。
+
+    n_days 走参数而非直接读模块常量 N_DAYS：长周期场景要跑 100+ 天，
+    若靠改全局常量实现，run_scenario 里跑完一个长场景后常量已被改掉，
+    后续短场景会继承上一个场景的天数（跨场景污染，且只在特定顺序下暴露）。
+    """
     rng = np.random.default_rng(seed)
     start = datetime.strptime(START_DATE, "%Y-%m-%d")
-    series = np.zeros((N_DAYS, len(order)))
+    series = np.zeros((n_days, len(order)))
 
     for i, name in enumerate(order):
         mean, std = baseline[name]
-        noise = np.zeros(N_DAYS)
-        for d in range(N_DAYS):
+        noise = np.zeros(n_days)
+        for d in range(n_days):
             innov = rng.normal(0, std * np.sqrt(1 - AR1_RHO ** 2))
             noise[d] = AR1_RHO * noise[d - 1] + innov if d else rng.normal(0, std)
         series[:, i] = mean + noise
 
         if weekend and name in WEEKEND_FACTORS:
-            for d in range(N_DAYS):
+            for d in range(n_days):
                 if (start + timedelta(days=d)).weekday() >= 5:
                     series[d, i] *= WEEKEND_FACTORS[name]
 
@@ -116,7 +123,7 @@ def _clip(series: np.ndarray, order: list[str]) -> np.ndarray:
 
 
 def apply_injection(
-    sleep: np.ndarray, social: np.ndarray, spec: dict, seed: int
+    sleep: np.ndarray, social: np.ndarray, spec: dict, seed: int, n_days: int = N_DAYS
 ) -> tuple[np.ndarray, np.ndarray]:
     """把异常注入两轨序列。spec 里 features 按轨分组。"""
     if not spec:
@@ -137,7 +144,7 @@ def apply_injection(
         for name, target in feats.items():
             i = idx[name]
             std = base[name][1]
-            for day in range(start - 1, min(end, N_DAYS)):
+            for day in range(start - 1, min(end, n_days)):
                 if typ == "block":
                     arr[day, i] = target + rng.normal(0, std * 0.25)
                 elif typ == "drift":
@@ -289,6 +296,56 @@ SCENARIOS = [
     },
 ]
 
+# ---------- 长周期慢坡（诊断用，默认不跑、不计分）----------
+#
+# 为什么需要这一组：现有 9 个场景最长跨度 11 天，证明的是"能抓阶跃"。
+# 而老年抑郁的典型形态是数周到数月的缓慢退行。A1 猜想是——每周微调会剔除
+# "已判偏离的天"，但缓慢下滑每天都不够判偏离，于是被当正常数据学进基线，
+# 形成正反馈（学进去 → 基线更低 → 下一步更难判偏离）。
+#
+# 四个场景终点幅度**完全相同**（效率 0.88→0.62 等），只有到达时长不同，
+# 所以横向比较能直接读出"坡越缓是否越晚检出 / 是否最终失效"。
+# 全部带 weekly_retrain=True——不接微调就复现不出上面那条链路。
+#
+# PERM_step 是对照组，必须有：若只看 DRIFT_90 报不出来，无法区分
+# "慢坡导致漏报"与"EWMA 冻结上限 14 天后正常重新基线化"（后者是设计意图）。
+# 阶跃组能报、慢坡组报不出，才能把结论归因到坡度而非重新基线化。
+_DRIFT_TARGET = {
+    "sleep_efficiency": 0.62, "waso_min": 110.0,
+    "bed_exit_count": 5.0, "sol_min": 55.0,
+}
+
+DRIFT_SCENARIOS = [
+    {
+        "id": "DRIFT_30", "kind": "DX", "days": 80, "weekly_retrain": True,
+        "desc": "慢坡 30 天：单日增量约为 11 天场景的 1/3",
+        "inject": {"type": "drift", "start": 40, "end": 70,
+                   "features": {"sleep": dict(_DRIFT_TARGET)}},
+        "expect_active": [], "expect_silent": [], "expect_detect": None,
+    },
+    {
+        "id": "DRIFT_60", "kind": "DX", "days": 110, "weekly_retrain": True,
+        "desc": "慢坡 60 天：单日增量约为 11 天场景的 1/6",
+        "inject": {"type": "drift", "start": 40, "end": 100,
+                   "features": {"sleep": dict(_DRIFT_TARGET)}},
+        "expect_active": [], "expect_silent": [], "expect_detect": None,
+    },
+    {
+        "id": "DRIFT_90", "kind": "DX", "days": 140, "weekly_retrain": True,
+        "desc": "慢坡 90 天：单日增量约为 11 天场景的 1/9（最接近临床形态）",
+        "inject": {"type": "drift", "start": 40, "end": 130,
+                   "features": {"sleep": dict(_DRIFT_TARGET)}},
+        "expect_active": [], "expect_silent": [], "expect_detect": None,
+    },
+    {
+        "id": "PERM_step", "kind": "DX", "days": 140, "weekly_retrain": True,
+        "desc": "对照组：阶跃后永久维持 90 天（预期先报、后随重新基线化转静默）",
+        "inject": {"type": "block", "start": 40, "end": 130,
+                   "features": {"sleep": dict(_DRIFT_TARGET)}},
+        "expect_active": [], "expect_silent": [], "expect_detect": None,
+    },
+]
+
 
 def cleanup(velder: str):
     root = get_project_root() / "data"
@@ -309,12 +366,16 @@ def run_scenario(scn: dict, config) -> dict:
     import torch
 
     import scripts.generate_simulation_data as gen
-    from src.baseline.trainer import train_all_tracks
+    from src.baseline.trainer import retrain_all_tracks, train_all_tracks
     from src.scheduler.daily_job import load_raw_sensors, run_daily_pipeline
 
     velder = "D_" + scn["id"]
     cleanup(velder)
     root = get_project_root()
+
+    # 长周期场景可以自定天数与"是否每周微调"，缺省与原有场景完全一致。
+    n_days = scn.get("days", N_DAYS)
+    do_retrain = scn.get("weekly_retrain", False)
 
     # 用 hashlib 而非内置 hash()：内置 hash() 受 PYTHONHASHSEED 随机化影响，
     # 每次进程启动结果不同，会让通过数在场景间来回飘。md5 是确定性的。
@@ -322,15 +383,17 @@ def run_scenario(scn: dict, config) -> dict:
     # GRU 初始权重也要固定，否则边界场景的通过/不通过会翻转。
     torch.manual_seed(seed)
 
-    sleep = _gen_series(SLEEP_BASELINE, SLEEP_FEATURES, seed, weekend=False)
-    social = _gen_series(SOCIAL_BASELINE, SOCIAL_FEATURES, seed + 1, weekend=True)
-    sleep, social = apply_injection(sleep, social, scn.get("inject"), seed)
+    sleep = _gen_series(SLEEP_BASELINE, SLEEP_FEATURES, seed, weekend=False, n_days=n_days)
+    social = _gen_series(
+        SOCIAL_BASELINE, SOCIAL_FEATURES, seed + 1, weekend=True, n_days=n_days
+    )
+    sleep, social = apply_injection(sleep, social, scn.get("inject"), seed, n_days=n_days)
 
     start = datetime.strptime(START_DATE, "%Y-%m-%d")
     original = gen.ELDER_ID
     gen.ELDER_ID = velder
     try:
-        for day in range(N_DAYS):
+        for day in range(n_days):
             date_dt = start + timedelta(days=day)
             day_key = date_dt.strftime("%Y-%m-%d")
             # 小时序列只作诊断落盘用（aggregator 直接读 rar_* 标量），
@@ -347,8 +410,14 @@ def run_scenario(scn: dict, config) -> dict:
     max_level = 0
     active_types: set[str] = set()
     track_dev = {"sleep": 0, "social": 0}
+    dev_days: list[int] = []      # 睡眠轨判偏离的天号，用于算检出延迟/是否失效
+    # sleep_efficiency 的 signed_z 轨迹。为什么记这个而不是 GRU 预测值：
+    # 推理返回值里没有 predicted 字段（只有残差与 z）。而"基线学会漂移"的
+    # 直接signature 恰好就是 z 趋零——原始值一路下跌，z 却越来越小，
+    # 说明模型把下滑当成了新常态。比反推预测值更贴题。
+    z_eff: list[float] = []
     try:
-        for day in range(1, N_DAYS + 1):
+        for day in range(1, n_days + 1):
             day_key = (start + timedelta(days=day - 1)).strftime("%Y-%m-%d")
             res = run_daily_pipeline(
                 velder, day_key, raw_data=load_raw_sensors(velder, day_key), config=config
@@ -359,6 +428,12 @@ def run_scenario(scn: dict, config) -> dict:
             if day <= BUILD_DAYS:
                 continue
 
+            # ★ A1 复现的关键：把每周微调真正接进循环。
+            # 缓慢下滑每天都不够判偏离 → 不被 exclude_deviation 剔除 →
+            # 作为"正常数据"被学进基线。不接微调就复现不出这条链路。
+            if do_retrain and (day - BUILD_DAYS) % 7 == 0:
+                retrain_all_tracks(velder, config)
+
             risk = res.get("risk_result") or {}
             max_level = max(max_level, risk.get("risk_level") or 0)
             for rt in risk.get("risk_types", []):
@@ -367,14 +442,51 @@ def run_scenario(scn: dict, config) -> dict:
             for track in track_dev:
                 if (inf.get(track) or {}).get("is_deviation"):
                     track_dev[track] += 1
+            sl = inf.get("sleep") or {}
+            if sl.get("is_deviation"):
+                dev_days.append(day)
+            z = (sl.get("signed_z") or {}).get("sleep_efficiency")
+            if z is not None:
+                z_eff.append((day, float(z)))
     finally:
         cleanup(velder)
 
-    return {"max_level": max_level, "active_types": active_types, "track_dev": track_dev}
+    return {
+        "max_level": max_level,
+        "active_types": active_types,
+        "track_dev": track_dev,
+        "dev_days": dev_days,
+        "z_eff": z_eff,
+        "n_days": n_days,
+    }
+
+
+def describe_drift(scn: dict, obs: dict) -> str:
+    """长周期场景的诊断行：检出延迟 / 是否失效 / z 是否趋零。"""
+    inj = scn["inject"]
+    onset, end = inj["start"], inj["end"]
+    devs = [d for d in obs["dev_days"] if d >= onset]
+    if not devs:
+        head = "全程未检出"
+    else:
+        first = devs[0]
+        last = devs[-1]
+        # 异常仍在持续、但最后一次判偏离距异常结束还差很远 → 检出中途失效
+        lost = end - last
+        head = f"首检 day{first}（延迟 {first - onset} 天）/ 末检 day{last}"
+        if lost >= 14:
+            head += f" → 异常仍持续但已静默 {lost} 天"
+    zs = [z for d, z in obs["z_eff"] if onset <= d <= end]
+    if zs:
+        n = max(1, len(zs) // 3)
+        head += f" | z 首段 {sum(zs[:n])/n:+.2f} → 末段 {sum(zs[-n:])/n:+.2f}"
+    return f"{head} | 偏离 {len(devs)} 天 / 异常 {end - onset + 1} 天"
 
 
 def evaluate(scn: dict, obs: dict) -> tuple[bool, str]:
-    """对照期望打分。KM 场景只记录，不判失败。"""
+    """对照期望打分。KM / DX 场景只记录，不判失败。"""
+    if scn["kind"] == "DX":
+        return True, describe_drift(scn, obs)
     if scn["kind"] == "KM":
         return True, f"已知漏报（预期行为）：最高 L{obs['max_level']}"
 
@@ -406,12 +518,20 @@ TYPE_ABBR = {
 def main():
     parser = argparse.ArgumentParser(description="合成数据判别力验证（范围2，双轨）")
     parser.add_argument("--only", help="只跑指定场景 id")
+    parser.add_argument(
+        "--drift", action="store_true",
+        help="加跑长周期慢坡诊断场景（80~140 天 × 4，很慢；只记录不计分）",
+    )
     args = parser.parse_args()
 
     setup_logger(log_level="ERROR")
     config = load_config()
 
-    scenarios = [s for s in SCENARIOS if not args.only or s["id"] == args.only]
+    pool = SCENARIOS + DRIFT_SCENARIOS if args.drift else SCENARIOS
+    # --only 可直接点名慢坡场景，不必同时给 --drift
+    if args.only:
+        pool = SCENARIOS + DRIFT_SCENARIOS
+    scenarios = [s for s in pool if not args.only or s["id"] == args.only]
     if not scenarios:
         print(f"没有匹配 --only {args.only} 的场景")
         return 1
@@ -427,7 +547,7 @@ def main():
         obs = run_scenario(scn, config)
         ok, reason = evaluate(scn, obs)
         results.append((scn, obs, ok, reason))
-        if scn["kind"] != "KM":
+        if scn["kind"] not in ("KM", "DX"):
             scored += 1
             passed += ok
         types = "、".join(TYPE_ABBR.get(t, t) for t in sorted(obs["active_types"])) or "无"
@@ -443,6 +563,9 @@ def main():
         print(f"  {'[v]' if ok else '[x]'} {scn['id']}: {scn['desc']}")
         if scn.get("note"):
             print(f"       └─ 备注: {scn['note']}")
+        # DX 场景不打分，reason 里装的是诊断数据，必须打出来才有意义
+        if scn["kind"] == "DX":
+            print(f"       └─ 诊断: {reason}")
         if not ok:
             print(f"       └─ 问题: {reason}")
 
