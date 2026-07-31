@@ -275,14 +275,19 @@ def classify_risk_type(
 
         qualifies_today = bool(all_required_met and optional_met and score > 1.0)
 
-        # 持续性统计
+        # 持续性统计。质量门只看**必需轨**：该规则的结论由必需轨决定，
+        # 可选轨缺失走的是降级门槛（上面的 degraded 分支），不是质量问题。
+        quality_tracks = frozenset(needed_tracks)
         if rule.uses_rolling():
             cons_days = _count_rolling_qualifies(
-                key, daily_results, qualifies_today, rule.rolling_window
+                key, daily_results, qualifies_today, rule.rolling_window,
+                tracks=quality_tracks,
             )
             required_days = rule.rolling_required
         else:
-            cons_days = _count_consecutive_qualifies(key, daily_results, qualifies_today)
+            cons_days = _count_consecutive_qualifies(
+                key, daily_results, qualifies_today, tracks=quality_tracks
+            )
 
         is_active = bool(qualifies_today and cons_days >= required_days)
 
@@ -317,16 +322,34 @@ def _day_qualifies(day_result: dict, risk_key: str) -> bool:
     return False
 
 
-def _counts_toward_consecutive(day_result: dict) -> bool:
+def _counts_toward_consecutive(day_result: dict, tracks: frozenset[str] = frozenset()) -> bool:
     """
     该历史日是否计入持续性统计。
 
     degraded / insufficient / offline 的日子被**跳过**（既不累加也不打断）——
     传感器抖一下不该让攒了 4 天的偏离段清零，也不该凭空算成偏离。
+
+    ★ 按轨判定，不看单一顶层值。质量本来就是按轨的：睡眠轨降级不该压住社交轨的
+    持续性计数，那会把双轨的故障隔离在判定层又粘回去。只看**该规则必需的那些轨**，
+    全部 valid 才计入。
+
+    三级回退（顺序即优先级）：
+        1. day_result[track]["data_quality"]  ← 现行格式
+        2. day_result["data_quality"]         ← 单测桩与早期日志的单一顶层值
+        3. 都没有 → True                       ← 历史日志无该字段，保守当作有效
     """
+    per_track = [
+        day_result[t].get("data_quality")
+        for t in tracks
+        if isinstance(day_result.get(t), dict)
+        and day_result[t].get("data_quality") is not None
+    ]
+    if per_track:
+        return all(q == "valid" for q in per_track)
+
     quality = day_result.get("data_quality")
     if quality is None:
-        return True  # 旧日志无该字段，保守当作有效
+        return True
     return quality == "valid"
 
 
@@ -346,6 +369,7 @@ def _count_consecutive_qualifies(
     risk_key: str,
     daily_results: list[dict] | None,
     today_qualifies: bool,
+    tracks: frozenset[str] = frozenset(),
 ) -> int:
     """
     统计截至今天的连续达标天数。
@@ -358,7 +382,7 @@ def _count_consecutive_qualifies(
 
     count = 1
     for day_result in reversed(_history_before_today(daily_results)):
-        if not _counts_toward_consecutive(day_result):
+        if not _counts_toward_consecutive(day_result, tracks):
             continue  # 跳过降级日，不累加也不打断
         if _day_qualifies(day_result, risk_key):
             count += 1
@@ -372,6 +396,7 @@ def _count_rolling_qualifies(
     daily_results: list[dict] | None,
     today_qualifies: bool,
     window: int,
+    tracks: frozenset[str] = frozenset(),
 ) -> int:
     """
     统计 window 天滚动窗内的达标天数（含今天）。
@@ -383,7 +408,7 @@ def _count_rolling_qualifies(
     history = _history_before_today(daily_results)
     # 只看最近 window-1 条历史（今天占 1 条）
     for day_result in reversed(history[-(window - 1):] if window > 1 else []):
-        if not _counts_toward_consecutive(day_result):
+        if not _counts_toward_consecutive(day_result, tracks):
             continue
         if _day_qualifies(day_result, risk_key):
             count += 1

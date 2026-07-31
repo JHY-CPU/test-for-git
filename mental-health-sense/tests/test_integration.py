@@ -310,6 +310,44 @@ class TestDegradedOperation:
         # 降级日不得计入连续偏离天数，避免不完整证据攒出预警
         assert not counts_toward_consecutive(result["track_quality"][TRACK_SOCIAL])
 
+    def test_degraded_quality_reaches_inference_log_per_track(self, simulated_data):
+        """★ 回归：degraded 标记必须**随推理结果落盘**，而不是只进 features CSV。
+
+        历史缺陷：validator 判得对，但标记停在 features_social.csv，没进
+        data/logs/daily_inference/*.json。rules._counts_toward_consecutive 读不到
+        字段就走"保守当作有效"分支恒返回 True —— "degraded 日既不累加也不打断"
+        这条设计在生产链路里从未生效，传感器抖动照样能攒成预警。
+
+        本用例断言的是 **rules 层真的跳过了这天**，而不是上一个用例那样只断言
+        validator 的辅助函数——断言打错层正是这个缺陷能长期存活的原因。
+        """
+        import json
+
+        from src.baseline.trainer import train_all_tracks
+        from src.risk.rules import _counts_toward_consecutive
+        from src.scheduler.daily_job import run_daily_pipeline
+        from src.utils.io import get_log_dir
+
+        train_all_tracks(ELDER)
+        dk = day_key_of(42)
+
+        run_daily_pipeline(
+            ELDER, dk,
+            raw_data={"sleep": _sleep_payload(), "activity": _activity_payload(), "camera": None},
+        )
+
+        log = get_log_dir("daily_inference") / f"{ELDER}_{dk}.json"
+        assert log.exists()
+        payload = json.loads(log.read_text(encoding="utf-8"))
+
+        assert payload[TRACK_SOCIAL]["data_quality"] == "degraded"
+        assert payload[TRACK_SLEEP]["data_quality"] == "valid"
+
+        # 按轨判定：社交轨的规则跳过这天，睡眠轨的规则不受牵连——
+        # 否则双轨的故障隔离会在判定层被粘回去。
+        assert not _counts_toward_consecutive(payload, frozenset({TRACK_SOCIAL}))
+        assert _counts_toward_consecutive(payload, frozenset({TRACK_SLEEP}))
+
     def test_social_contact_rule_cannot_fire_without_copresence(self, simulated_data):
         """copresence 缺失时「社会连接减弱」必须无法触发，而不是用剩下两维凑合判定"""
         from src.risk.rules import classify_risk_type

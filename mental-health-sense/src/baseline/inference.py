@@ -95,9 +95,18 @@ def infer_track(
     day_key: str,
     track: str,
     config: dict | None = None,
+    data_quality: str | None = None,
 ) -> dict:
     """
     对某一轨做当日推理。
+
+    Args:
+        data_quality: 该轨当日的数据质量（valid/degraded/insufficient/offline）。
+            由 daily_job 的校验环节算出后透传进来，**必须随推理结果一起落盘**——
+            持续性统计（rules._counts_toward_consecutive）靠它决定某天算不算数。
+            此前这个标记只写进 features_{track}.csv、没进推理日志，导致
+            "degraded 日既不累加也不打断"这条设计在生产链路里从未生效：
+            读不到字段就一律按 valid 计入，传感器抖动照样能攒成预警。
 
     Returns:
         {
@@ -112,6 +121,7 @@ def infer_track(
             "signed_z": dict,           # 标准化后的带符号残差
             "signed_available": bool,
             "ewma_pool": str,
+            "data_quality": str | None,
             "status": str,
         }
     """
@@ -146,6 +156,7 @@ def infer_track(
         "signed_z": {},
         "signed_available": False,
         "ewma_pool": "weekend" if (track == "social" and is_weekend) else "default",
+        "data_quality": data_quality,
     }
 
     # 1. 加载该轨基线文件
@@ -284,9 +295,15 @@ def daily_inference(
     day_key: str,
     config: dict | None = None,
     tracks: tuple[str, ...] = TRACKS,
+    track_quality: dict[str, str] | None = None,
 ) -> dict:
     """
     双轨每日推理：每轨独立算分与阈值，互不影响。
+
+    Args:
+        track_quality: {轨: data_quality}，由 daily_job 的校验环节算出。
+            逐轨写进结果并在顶层留一份镜像——持续性统计要按轨读它，
+            界面/排查要能一眼看到当天两轨各自的数据质量。
 
     Returns:
         {
@@ -294,6 +311,7 @@ def daily_inference(
             "day_key": str,
             "sleep":  {...},           # infer_track 的返回
             "social": {...},
+            "track_quality": {...},
             "status": str,             # 至少一轨 success 即 success
         }
     """
@@ -303,10 +321,13 @@ def daily_inference(
         from src.utils.io import load_config
         config = load_config()
 
+    quality_map = track_quality or {}
     result: dict = {"elder_id": elder_id, "day_key": day_key}
 
     for track in tracks:
-        result[track] = infer_track(elder_id, day_key, track, config)
+        result[track] = infer_track(
+            elder_id, day_key, track, config, data_quality=quality_map.get(track)
+        )
         tr = result[track]
         logger.info(
             f"  └─ [{track}] score={tr['anomaly_score']:.4f}, "
@@ -324,6 +345,8 @@ def daily_inference(
 
     result["status"] = overall
     result["track_statuses"] = statuses
+    if quality_map:
+        result["track_quality"] = {t: quality_map.get(t) for t in tracks}
 
     # 连续偏离天数：任一轨偏离即算当日偏离（各轨自己的连续天数由 rules.py 分别统计）
     result["is_deviation"] = any(

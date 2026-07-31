@@ -105,12 +105,14 @@ def run_daily_pipeline(
         try:
             from src.baseline.inference import daily_inference
             inference_result = daily_inference(
-                elder_id, day_key, config, tracks=usable_tracks
+                elder_id, day_key, config, tracks=usable_tracks,
+                track_quality=track_quality,
             )
 
             # 某轨 GRU 基线尚未就绪（冷启动期）：用稳健滑动基线兜底，消除建档期盲区
             _apply_cold_start_fallbacks(
-                elder_id, day_key, inference_result, usable_tracks, config
+                elder_id, day_key, inference_result, usable_tracks, config,
+                track_quality=track_quality,
             )
 
             if inference_result.get("status") in ("success", "cold_start_fallback"):
@@ -239,12 +241,14 @@ def _apply_cold_start_fallbacks(
     inference_result: dict,
     tracks: tuple[str, ...],
     config: dict,
+    track_quality: dict[str, str] | None = None,
 ) -> None:
     """
     对处于 cold_start 的轨启用稳健滑动基线兜底，就地改写 inference_result。
 
     按轨独立：睡眠轨基线已就绪、社交轨还在建档时，只有社交轨走兜底。
     """
+    quality_map = track_quality or {}
     changed = False
     for track in tracks:
         track_result = inference_result.get(track)
@@ -253,7 +257,9 @@ def _apply_cold_start_fallbacks(
         if track_result.get("status") != "cold_start":
             continue
 
-        fb = _cold_start_fallback_track(elder_id, day_key, track, config)
+        fb = _cold_start_fallback_track(
+            elder_id, day_key, track, config, data_quality=quality_map.get(track)
+        )
         if fb is not None:
             inference_result[track] = fb
             changed = True
@@ -297,6 +303,7 @@ def _cold_start_fallback_track(
     day_key: str,
     track: str,
     config: dict,
+    data_quality: str | None = None,
 ) -> dict | None:
     """
     某轨的冷启动兜底：GRU 基线就绪前，用中位数/MAD 稳健基线做基础离群检测。
@@ -304,6 +311,9 @@ def _cold_start_fallback_track(
     Returns:
         与 infer_track 结构兼容的结果字典（status="cold_start_fallback"），
         数据不足以兜底时返回 None。
+
+    注意：本函数**整个替换** inference_result[track]，所以 infer_track 写进去的
+    字段（尤其是 data_quality）必须在这里原样补上，否则标记会在兜底路径上丢掉。
     """
     cs_cfg = config.get("cold_start", {})
     if not cs_cfg.get("fallback_enabled", True):
@@ -363,6 +373,7 @@ def _cold_start_fallback_track(
         # 兜底期的 z 分来自稳健基线而非 GRU 残差，方向可用（这正是修掉 np.abs 的收益）
         "signed_available": True,
         "ewma_pool": "weekend" if (track == "social" and is_weekend) else "default",
+        "data_quality": data_quality,
         "valid_features": fb["valid_features"],
         "skipped_features": fb["skipped_features"],
         "in_observation_period": True,
