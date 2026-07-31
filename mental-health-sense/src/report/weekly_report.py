@@ -89,7 +89,7 @@ def generate_weekly_report(
         logger.warning(
             f"  └─ {week_start_str}~{week_end_str} 无推理记录，出数据不足周报"
         )
-        report = _empty_report(elder_id, week_start_str, week_end_str)
+        report = _empty_report(elder_id, week_start_str, week_end_str, config)
         _save_report(elder_id, week_start_str, report)
         return report
 
@@ -170,6 +170,7 @@ def generate_weekly_report(
 
 {_format_track_stats(week_results)}
 
+{_format_alert_receipts(elder_id, week_end_str, config)}
 {_format_depression_section(elder_id, week_end_str, config)}
 ## 处置建议
 
@@ -181,6 +182,74 @@ def generate_weekly_report(
     logger.info(f"  └─ 周报已保存: {elder_id}_{week_start_str}")
 
     return report
+
+
+_CHANNEL_LABELS = {
+    "baseline": "睡眠 / 社会连接",
+    "depression": "情绪状态",
+}
+
+_RISK_KEY_LABELS = {
+    "sleep_stability": "睡眠稳定性偏离",
+    "social_decline": "社会连接减弱",
+    "circadian_disruption": "作息节律紊乱",
+    "depression": "情绪状态评估",
+}
+
+
+def _format_alert_receipts(elder_id: str, as_of: str, config: dict | None = None) -> str:
+    """持续中事件的周期性回执。
+
+    ★ 这一节是「按事件去重」这个设计的**配套义务**，不是可选装饰。
+
+      通知层现在只在事件开始 / 升级 / 新类型 / 缓解时推送，同级持续静默。
+      如果周报里也一字不提，家属就无法区分「系统安静」与「系统挂了」——
+      这与本仓「长期降级和长期正常必须可区分」是同一条原则
+      （daily_job 的 check_prolonged_degradation 就是为它而写）。
+
+      所以静默期必须有一个低强度、不打扰的告知出口：进周报、不推送、不响铃。
+
+    照抄 _format_depression_section 已确立的范式：独立小节 + 自己拿数据 +
+    try/except 返回 ""，异常不拖垮整份周报。
+    """
+    events_cfg = ((config or {}).get("alert") or {}).get("events") or {}
+    if not events_cfg.get("weekly_receipt", True):
+        return ""
+
+    try:
+        from src.risk.alert_state import active_events, event_age_days
+        events = active_events(elder_id)
+    except Exception as e:
+        logger.warning(f"  └─ 预警回执章节跳过: {e}")
+        return ""
+
+    if not events:
+        return ""
+
+    lines = []
+    for channel, ev in events.items():
+        label = _CHANNEL_LABELS.get(channel, channel)
+        age = event_age_days(ev, as_of)
+        keys = ev.get("risk_keys") or []
+        types = "、".join(_RISK_KEY_LABELS.get(k, k) for k in keys) or "多项指标"
+        lines.append(
+            f"- **{label}**：{types} 持续中"
+            + (f"，第 {age} 天" if age else "")
+            + f"（{ev.get('started_day')} 起）"
+        )
+        lines.append(
+            f"  - 已通知 {ev.get('notify_count', 0)} 次，最近一次 "
+            f"{ev.get('last_notified_day') or '—'}"
+            + ("；已由家属确认，转静默追踪" if ev.get("acknowledged") else "")
+        )
+
+    body = "\n".join(lines)
+    return (
+        "## 预警回执\n\n"
+        f"{body}\n\n"
+        "> 以下事件仍在持续。系统按**事件**去重，同一等级不重复推送，"
+        "**静默不代表已缓解**。等级上升或出现新的风险类型时会立即通知。\n\n"
+    )
 
 
 def _format_depression_section(
@@ -463,8 +532,18 @@ def _save_report(elder_id: str, week_start: str, report: str) -> None:
     atomic_write_text(filepath, report)
 
 
-def _empty_report(elder_id: str, week_start: str, week_end: str) -> str:
-    """生成空数据周报"""
+def _empty_report(
+    elder_id: str, week_start: str, week_end: str, config: dict | None = None
+) -> str:
+    """生成空数据周报。
+
+    ★ 仍要带上预警回执。
+
+      无数据周恰恰是最需要它的时候：设备掉线导致本周没有判定，但**上一个事件
+      可能还开着**。如果这份周报一字不提，家属看到的就是一份纯粹的"没数据"，
+      而系统里其实还挂着一个持续中的 L3 事件——静默 + 空周报 = 两层遮蔽。
+    """
+    receipts = _format_alert_receipts(elder_id, week_end, config)
     return f"""# {elder_id} 心理健康周报
 
 **周期**：{week_start} ~ {week_end}
@@ -478,4 +557,5 @@ def _empty_report(elder_id: str, week_start: str, week_end: str) -> str:
 本周暂无足够的监测数据，无法生成有效周报。请检查设备运行状态。
 
 ---
-"""
+
+{receipts}"""

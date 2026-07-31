@@ -54,10 +54,10 @@
       "daytime_nap_min"
     ],
     "skipped_features": [],
-    "ewma_n": 28,
+    "ewma_n": 46,
     "ewma_min_samples": 20,
-    "in_observation_period": true,
-    "status": "observation"
+    "in_observation_period": false,
+    "status": "success"
   },
   "social": {
     "track": "social",
@@ -100,15 +100,15 @@
       "activity_counts"
     ],
     "skipped_features": [],
-    "ewma_n": 20,
+    "ewma_n": 31,
     "ewma_min_samples": 20,
-    "in_observation_period": true,
-    "status": "observation"
+    "in_observation_period": false,
+    "status": "success"
   },
   "status": "success",
   "track_statuses": {
-    "sleep": "observation",
-    "social": "observation"
+    "sleep": "success",
+    "social": "success"
   },
   "track_quality": {
     "sleep": "valid",

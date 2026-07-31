@@ -131,6 +131,61 @@ def _infer_one_clip(
     return parse_clip_result(out_json), cpu_fallback
 
 
+def _maybe_alert(
+    elder_id: str, day_key: str, payload: dict, dep_cfg: dict, config: dict
+) -> None:
+    """按配置把抑郁评估结果送进预警出口（当前默认关闭）。
+
+    ★ 走**独立的事件流**（channel="depression"）。
+
+      抑郁事件与基线事件各自计数、各自冷却、互不压制——理由同"绝不跨轨比较
+      绝对分"：它们不是同一件事，不该共用一个计数器。一条线在冷却中，
+      不该让另一条线的新事件被顺带静默。
+
+    ⚠️ `depression.alert` 默认 false，理由**不是**冷却缺失（那条已经解决），
+      而是当前 checkpoint 在其验证集上对全部 9 个样本预测同一类别
+      （Macro-F1 0.286），且未在本机位 / 本人身上校准。线接好、开关不开：
+      换到可用的 checkpoint 后改一个配置项即可启用。
+
+    本函数不改任何等级映射——抑郁等级到 risk_level 的换算刻意保守，
+    见下方 _LEVEL_TO_RISK。
+    """
+    if not dep_cfg.get("alert", False):
+        return
+
+    from src.depression.status import is_displayable
+
+    if not is_displayable(payload.get("status")):
+        return
+
+    level_name = (payload.get("result") or {}).get("level")
+    risk_level = _LEVEL_TO_RISK.get(level_name, 0)
+    if risk_level <= 0:
+        return
+
+    try:
+        from src.risk.alert import trigger_alert
+        from src.risk.alert_state import CHANNEL_DEPRESSION
+
+        trigger_alert(
+            elder_id=elder_id,
+            risk_level=risk_level,
+            risk_types=[{"risk_key": "depression", "risk_type": "情绪状态评估"}],
+            config=config,
+            day_key=day_key,
+            channel=CHANNEL_DEPRESSION,
+        )
+    except Exception as e:
+        # 预警是旁路的旁路：发不出去只该记日志，不能连累已经算好的评估结果
+        logger.error(f"  └─ 抑郁预警触发失败（不影响评估产出）: {e}")
+
+
+# 抑郁等级 → 风险等级的映射。刻意保守：
+#   即使模型判"重度"也只到 L2（子女推送），不到 L3（强制响铃 + 网格员）。
+#   群体绝对基线对个体差异没有免疫力，用它去惊动社区资源门槛应当更高。
+_LEVEL_TO_RISK = {"正常": 0, "轻度": 1, "重度": 2, "抑郁": 2}
+
+
 def run_depression_assessment(
     elder_id: str,
     day_key: str | None = None,
@@ -283,6 +338,7 @@ def run_depression_assessment(
             low_confidence_reasons=aggregated["low_confidence_reasons"],
         )
         save_assessment(payload)
+        _maybe_alert(elder_id, day_key, payload, dep_cfg, config)
         logger.info(
             f"=== 抑郁评估完成: status={payload['status']}, "
             f"level={(payload.get('result') or {}).get('level')} ==="

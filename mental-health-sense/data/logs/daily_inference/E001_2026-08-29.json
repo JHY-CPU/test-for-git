@@ -42,7 +42,7 @@
     "ewma_pool": "default",
     "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_rerun": false,
+    "ewma_rerun": true,
     "valid_features": [
       "sleep_efficiency",
       "waso_min",
@@ -91,7 +91,7 @@
     "ewma_pool": "weekend",
     "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_rerun": false,
+    "ewma_rerun": true,
     "valid_features": [
       "copresence_min",
       "out_of_home_min",

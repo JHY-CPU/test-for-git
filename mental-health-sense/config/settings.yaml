@@ -175,13 +175,20 @@ risk:
 # 小贝壳的睡眠报告窗口延伸到当日 22:59 之后才最终成型）保留在
 # src/scheduler/daily_job.py 的模块 docstring 里——那里才是它真正生效的地方。
 
-# ===== 预警推送 =====
+# ===== 预警推送（按事件去重）=====
+#
 # 由 alert.trigger_alert 读取，缺项回落到 alert.py 的 ALERT_ACTIONS 内置默认。
 # notify 统一写列表：level_1 原先写的是 `false`，而代码一路当列表用
 # （`for r in False` 会直接抛异常）——这段配置此前根本没人读，才没暴露。
 #
-# ⚠️ 仍未实现：冷却/去重/抑制。永久性变化会无限期每日重复报同一等级
-# （PERM_step 实测连续 91 天每天 L3），见 docs/TODO.md 与 VALIDATION.md §7.3。
+# ★ 通知按**事件**而非按天发出。一段连续的 L2/L3 是一个事件，不是 N 个。
+#   修复前实测：E001 60 天内 12 次推送对应 4 个真实事件；PERM_step（永久性
+#   衰退）是连续 91 天每天报 L3 = 91 次短信 + 强制响铃 + 惊动网格员。
+#   后果不是"吵"，是家属关掉通知后真正的新变化也收不到了。
+#   事件模型见 src/risk/alert_state.py。
+#
+# ⚠️ 新增键必须同步加进 alert.py:_actions_for 的合并白名单，
+#   否则会被静默丢弃——本文件上一版注释讲的就是同一类缺陷。
 alert:
   level_1:
     action: "log_only"
@@ -189,9 +196,33 @@ alert:
   level_2:
     action: "push_notification"
     notify: ["children"]
+    # 同一事件同一等级的重复提醒间隔（天）。0 = 不重复。
+    # 取 0 是因为告知义务已由周报回执承担，重复推送只会消耗家属的注意力。
+    repeat_days: 0
   level_3:
     action: "force_notification"
     notify: ["children", "community_worker"]
+    # L3 会惊动社区网格员，完全静默不合适；月度重提是"不骚扰"与"别被遗忘"
+    # 之间的折中。PERM_step 91 天由此从 91 次降到 1(开始) + 3(月度) = 4 次。
+    repeat_days: 30
+
+  # 事件抽象的行为参数
+  events:
+    # 缓解（回到 L0）也通知——家属同样想知道"过去了"。
+    # 注意只有回到 L0 才算缓解：L3 掉到 L2 仍需关注，那时发"好转了"
+    # 会让家属误以为可以放松。
+    notify_on_resolve: true
+    # 事件期内出现新风险类型时的最短通知间隔（天）。
+    # 新类型是新信息、应当通知，但类型会在门槛附近抖动，需要一个短冷却。
+    new_type_cooldown_days: 3
+    # 持续期每周一条低强度回执（进周报，不推送、不响铃）。
+    # ★ 这不是可选装饰：彻底静默会让"系统安静"与"系统挂了"无法区分，
+    #   与"长期降级和长期正常必须可区分"是同一条原则。
+    weekly_receipt: true
+
+  # 事件边界复用 risk.continuity.max_skip_days（默认 3）：
+  # 设备离线一段时间后，不该把两段无关的风险期粘成同一个事件——
+  # 与 continuity.walk_back_days 的断段语义保持一致。
 
 # ===== LLM 周报 =====
 report:

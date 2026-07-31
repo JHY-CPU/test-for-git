@@ -1,15 +1,29 @@
 """
-三级预警推送模块
+三级预警推送模块（按事件去重）
 
 预警等级（全部基于趋势检测）：
     一级「关注」→ 写入周报，不打扰老人（单日偏离）
     二级「提醒」→ 子女App推送 + 周报重点标注（连续3天偏离）
     三级「严重」→ 子女强提醒 + 社区网格员介入（连续5天偏离）
+
+★ 通知按**事件**而非按天发出
+
+  判定层每天都给一个 risk_level，但一段连续的 L2/L3 是**一个事件**，不是 N 个。
+  只在状态变化时通知：开始 / 升级 / 出现新风险类型 / 缓解。同级持续不重复，
+  改由周报的"预警回执"承担告知义务。
+
+  修复前实测：E001 60 天内 12 次推送对应 4 个真实事件；PERM_step（永久性衰退）
+  是连续 91 天每天报 L3 = 91 次短信 + 强制响铃 + 惊动网格员。后果不是"吵"，
+  是家属关掉通知后**真正的新变化也收不到了**。
+
+  事件模型与判定逻辑在 src/risk/alert_state.py，本模块只负责"决定之后做什么"。
+  ★ 最关键的一条不变量：**升级穿透一切抑制**（含冷却与人工确认）。
 """
 
 from datetime import datetime
 from enum import IntEnum
 
+from src.risk import alert_state
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -91,10 +105,27 @@ def _actions_for(level: AlertLevel, config: dict | None) -> dict:
         merged["action"] = section["action"]
     if "notify" in section:
         merged["notify"] = _normalize_notify(section["notify"])
-    for key in ("log", "include_in_report", "highlight_in_report"):
+    # ★ 这是白名单式合并：不在这个元组里的键会被**静默丢弃**。
+    #   新增配置项时必须同步加进来——settings.yaml 的 alert 段注释里记着的
+    #   "这段配置此前根本没人读"就是同一类缺陷的上一次发作。
+    for key in ("log", "include_in_report", "highlight_in_report", "repeat_days"):
         if key in section:
             merged[key] = section[key]
     return merged
+
+
+def _risk_keys_of(risk_types: list[dict]) -> list[str]:
+    """取稳定的机器键，不用中文展示名。
+
+    `risk_type`（"睡眠稳定性偏离"）是文案，改一次措辞事件身份就断了；
+    `risk_key`（sleep_stability）是 build_risk_rules 的 dict key，稳定。
+    """
+    keys = []
+    for r in risk_types or []:
+        key = r.get("risk_key") or r.get("risk_type")
+        if key:
+            keys.append(str(key))
+    return keys
 
 
 def trigger_alert(
@@ -102,18 +133,36 @@ def trigger_alert(
     risk_level: int,
     risk_types: list[dict] | None = None,
     config: dict | None = None,
+    day_key: str | None = None,
+    channel: str = alert_state.CHANNEL_BASELINE,
 ) -> dict:
     """
-    根据风险等级触发对应的预警动作。
+    根据风险等级触发对应的预警动作，**按事件去重**。
+
+    ★ 这不再是一个纯函数。它读写 data/logs/alert_state/{elder_id}.json，
+      因为"上次发过没有"这件事跨天，而每日批处理的进程活不过今天。
 
     Args:
         elder_id: 老人ID
         risk_level: 风险等级 (0/1/2/3)
-        risk_types: 风险类型列表
+        risk_types: 风险类型列表（用其中的 risk_key 做事件身份）
         config: 全局配置。给了就以其 alert 段为准，不给则用内置默认。
+        day_key: 判定所属自然日。**补算历史日时必须给**——不给会退回
+            datetime.now()，把"今天"的日期盖到一条历史判定上，冷却窗口
+            与事件边界全算错。这与 judge_risk_level 被迫加 today_key
+            是同一类问题。
+        channel: 事件流。baseline（GRU 双轨）与 depression（MPDD）各自独立
+            计数、独立冷却、互不压制——理由同"绝不跨轨比较绝对分"。
 
     Returns:
-        {"alerted": bool, "level": str, "actions": [...], "message": str}
+        {
+            "alerted": bool,        # 本次实际发出了通知吗（被抑制则 False）
+            "suppressed": bool,     # 是否因事件去重被抑制
+            "transition": str,      # started/escalated/new_type/resolved/
+                                    # repeat/improved/cooldown/acknowledged/none
+            "event": dict,          # 事件快照（持续天数、已通知次数等）
+            "level": str, "label": str, "actions": [...], "message": str,
+        }
     """
     if risk_types is None:
         risk_types = []
@@ -124,36 +173,101 @@ def trigger_alert(
         logger.error(f"无效的风险等级: {risk_level}")
         level_enum = AlertLevel.NORMAL
 
+    if day_key is None:
+        day_key = datetime.now().strftime(alert_state.DATE_FMT)
+        logger.warning(
+            "trigger_alert 未收到 day_key，退回使用今天。补算历史日时这会让"
+            "冷却窗口与事件边界算在错误的日期上。"
+        )
+
     actions_config = _actions_for(level_enum, config)
+    normalized_level = int(level_enum)
+
+    # 1. 事件决策
+    cfg = config or {}
+    alert_cfg = cfg.get("alert") or {}
+    events_cfg = alert_cfg.get("events") or {}
+    max_skip_days = (cfg.get("risk", {}).get("continuity", {}) or {}).get("max_skip_days", 3)
+    repeat_days = int(actions_config.get("repeat_days", 0) or 0)
+
+    state = alert_state.load_state(elder_id)
+    channel_state = state["channels"].get(channel) or {}
+    risk_keys = _risk_keys_of(risk_types)
+
+    transition, should_notify = alert_state.decide(
+        channel_state, day_key, normalized_level, risk_keys,
+        events_cfg, repeat_days, max_skip_days,
+    )
+
+    # 2. 只在需要通知时才真正执行动作
+    #
+    #    被抑制时仍然记一条 log_alert：日志是排查用的，不该跟着通知一起消失。
+    #    消失的只有推送与响铃。
+    if should_notify:
+        actions = _execute_alert_actions(
+            elder_id, level_enum, actions_config, risk_types
+        )
+    else:
+        actions = ["log_alert"] if actions_config.get("action") != "none" else []
+
+    # 3. 落盘事件状态
+    state["channels"][channel] = alert_state.apply(
+        channel_state, day_key, normalized_level, risk_keys, transition, should_notify,
+    )
+    try:
+        alert_state.save_state(state)
+    except OSError as e:
+        # 状态写不出去只该少一次去重（退回到多发通知），不该让日管道失败。
+        logger.error(f"预警状态落盘失败（本次仍按判定执行）: {e}")
+
+    event = state["channels"][channel]
+    suppressed = bool(not should_notify and normalized_level >= AlertLevel.WARNING)
 
     log_entry = {
         "elder_id": elder_id,
-        "timestamp": datetime.now().isoformat(),
-        "risk_level": risk_level,
+        "day_key": day_key,
+        "channel": channel,
+        "risk_level": normalized_level,
         "risk_label": level_enum.name,
-        "action": actions_config["action"],
+        "action": actions_config["action"] if should_notify else "suppressed",
+        "transition": transition,
         "risk_types": [r.get("risk_type", "") for r in risk_types],
     }
 
-    # 执行推送（当前为模拟，实际对接推送服务）
     alert_result = {
         # 用归一化后的 level_enum，不用原始整数：trigger_alert("E001", 99)
         # 会被上面的 try 兜成 NORMAL，但 `99 >= WARNING` 仍为真，于是返回
-        # {"alerted": True, "level": "NORMAL", "actions": [], "message": ""}
-        # ——上层据此以为发过预警，实际一个动作都没执行。
-        "alerted": level_enum >= AlertLevel.WARNING,
+        # {"alerted": True, "level": "NORMAL", ...}——上层据此以为发过预警，
+        # 实际一个动作都没执行。
+        # 现在还要再与 should_notify 取与：被事件去重抑制时没有真的发出去。
+        "alerted": bool(level_enum >= AlertLevel.WARNING and should_notify),
+        "suppressed": suppressed,
+        "transition": transition,
+        "event": {
+            "channel": channel,
+            "active": event.get("active", False),
+            "level": event.get("level", 0),
+            "risk_keys": event.get("risk_keys", []),
+            "started_day": event.get("started_day"),
+            "age_days": alert_state.event_age_days(event, day_key),
+            "notify_count": event.get("notify_count", 0),
+            "last_notified_day": event.get("last_notified_day"),
+            "acknowledged": event.get("acknowledged", False),
+        },
         "level": level_enum.name,
         "label": _get_level_label(risk_level),
-        "actions": _execute_alert_actions(elder_id, level_enum, actions_config, risk_types),
+        "actions": actions,
         "message": _build_alert_message(elder_id, level_enum, risk_types),
     }
 
     # 记录日志
     if actions_config.get("log", True):
-        if level_enum >= AlertLevel.WARNING:
-            logger.warning(f"预警触发: {log_entry}")
+        if suppressed:
+            logger.info(f"预警抑制({transition}): {log_entry}")
+        elif level_enum >= AlertLevel.WARNING:
+            logger.warning(f"预警触发({transition}): {log_entry}")
         else:
-            logger.info(f"预警记录: {log_entry}")
+            logger.info(f"预警记录({transition}): {log_entry}")
 
     return alert_result
 

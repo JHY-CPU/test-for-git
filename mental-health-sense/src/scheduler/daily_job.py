@@ -105,6 +105,7 @@ def run_daily_pipeline(
     # 5. 双轨推理（至少一轨可用才跑）
     inference_result = None
     risk_result = None
+    alert_result = None
     failure: str | None = None
     usable_tracks = tuple(t for t in TRACKS if is_usable_for_inference(track_quality[t]))
 
@@ -127,15 +128,22 @@ def run_daily_pipeline(
                 from src.risk.judge import quick_judge
                 risk_result = quick_judge(elder_id, day_key, config)
 
-                # 7. 需要时触发预警
-                if risk_result.get("risk_level", 0) >= 1:
-                    from src.risk.alert import trigger_alert
-                    trigger_alert(
-                        elder_id=elder_id,
-                        risk_level=risk_result["risk_level"],
-                        risk_types=risk_result.get("risk_types", []),
-                        config=config,
-                    )
+                # 7. 预警（按事件去重）。
+                #
+                # 无条件调用而不是只在 risk_level>=1 时调：回到 L0 也是状态变化，
+                # trigger_alert 要靠它把活跃事件关掉并发"缓解"通知。旧写法在
+                # L0 那天直接跳过，事件永远停在最后一次 L2/L3 上。
+                #
+                # ★ 必须传 day_key：补算历史日时不传会把"今天"的日期盖到一条
+                #   历史判定上，冷却窗口与事件边界全算错。
+                from src.risk.alert import trigger_alert
+                alert_result = trigger_alert(
+                    elder_id=elder_id,
+                    risk_level=risk_result.get("risk_level", 0),
+                    risk_types=risk_result.get("risk_types", []),
+                    config=config,
+                    day_key=day_key,
+                )
 
                 # 8. 产出给 MPDD-AVP 的单向证据契约。
                 # 此前 build_mpdd_evidence 定义了、单测覆盖了，但没有任何链路
@@ -183,6 +191,9 @@ def run_daily_pipeline(
         "track_quality": track_quality,
         "inference_result": inference_result,
         "risk_result": risk_result,
+        # 预警结果必须回传：否则"今天被事件去重抑制了"这个事实无处可查、
+        # 无处可测。旧写法直接丢弃 trigger_alert 的返回值。
+        "alert_result": alert_result,
         "status": status,
         "error": failure,
     }

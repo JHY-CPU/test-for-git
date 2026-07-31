@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "elder_id": "V001",
+  "channels": {
+    "baseline": {
+      "active": true,
+      "level": 1,
+      "risk_keys": [
+        "sleep_stability",
+        "social_decline"
+      ],
+      "started_day": "2026-02-09",
+      "last_seen_day": "2026-03-01",
+      "last_notified_day": "2026-02-23",
+      "last_notified_level": 3,
+      "notify_count": 5,
+      "acknowledged": false,
+      "acknowledged_at": null
+    },
+    "depression": {
+      "active": false,
+      "level": 0,
+      "risk_keys": [],
+      "started_day": null,
+      "last_seen_day": null,
+      "last_notified_day": null,
+      "last_notified_level": 0,
+      "notify_count": 0,
+      "acknowledged": false,
+      "acknowledged_at": null
+    }
+  }
+}

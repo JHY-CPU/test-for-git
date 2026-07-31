@@ -42,7 +42,7 @@
     "ewma_pool": "default",
     "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_rerun": false,
+    "ewma_rerun": true,
     "valid_features": [
       "sleep_efficiency",
       "waso_min",
@@ -54,7 +54,7 @@
       "daytime_nap_min"
     ],
     "skipped_features": [],
-    "ewma_n": 29,
+    "ewma_n": 46,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
@@ -91,7 +91,7 @@
     "ewma_pool": "default",
     "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_rerun": false,
+    "ewma_rerun": true,
     "valid_features": [
       "copresence_min",
       "out_of_home_min",
@@ -100,7 +100,7 @@
       "activity_counts"
     ],
     "skipped_features": [],
-    "ewma_n": 21,
+    "ewma_n": 31,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"

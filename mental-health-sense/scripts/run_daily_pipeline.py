@@ -71,6 +71,20 @@ def main():
             if risk.get("recommendation"):
                 logger.info(f"  建议: {risk['recommendation']}")
 
+        # 预警按事件去重：把"发了还是被抑制了"打出来，否则运维只能看到
+        # 判定结果，无从判断家属今天到底收没收到通知。
+        alert = result.get("alert_result")
+        if alert:
+            ev = alert.get("event", {})
+            state = "已发出" if alert.get("alerted") else (
+                "已抑制" if alert.get("suppressed") else "未触发推送"
+            )
+            logger.info(
+                f"  预警: {state}（{alert.get('transition')}）"
+                + (f"，事件第 {ev.get('age_days')} 天、累计通知 {ev.get('notify_count')} 次"
+                   if ev.get("active") else "")
+            )
+
     except Exception as e:
         logger.error(f"  {elder_id} 推理失败: {e}")
         raise
