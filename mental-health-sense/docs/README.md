@@ -18,7 +18,7 @@
 
 > 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
 
-**核心算法层已完工并验证**：312 个单元测试全部通过；范围 1（链路正确性）19/19、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
+**核心算法层已完工并验证**：332 个单元测试全部通过；范围 1（链路正确性）20/20、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
 
 > ⚠️ **实现成熟度：算法是真的，硬件对接与外部服务大多还是"桩/模拟"。** 这是科研原型阶段的正常状态，但必须讲清楚，避免误以为"能上真机"：
 
@@ -35,7 +35,7 @@
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 312 单测（13 文件）+ 端到端冒烟（`validate_synthetic.py` 19/19，含双轨信号隔离），每日管道链路已打通 |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 332 单测（14 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
 | **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 判别力脚本 `validate_discriminative.py`（10 场景，含 4 项混淆 + 1 项已知漏报），当前 **9/9**（KM 场景不计分）；已借此修复 5 个真实缺陷，仍有 2 项已知局限（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
@@ -53,8 +53,14 @@
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
+# 1. 安装依赖（本机只有 python3，仓库不带 venv）
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+#    核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest。
+#    anthropic 只用于周报正文，未安装时自动回落到规则模板。
+#    2026-07-31 已移除 funasr / modelscope / pyaudio / scipy / opencv-python /
+#    APScheduler 六项零引用依赖——其中 pyaudio 需要 portaudio 头文件，
+#    在干净的 Linux 上会让整条 pip install 中止，torch 一个都装不上。
 
 # 2. 生成模拟数据（1位老人 × 60天）
 python scripts/generate_simulation_data.py
@@ -67,13 +73,16 @@ python scripts/train_all_baselines.py
 #    错开是为了验证双轨的信号隔离——一轨报警时另一轨应保持安静。
 #    均已避开建档期(1-35)，正式运行期能完整看到"正常→异常升级→恢复"。
 #    也可直接用验证脚本查看：
-#      python scripts/validate_synthetic.py       # 范围1：60天跑通 + 信号隔离（19 项断言）
+#      python scripts/validate_synthetic.py       # 范围1：60天跑通 + 信号隔离（20 项断言）
 #      python scripts/validate_discriminative.py  # 范围2：10 场景判别力（含混淆项）
 
 # 4. 每日推理
 python scripts/run_daily_pipeline.py --date 2026-08-15
 
-# 5. 运行测试（13 个测试文件 / 312 用例）
+# 5. 周轨：双轨微调 + 周报（--no-retrain 只出周报，不动基线）
+python scripts/run_weekly_pipeline.py
+
+# 6. 运行测试（14 个测试文件 / 332 用例）
 python -m pytest
 ```
 
@@ -90,22 +99,25 @@ mental-health-sense/
 │
 ├── data/                            # 数据目录
 │   ├── raw/                         # 原始传感器数据（JSON）
-│   │   ├── sleep/                   # 睡眠雷达数据（{date}.json）
+│   │   ├── sleep/                   # 小贝壳睡眠数据（{date}.json）
 │   │   ├── activity/                # PIR + IPC活动数据（{date}.json）
 │   │   └── camera/                  # C6c 边缘人形检测（{date}.json，copresence_min 聚合来源）
 │   ├── features/                    # 聚合后的每日特征向量（CSV）
 │   │   └── E001/                    # features_sleep.csv（8维）+ features_social.csv（5维）
 │   ├── baselines/                   # 该老人的个人基线模型
 │   │   └── E001/
-│   │       ├── gru.pth              # 训练好的GRU模型
-│   │       ├── gru.prev.pth         # 微调前的模型备份（可回滚）
-│   │       ├── scaler.pkl           # StandardScaler（归一化）
-│   │       ├── residual_stats.pkl   # 训练残差统计（均值、标准差）
-│   │       ├── baseline_meta.json   # 基线元数据（训练时间 + 训练后推理计数）
-│   │       └── ewma.pkl             # EWMA累积基线
-│   ├── logs/                        # 推理日志和周报
-│   │   ├── daily_inference/         # 每日GRU推理结果（JSON）
-│   │   └── weekly_reports/          # LLM生成的周报
+│   │       ├── gru_{sleep,social}.pth        # 按轨的GRU模型
+│   │       ├── gru_{sleep,social}.prev.pth   # 微调前的备份（可回滚）
+│   │       ├── scaler_{sleep,social}.pkl     # 按轨的 StandardScaler
+│   │       ├── residual_stats_{sleep,social}.pkl  # 留出段残差统计（signed + abs 两套）
+│   │       ├── ewma_sleep.pkl                # 睡眠轨 EWMA（不分池）
+│   │       ├── ewma_social_{weekday,weekend}.pkl  # 社交轨 EWMA（周末效应分池）
+│   │       ├── ewma_{sleep,social}_state.pkl # 冻结计数 + 去重游标
+│   │       └── baseline_meta.json            # 元信息（两轨共用，按 track 分键）
+│   ├── logs/                        # 推理日志、证据契约和周报
+│   │   ├── daily_inference/         # 每日双轨推理结果（JSON）
+│   │   ├── mpdd_evidence/           # 给 MPDD-AVP 的单向证据契约（JSON）
+│   │   └── weekly_reports/          # 周报（LLM 或规则模板）
 │   └── elder_configs.json           # 老人元数据（姓名、描述）
 │
 ├── src/                             # 源代码
@@ -122,26 +134,29 @@ mental-health-sense/
 │   │   ├── aggregator.py            # 三路传感器 → 双轨特征向量（睡眠8维 / 社交5维）
 │   │   ├── imputer.py               # 缺失值处理（前向填充）
 │   │   ├── validator.py             # 数据质量校验
-│   │   └── adapters/                # 传感器适配器
-│   │       ├── sleep_radar.py       # 睡眠雷达适配器
-│   │       ├── camera.py            # IPC/RTSP摄像头适配器
-│   │       └── microphone.py        # 麦克风适配器（VAD 统计对话轮次）
+│   │   └── adapters/                # 传感器适配器（_read_raw 均为桩，只有 mock/file 模式可跑）
+│   │       ├── xiaobeike.py         # 小贝壳无感睡眠监测仪
+│   │       ├── camera.py            # 萤石 C6c 边缘人形检测
+│   │       ├── ezviz_events.py      # 萤石 T1C PIR 事件
+│   │       └── circadian.py         # 小时活动序列 → RA / IV
 │   │
 │   ├── risk/                        # 风险判定层
-│   │   ├── rules.py                 # 2类风险类型（睡眠/社交）
-│   │   ├── judge.py                 # 4级风险判定（连续天数）
-│   │   └── alert.py                 # 预警推送（日志/文件/App/短信）
+│   │   ├── rules.py                 # 3类风险类型（睡眠稳定性/社会连接/作息节律）
+│   │   ├── judge.py                 # 4级风险判定（每轨各自算等级取较高者 + 方向闸门）
+│   │   └── alert.py                 # 预警推送（当前只写日志字符串；⚠️ 无冷却/去重）
 │   │
 │   ├── report/                      # 周报生成
 │   │   ├── templates.py             # LLM提示词模板
 │   │   └── weekly_report.py         # Claude API集成
 │   │
-│   ├── scheduler/                   # 定时调度
-│   │   ├── daily_job.py             # 常态轨（每日02:00）
-│   │   └── weekly_job.py            # 趋势轨（周日03:00）
+│   ├── scheduler/                   # 定时任务（由 cron/systemd 触发脚本调用）
+│   │   ├── daily_job.py             # 常态轨（每日03:00）
+│   │   └── weekly_job.py            # 趋势轨（周日04:00）
 │   │
 │   ├── utils/                       # 工具函数
-│       ├── io.py                    # 文件读写
+│       ├── io.py                    # 文件读写、路径管理
+│       ├── status.py                # 推理状态枚举与"可评估"判据（单一事实来源）
+│       ├── seeding.py               # 确定性种子派生（crc32，绝不用内置 hash()）
 │       ├── logger.py                # 日志配置
 │       └── metrics.py               # 评估指标
 │
@@ -149,10 +164,11 @@ mental-health-sense/
 │   ├── generate_simulation_data.py  # 生成60天双轨模拟数据（睡眠异常40-46 / 社交异常50-58，错开）
 │   ├── train_all_baselines.py       # 双轨建档（两轨各一个 GRU/scaler/残差统计/EWMA）
 │   ├── run_daily_pipeline.py        # 手动触发每日推理
+│   ├── run_weekly_pipeline.py       # 手动触发周轨（微调 + 周报）
 │   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
 │   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（10场景+混淆项，层次B）
 │
-├── tests/                           # 单元测试（13 个测试文件 / 312 用例，确定性可复现）
+├── tests/                           # 单元测试（14 个测试文件 / 332 用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -164,6 +180,8 @@ mental-health-sense/
 │   ├── test_risk_rules.py           # 风险规则测试
 │   ├── test_alert.py                # 预警推送测试
 │   ├── test_metrics.py              # 评估指标测试
+│   ├── test_adapters.py             # 传感器适配器测试
+│   ├── test_weekly_report.py        # 周报统计指标回归（曾恒为 0.00）
 │   ├── test_train_loop.py           # 训练循环 early-stopping / 回滚回归
 │   └── test_integration.py          # 端到端集成测试
 │
@@ -435,7 +453,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | **语言** | Python 3.10+ |
 | **深度学习** | PyTorch 2.x（CPU推理，<50MB内存） |
 | **数据处理** | NumPy, pandas, scikit-learn |
-| **调度** | APScheduler |
+| **调度** | cron / systemd 触发脚本 |
 | **日志** | loguru |
 | **周报** | Claude API（fallback: 规则模板） |
 | **测试** | pytest |
@@ -482,7 +500,7 @@ python scripts/run_daily_pipeline.py --date 2026-08-15 --elder E001
 适用场景：不接真机，用合成数据验证算法逻辑与判别力
 
 ```bash
-# 范围1：60天跑通 + 双轨信号隔离（层次A：链路对不对，19 项断言）
+# 范围1：60天跑通 + 双轨信号隔离（层次A：链路对不对，20 项断言）
 python scripts/validate_synthetic.py
 python scripts/validate_synthetic.py --keep   # 保留 V001 数据供人工检查
 
@@ -498,7 +516,7 @@ python scripts/validate_discriminative.py --only TN_sleep_improved   # 只跑单
 ### 3. 运行测试
 
 ```bash
-# 所有单元测试（13 个测试文件 / 312 用例）
+# 所有单元测试（14 个测试文件 / 332 用例）
 python -m pytest
 
 # 更详细输出
