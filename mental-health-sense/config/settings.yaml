@@ -1,14 +1,9 @@
-# ===== 全局配置 =====
-project:
-  name: "mental-health-sense"
-  version: "1.0.0"
-
-# ===== 数据路径 =====
-paths:
-  raw_data: "./data/raw/"
-  features: "./data/features/"
-  baselines: "./data/baselines/"
-  logs: "./data/logs/"
+# 已删除（2026-07-31）：project: 与 paths: 两段，均**零读取**。
+#   paths:     所有路径由 src/utils/io.py 的 get_project_root() + 写死的子目录名
+#              推出，改这里不生效——一段"改了没反应"的配置比没有更误导。
+#   project:   版本号另有 src/__init__.py 的 __version__，两处会漂。
+# 同批删除的还有 scheduler:（调度已改 cron/systemd）与 report.template（模板是
+# 模块级常量，不按名查表）。
 
 # ===== GRU 模型参数（双轨）=====
 # 睡眠轨与社会连接轨各自独立一个 GRU，互不干扰：
@@ -175,13 +170,10 @@ risk:
                                     # 门槛从 5 天提到 7 天，用更长持续性换可信度
       threshold_ratio: 1.5
 
-# ===== 调度 =====
-scheduler:
-  # 02:00 → 03:00：小贝壳的睡眠报告窗口延伸到当日 22:59 之后才最终成型，
-  # 02:00 拉取可能取到未闭合的报告。
-  daily_time: "03:00"
-  weekly_day: 6
-  weekly_time: "04:00"       # 跟着日任务后移，避免与 03:00 的日任务重叠
+# 已删除（2026-07-31）：scheduler: 整段，零读取。APScheduler 已随实时运行时移除，
+# 调度改由 cron/systemd 触发 scripts/*.py。触发时刻的设计理由（03:00 而非 02:00：
+# 小贝壳的睡眠报告窗口延伸到当日 22:59 之后才最终成型）保留在
+# src/scheduler/daily_job.py 的模块 docstring 里——那里才是它真正生效的地方。
 
 # ===== 预警推送 =====
 # 由 alert.trigger_alert 读取，缺项回落到 alert.py 的 ALERT_ACTIONS 内置默认。
@@ -205,7 +197,8 @@ alert:
 report:
   model: "claude-sonnet-5"
   max_tokens: 400
-  template: "weekly_report_v1"
+  # 已删除 template:：weekly_report.py 只读 model / max_tokens，
+  # 模板是 templates.py 的模块级常量，不按名查表。
 
 # ===== 抑郁评估（MPDD 旁路通道）=====
 #

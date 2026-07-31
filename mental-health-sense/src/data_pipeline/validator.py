@@ -23,7 +23,8 @@ QUALITY_DEGRADED = "degraded"
 QUALITY_INSUFFICIENT = "insufficient"
 QUALITY_OFFLINE = "offline"
 
-QUALITY_ENUM = (QUALITY_VALID, QUALITY_DEGRADED, QUALITY_INSUFFICIENT, QUALITY_OFFLINE)
+# 已删除（2026-07-31）：QUALITY_ENUM 元组，零引用（只在某个 docstring 的文本里
+# 被提到过）。四个档位常量本身是活的，各处按名引用。
 
 # 缺 2 维即降级（缺 1 维前向填充后仍算 valid）
 DEGRADED_THRESHOLD = 2

@@ -4,8 +4,6 @@ venv/
 env/
 
 # ===== 大模型权重（可下载，勿入库）=====
-funasr_models/
-models/
 
 # ===== Python 缓存 =====
 __pycache__/

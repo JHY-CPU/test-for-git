@@ -92,9 +92,8 @@ def get_feature_dim(track: str) -> int:
 
 # ========== Scaler ==========
 
-def create_scaler() -> StandardScaler:
-    """创建新的StandardScaler实例"""
-    return StandardScaler()
+# 已删除（2026-07-31）：create_scaler()。零调用方——trainer.py 直接
+# `fit_scaler(StandardScaler(), data, track)`，绕过了这个 3 行包装。
 
 
 def fit_scaler(scaler: StandardScaler, data: np.ndarray, track: str) -> StandardScaler:

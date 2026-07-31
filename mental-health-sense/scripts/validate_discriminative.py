@@ -354,7 +354,11 @@ def cleanup(velder: str):
     ]
     for p in targets:
         shutil.rmtree(p, ignore_errors=True)
-    for sub in ("daily_inference", "alerts"):
+    # ★ 清理白名单必须覆盖**所有**会按 elder_id 落盘的日志目录。
+    # mpdd_evidence 是 bee653e 才接进 daily_job 的输出，白名单没跟着更新，
+    # 于是每跑一次验证就往仓库里灌数百个 V001_/D_* 文件，还被顺手 git add 了进去
+    # （实测残留 605 个）。新增落盘目录时必须同步这里。
+    for sub in ("daily_inference", "alerts", "mpdd_evidence", "depression"):
         d = root / "logs" / sub
         if d.exists():
             for f in d.glob(f"{velder}_*"):

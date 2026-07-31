@@ -36,8 +36,9 @@ COPRESENCE_MIN_PERSONS = 2
 SMOOTH_WINDOW_SEC = 30
 SAMPLE_FPS = 1
 
-# 云端抽样校准：每日抽样帧数上限与一致率告警线
-CLOUD_CALIBRATION_MAX_FRAMES = 50
+# 云端抽样校准的一致率告警线。
+# 已删除（2026-07-31）：CLOUD_CALIBRATION_MAX_FRAMES = 50，零引用——
+# 抽样帧数上限属于 _read_raw 接入真机时的实现细节，写在这里只是个未被消费的常量。
 CLOUD_CALIBRATION_MIN_AGREEMENT = 0.90
 
 # 访客日判据：共处时长超过此值标 has_visitor
