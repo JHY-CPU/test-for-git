@@ -25,7 +25,7 @@
 | 部分 | 状态 | 说明 |
 |------|------|------|
 | GRU 基线 / EWMA / 风险判定 / 数据管道 | ✅ 真实可用 | 有算法、有测试，是系统的核心 |
-| 传感器**真实采集**（睡眠雷达/摄像头/麦克风 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
+| 传感器**真实采集**（小贝壳 / 萤石 C6c+T1C 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
 | 预警**推送**（子女App/短信/网格员） | ⚠️ 模拟 | `alert.py` 只写日志字符串，未接真实推送服务 |
 | 周报 LLM | ⚠️ 待核对 | 模型 id `claude-sonnet-5` 可能无效，有规则模板兜底 |
 
@@ -35,12 +35,14 @@
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 123 单测（12 文件）+ 端到端冒烟（`validate_synthetic.py`），每日管道链路已打通 |
-| **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 已落地判别力脚本 `validate_discriminative.py`（8 场景，含混淆项），当前稳定 6/8；已借此修复 2 个真实缺陷，暴露 1 个"串味"待办（见 `docs/VALIDATION.md §7`） |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 312 单测（13 文件）+ 端到端冒烟（`validate_synthetic.py` 19/19，含双轨信号隔离），每日管道链路已打通 |
+| **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 判别力脚本 `validate_discriminative.py`（10 场景，含 4 项混淆 + 1 项已知漏报），当前 **9/9**（KM 场景不计分）；已借此修复 5 个真实缺陷，仍有 2 项已知局限（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
-> ✅ **"循环论证"缺口已部分打破**：新脚本 `validate_discriminative.py` 的正常天带真实噪声（AR(1)+周节律）并加入混淆项（感冒/周末安静/单日尖峰），不再是"按答案出题"。它已证明判别力（当前 6/8），并借此修复了 2 个真实缺陷、暴露 1 个"串味"待办。
-> ⚠️ 但**老的 `generate_simulation_data.py` 仍是循环的**（异常方向=检测方向），只能测链路、测不了判别力。绝对数字仍需真实数据校准（层次 C）。
+> ✅ **"循环论证"缺口已部分打破**：`validate_discriminative.py` 的正常天带真实噪声（AR(1)+周末效应）并加入混淆项（单日尖峰 / 短期社交低落 / 睡眠全面好转），不再是"按答案出题"。当前 **9/9**，并借此修复了 5 个真实缺陷。
+> ⚠️ 但**`generate_simulation_data.py` 仍是循环的**（异常方向=检测方向），只能测链路与信号隔离、测不了判别力。绝对数字仍需真实数据校准（层次 C）。
+>
+> 🔁 **两个验证脚本都已固定随机种子**（数据用 crc32、GRU 用 `torch.manual_seed`），连跑两次结果一致。这条不是锦上添花：`validate_synthetic.py` 曾因未固定 torch 种子而给出**不可复现的 19/19**，掩盖了一个真实的灵敏度缺口（社交崩塌报不出类型），补上种子后才暴露出来（见 `docs/VALIDATION.md` 缺陷⑥）。
 >
 > 📖 GRU 训练的完整细节（结构/样本/耗时/无验证集设计/建档期实验/基线总览）见 `docs/TRAINING.md`。
 
@@ -57,19 +59,21 @@ pip install -r requirements.txt
 # 2. 生成模拟数据（1位老人 × 60天）
 python scripts/generate_simulation_data.py
 
-# 3. 冷启动训练（建档期 Day 21）
+# 3. 双轨建档（建档期 35 天，睡眠轨/社交轨各训一个 GRU）
 python scripts/train_all_baselines.py
 
-#    模拟数据为 60 天，异常注入在第 40-46 天（已避开建档期 1-21 + 观察期 22-28），
-#    正式运行期(29+)能完整看到"正常→异常升级→恢复"的预警过程。
+#    模拟数据为 60 天（2026-07-01 ~ 2026-08-29），两段异常**错开**注入：
+#      day 40-46 睡眠恶化   day 50-58 社交退缩
+#    错开是为了验证双轨的信号隔离——一轨报警时另一轨应保持安静。
+#    均已避开建档期(1-35)，正式运行期能完整看到"正常→异常升级→恢复"。
 #    也可直接用验证脚本查看：
-#      python scripts/validate_synthetic.py       # 60天跑通验证
-#      python scripts/validate_discriminative.py  # 8场景判别力验证
+#      python scripts/validate_synthetic.py       # 范围1：60天跑通 + 信号隔离（19 项断言）
+#      python scripts/validate_discriminative.py  # 范围2：10 场景判别力（含混淆项）
 
 # 4. 每日推理
 python scripts/run_daily_pipeline.py --date 2026-08-15
 
-# 5. 运行测试（12 个测试文件 / 123 用例）
+# 5. 运行测试（13 个测试文件 / 312 用例）
 python -m pytest
 ```
 
@@ -90,14 +94,14 @@ mental-health-sense/
 │   │   ├── activity/                # PIR + IPC活动数据（{date}.json）
 │   │   └── camera/                  # C6c 边缘人形检测（{date}.json，copresence_min 聚合来源）
 │   ├── features/                    # 聚合后的每日特征向量（CSV）
-│   │   └── E001/features.csv        # 6维健康特征
+│   │   └── E001/                    # features_sleep.csv（8维）+ features_social.csv（5维）
 │   ├── baselines/                   # 该老人的个人基线模型
 │   │   └── E001/
 │   │       ├── gru.pth              # 训练好的GRU模型
 │   │       ├── gru.prev.pth         # 微调前的模型备份（可回滚）
 │   │       ├── scaler.pkl           # StandardScaler（归一化）
 │   │       ├── residual_stats.pkl   # 训练残差统计（均值、标准差）
-│   │       ├── baseline_meta.json   # 基线元数据（训练时间 + 训练后推理计数，用于观察期判定）
+│   │       ├── baseline_meta.json   # 基线元数据（训练时间 + 训练后推理计数）
 │   │       └── ewma.pkl             # EWMA累积基线
 │   ├── logs/                        # 推理日志和周报
 │   │   ├── daily_inference/         # 每日GRU推理结果（JSON）
@@ -115,7 +119,7 @@ mental-health-sense/
 │   │   └── scaler_utils.py          # StandardScaler管理
 │   │
 │   ├── data_pipeline/               # 数据采集与预处理
-│   │   ├── aggregator.py            # 三维度(睡眠/活动/社交) → 6维特征向量
+│   │   ├── aggregator.py            # 三路传感器 → 双轨特征向量（睡眠8维 / 社交5维）
 │   │   ├── imputer.py               # 缺失值处理（前向填充）
 │   │   ├── validator.py             # 数据质量校验
 │   │   └── adapters/                # 传感器适配器
@@ -142,13 +146,13 @@ mental-health-sense/
 │       └── metrics.py               # 评估指标
 │
 ├── scripts/                         # 可执行脚本
-│   ├── generate_simulation_data.py  # 生成60天模拟数据（异常注入40-46，避开建档+观察期）
-│   ├── train_all_baselines.py       # 冷启动训练
+│   ├── generate_simulation_data.py  # 生成60天双轨模拟数据（睡眠异常40-46 / 社交异常50-58，错开）
+│   ├── train_all_baselines.py       # 双轨建档（两轨各一个 GRU/scaler/残差统计/EWMA）
 │   ├── run_daily_pipeline.py        # 手动触发每日推理
 │   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
-│   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（8场景+混淆项，层次B）
+│   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（10场景+混淆项，层次B）
 │
-├── tests/                           # 单元测试（12 个测试文件 / 123 用例，确定性可复现）
+├── tests/                           # 单元测试（13 个测试文件 / 312 用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -175,37 +179,52 @@ mental-health-sense/
 
 | 轨道 | 频率 | 功能 | 判定依据 |
 |------|------|------|----------|
-| **每日趋势轨** | 每日02:00 | 读取累积原始数据 → 6维特征聚合 → 深度趋势分析 → 预警出口 | GRU预测 + EWMA动态阈值 |
+| **每日趋势轨** | 每日02:00 | 读取累积原始数据 → 双轨特征聚合 → 每轨独立趋势分析 → 预警出口 | 每轨 GRU 预测 + 该轨 EWMA 动态阈值 |
 | **周报轨** | 周日03:00 | 汇总一周趋势生成周报 | LLM（fallback: 规则模板） |
 
-**核心理念**：系统是**双轨的每日批处理管道**（睡眠轨 / 社交轨各自独立推理），没有独立的实时采集运行时。各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`（其中 `social/` 由麦克风 VAD 采集对话轮次），每日趋势轨在累积数据上做判定后统一发出预警。所有心理风险预警仅在**连续多日偏离**后触发，避免因单日波动过度敏感、频繁打扰家人。
+> 注意"双轨"在本文档有两个不同含义，别混：这张表说的是**调度轨**（每日 / 每周）；
+> 下文的**睡眠轨 / 社交轨**说的是特征与模型的拆分。二者互相独立。
+
+**核心理念**：系统是**每日批处理管道**，没有独立的实时采集运行时。各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,camera}/`，每日趋势轨在累积数据上做判定后统一发出预警。特征与模型按信号来源拆成**睡眠轨（8 维）/ 社交轨（5 维）**，两轨各有独立的 GRU、scaler、残差统计与 EWMA，互不共享——这是切断跨类型"串味"的关键。所有心理风险预警仅在**连续多日偏离**后触发，避免因单日波动过度敏感、频繁打扰家人。
 
 ### 数据流架构
 
 ```
 【每日趋势轨：批处理，每天凌晨02:00触发】
 
-data/raw/sleep/{date}.json      ─┐
-data/raw/activity/{date}.json   ─┼─► 按自然日聚合传感器数据
-data/raw/social/{date}.json     ─┘        ↓（无数据则标 missing）
-（social 由麦克风 VAD 采集）           缺失填充 / 数据质量校验
+data/raw/sleep/{date}.json      ─┐   小贝壳无感睡眠监测仪
+data/raw/activity/{date}.json   ─┼─► 萤石 T1C 人体移动传感器
+data/raw/camera/{date}.json     ─┘   萤石 C6c（边缘人形检测，不出图/不采音）
+                                          ↓ 按自然日聚合（无数据则标 missing）
+                                      缺失填充 / 数据质量校验
                                           ↓
-                                      6维特征向量
+                          ┌───────────────┴───────────────┐
+                   睡眠轨 8 维                      社交轨 5 维
+                          ↓                               ↓
+                 scaler_sleep 归一化              scaler_social 归一化
+                          ↓                               ↓
+                 gru_sleep 预测正常态             gru_social 预测正常态
+                          ↓                               ↓
+                 abs 残差 → 加权总分              abs 残差 → 加权总分
+                 signed_z 保号（判方向）           signed_z 保号（判方向）
+                          ↓                               ↓
+              ewma_sleep 动态阈值           ewma_social 动态阈值（工作日/周末分池）
+              （偏离日冻结，上限 14 天）      （偏离日冻结，上限 14 天）
+                          ↓                               ↓
+                 该轨连续偏离天数统计              该轨连续偏离天数统计
+                          └───────────────┬───────────────┘
                                           ↓
-                                      GRU模型预测（预测正常态）
+                    风险类型分类（读 signed_z，方向性判定）
+                    睡眠稳定性 / 社会连接减弱 / 作息节律紊乱
                                           ↓
-                                      加权残差计算
+                    Level 0/1/2/3 判定（每轨各自算，取较高者）
+                    + 方向闸门：升级到 L2/L3 需有"朝坏方向"的证据
                                           ↓
-                                      EWMA动态阈值判定
-                                          ↓
-                                      连续偏离天数统计
-                                          ↓
-                                      风险类型分类（睡眠问题 / 社交孤独）
-                                          ↓
-                                      Level 0/1/2/3判定
-                                          ↓
-                                      预警推送（统一出口）
+                                 预警推送（统一出口）
 ```
+
+> **两轨绝不跨轨比较绝对分**：8 维与 5 维的权重和不同、残差尺度不同，
+> 取最大或求平均都没有统计意义，只能各自与自己的阈值比、再比较等级。
 
 ### 四级风险（全部基于趋势）
 
@@ -213,10 +232,19 @@ data/raw/social/{date}.json     ─┘        ↓（无数据则标 missing）
 |------|------|----------|----------|
 | 0 | 正常 | 无偏离 | 无 |
 | 1 | 关注 | 单日偏离、间歇偏离，或单日高峰值超标 | 记录日志 |
-| 2 | 提醒 | 连续3天偏离 **且** 平均幅度超标（avg_anomaly > sustained_avg） | 推送子女App |
-| 3 | 严重 | 连续5天偏离 **且** 平均幅度超标（同提醒级幅度门槛） | 短信 + 社区网格员 + 强制响铃 |
+| 2 | 提醒 | 连续3天偏离 **且** 平均幅度超标（avg_anomaly > sustained_avg）**且**过方向闸门 | 推送子女App |
+| 3 | 严重 | 连续5天偏离 **且** 平均幅度超标（同提醒级幅度门槛）**且**过方向闸门 | 短信 + 社区网格员 + 强制响铃 |
+
+> 等级按**每轨各自计算、取较高者**（`judge.py`），不跨轨比较绝对分。
 
 > **严重级为何也要幅度门槛？** Level 3 会触发社区网格员介入 + 强提醒，代价高。若仅凭连续天数升级，长达数天但每天只"擦线"越过动态阈值的低幅度偏离也会直冲最高级，与提醒级（带幅度门槛）判定不一致，且过度打扰家人和社区。因此严重级与提醒级共用 `avg_anomaly > sustained_avg` 幅度门槛。
+
+> **方向闸门是什么？** `anomaly_score` 用的是 **abs** 残差，方向无关——"睡眠效率从
+> 0.88 涨到 0.97"与"掉到 0.68"产生同样大的分数。实测中一次**睡眠全面好转**因此被判到
+> L3，家属会收到"您父亲睡眠严重异常"，而实情是老人睡得更好了。故 L2/L3 额外要求有
+> "朝坏方向"的正面证据（读 `signed_z`）：若驱动升级的那段连续偏离全是好转，封顶在
+> L1"关注"——变化本身值得留意（可能是躁狂期、也可能是数据问题），但不该发风险提醒。
+> 数据缺失**不算**好转的证据，拿不到方向信息时保留原等级。详见 `docs/VALIDATION.md` 缺陷⑤。
 
 ### 三种风险类型
 
@@ -312,7 +340,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | 个人化基线 | 避免用群体平均误判个体差异（误报率降低 4–6×） |
 | EWMA 动态阈值取 min | 防止老人缓慢衰退后系统"习以为常"变迟钝 |
 | 连续天数门槛 | 单日波动不触发（消融实验：误报率从 3.2 → 0.4 次/天） |
-| 冷启动观察期 | 训练后 7 次推理仅记录不报警，等待基线稳定（按 `baseline_meta.json` 记录的**训练后推理计数**判定，不受 EWMA 预热样本把 n 顶到 7、使观察期形同虚设的干扰；旧基线无 meta 时安全降级） |
+| ~~冷启动观察期~~（**已取消**） | 曾为"训练后 7 次推理仅记录不报警"。建档期延长到 35 天后，EWMA 初始已有 28 个样本、动态阈值直接稳定，观察期不再必要——留着只是白白多 7 天不报警的盲区。配置项 `cold_start_observation_days` 保留但置 0，代码路径仍在（真机数据若发现阈值预热更慢，可随时调回） |
 | 每日批处理统一出口 | 预警仅在累积数据上连续偏离后发出，不做单日实时报警，避免单点波动打扰家人 |
 
 ---
@@ -324,7 +352,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ### 1. 训练数据健康门禁（防"学坏"）
 
-**问题**：若建档期（默认前 21 天）恰好混入老人状态不好的日子，GRU 会把异常学成
+**问题**：若建档期（默认前 35 天）恰好混入老人状态不好的日子，GRU 会把异常学成
 "正常基线"，之后再也报不出来。
 
 **做法**（`src/baseline/data_health.py`，冷启动时调用）：训练前用 **MAD（中位数绝对
@@ -345,7 +373,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ### 3. 冷启动兜底（消除头两周盲区）
 
-**问题**：GRU 需建档期 + 观察期才可靠，此前系统若完全不检测，等于头两周盲区。
+**问题**：GRU 需要建档期才可靠，此前系统若完全不检测，等于头几周盲区。
 
 **做法**（`src/baseline/cold_start_fallback.py`）：GRU 基线就绪前，用"滑动均值 ± Nσ"的
 加权 z-score 做基础离群检测。`daily_job` 在 `daily_inference` 返回 `cold_start` 时自动切换到
@@ -354,7 +382,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 
 ### 4. 过拟合抑制与可回滚
 
-- **early-stopping**：冷启动建档期（默认 21 天）约 14 个训练样本，150 epoch 易过拟合。连续
+- **early-stopping**：建档期（默认 35 天）滑窗后不到 30 个训练样本，150 epoch 易过拟合。连续
   `patience` 轮 loss 无改善则提前停止，并**回滚到最优权重**。冷启动与每周微调**共用同一
   训练循环** `_train_loop`（冷启动 patience=20、微调 patience=10），两条路径的过拟合抑制
   策略一致，不再是微调跑满固定轮数。
@@ -439,7 +467,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 # 生成模拟数据
 python scripts/generate_simulation_data.py
 
-# 冷启动训练（建档期 Day 21）
+# 双轨建档（建档期 35 天；两轨各训一个 GRU，互不共享权重与 scaler）
 python scripts/train_all_baselines.py      # 或：python -m src.baseline.trainer
 
 # 每日推理（默认老人 E001）
@@ -454,17 +482,23 @@ python scripts/run_daily_pipeline.py --date 2026-08-15 --elder E001
 适用场景：不接真机，用合成数据验证算法逻辑与判别力
 
 ```bash
-# 60天跑通验证（层次A：链路对不对）
+# 范围1：60天跑通 + 双轨信号隔离（层次A：链路对不对，19 项断言）
 python scripts/validate_synthetic.py
+python scripts/validate_synthetic.py --keep   # 保留 V001 数据供人工检查
 
-# 8场景判别力验证（层次B：设计好不好，含混淆项）
+# 范围2：10 场景判别力（层次B：设计好不好，含混淆项）
 python scripts/validate_discriminative.py
+python scripts/validate_discriminative.py --only TN_sleep_improved   # 只跑单个场景
 ```
+
+> 两个脚本都固定了随机种子（数据用 crc32、GRU 用 `torch.manual_seed`），
+> 连跑两次结果应完全一致。**若结果会飘，先修脚本再看结论**——
+> 不可复现的绿色比红色更危险，它会让人停止追查（见 `docs/VALIDATION.md` 缺陷⑥）。
 
 ### 3. 运行测试
 
 ```bash
-# 所有单元测试（12 个测试文件 / 123 用例）
+# 所有单元测试（13 个测试文件 / 312 用例）
 python -m pytest
 
 # 更详细输出
@@ -554,8 +588,14 @@ python -m pytest -v
 
 ```yaml
 gru:
-  feature_dim: 6           # 特征维度（6维健康特征，已移除时间编码与语音声学维）
-  hidden_dim: 16           # 隐藏层维度
+  # 按轨分块：两轨各自的维度与隐藏层
+  sleep:
+    feature_dim: 8         # 睡眠轨 8 维
+    hidden_dim: 8          # 隐藏层维度（刻意取小，全模型仅 504 参数）
+  social:
+    feature_dim: 5         # 社交轨 5 维
+    hidden_dim: 8          # 同上（405 参数）
+  # 以下两轨共用
   num_layers: 1            # GRU层数
   window: 7                # 时间窗口（天）
   dropout: 0.2             # Dropout比率
@@ -599,7 +639,7 @@ risk:
     attention: 1           # Level 1（关注）
     warning: 3             # Level 2（提醒）
     severe: 5              # Level 3（严重）
-  cold_start_observation_days: 7  # 训练后观察期（仅记录不报警）
+  cold_start_observation_days: 0  # 训练后观察期（已取消：建档期 35 天已让阈值稳定）
 ```
 
 ### realtime_config.yaml（⚠️ 已成孤儿）
@@ -660,8 +700,44 @@ python scripts/run_daily_pipeline.py --date "$(date +%F)"
 
 **解决方法**：
 - 检查传感器是否正常工作
-- 查看 `data/raw/` 目录下是否有数据
+- 查看 `data/raw/{sleep,activity,camera}/{elder_id}/` 下是否有当天的 JSON
 - 使用 `validator.py` 检查数据质量
+
+### 问题2：某一轨报 `data_insufficient`，另一轨正常
+
+双轨是**独立**推理的，一轨的数据缺失不影响另一轨出结果。各轨的数据来源：
+
+| 轨 | 原始目录 | 提供的维 |
+|----|---------|---------|
+| 睡眠 | `data/raw/sleep/` | 全部 8 维 |
+| 社交 | `data/raw/activity/` | `activity_counts` / `out_of_home_min` / `rar_amplitude` / `rar_iv`（后两个由 `hourly_activity` 算出） |
+| 社交 | `data/raw/camera/` | 仅 `copresence_min` |
+
+所以社交轨报错优先查 `activity/`（它撑起 4 个维中的全部节律特征）；
+`camera/` 缺失只会让 `copresence_min` 变 missing。
+
+### 问题3：验证脚本两次运行结果不一样
+
+不应该发生——两个脚本都固定了随机种子（数据用 crc32、GRU 用 `torch.manual_seed`）。
+若真的会飘，**先修脚本再看结论**：不可复现的绿色比红色更危险，
+它会让人停止追查。本项目已被这件事咬过一次（见 `docs/VALIDATION.md` 缺陷⑥）。
+
+### 问题4：等级升到 L2/L3 但风险类型为空
+
+正常情况，不是 bug。等级看的是**总分持续偏离**，类型看的是**特定维的方向性组合**：
+总分可能被某个高权重维单独拉高，而没有任何一条规则的必选维凑齐。
+若确认应该报类型却报不出，查该规则必选维的 `signed_z` 是否都过了
+`threshold_ratio`——变异系数大的维（如 `copresence_min`）z 分容易被压小。
+
+### 问题5：连续偏离够天数了，等级却封在 L1
+
+大概率是方向闸门生效：驱动升级的那段连续偏离**全是朝好方向**（睡得更好、出门更多）。
+这是刻意设计，不是漏报——好转不该发风险提醒。
+
+判断方法：`judge.py` 的返回值里每轨带 `adverse_direction` 字段（**注意它不落盘**，
+`daily_inference/*.json` 里没有，需要在代码里取或加日志）。
+若你认为该报，检查日志里该轨 `signed_z` 的符号是否与
+`config/feature_weights.json` 中该维的 `direction` 一致。
 
 ---
 
