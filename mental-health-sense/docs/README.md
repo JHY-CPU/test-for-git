@@ -26,10 +26,41 @@
 |------|------|------|
 | GRU 基线 / EWMA / 风险判定 / 数据管道 | ✅ 真实可用 | 有算法、有测试，是系统的核心 |
 | 传感器**真实采集**（小贝壳 / 萤石 C6c+T1C 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
-| 预警**推送**（子女App/短信/网格员） | ⚠️ 模拟 | `alert.py` 只写日志字符串，未接真实推送服务 |
-| 周报 LLM | ⚠️ 待核对 | 模型 id `claude-sonnet-5` 可能无效，有规则模板兜底 |
+| 预警**推送**（子女App/短信/网格员） | ⚠️ 模拟 | `alert.py` 按 `settings.yaml` 的 `alert` 段决定动作，但只写日志字符串，未接真实推送服务；**且无冷却/去重机制**（见下方"已知局限"①） |
+| 周报 LLM | ✅ 可用（可选依赖） | 模型与 token 上限从 `report.model` / `report.max_tokens` 读；`anthropic` 未安装时自动回落规则模板 |
 
 **一句话**：现在能端到端跑通、能验证算法逻辑，靠的是**模拟/文件数据**；接真实设备与推送服务是后续工作。
+
+### 已知局限（如实记录，非阻断）
+
+| # | 局限 | 影响 | 现状 |
+|---|------|------|------|
+| ① | **`alert.py` 无冷却/去重/抑制** | 永久性变化会**无限期每日重复报同一等级**——诊断场景 `PERM_step` 实测连续 91 天每天 L3。检测层是对的（老人确实持续处于低效睡眠），缺口在**预警策略层**：把"状态持续"当成了"每天都是新事件" | ⚠️ **未解决，优先级最高**。`max_freeze_days` 已提到配置，但那只缓解阈值追赶速度，不是解法 |
+| ② | 残差统计未按周内分池 | `copresence_min`（周末 ×2.4）等有周末效应的维，残差 std 被双峰分布抬高、z 分被系统性压小 | 以 `social_decline` 的 `threshold_ratio=1.0` 局部补偿；根治需远长于 7 天的留出段 |
+| ③ | GRU 固定 7 天窗对持续性变化钝感 | 异常持续到第 3 天后输入窗被异常日填满、预测跟着漂移，残差收缩 | EWMA 层已用偏离日冻结缓解，模型层无对应机制；属固定窗口预测器的固有取舍 |
+| ④ | `KM_social_partial` 必然漏报 | 只共处↓、外出照常（子女不来但自己照常出门）不触发 | "三项全中"规则换取低误报的代价，已计入验证记录 |
+
+### 本轮改动（2026-07-31 代码走查）
+
+这一轮**不改任何算法思路**，只把已有设计真正接通、并把断言挪到正确的层。
+9 条缺陷的共同特征是：**验证脚本与单测都断言在错的层**，所以它们能长期活在
+"312 全绿 + 19/19 + 9/9"之下。完整实证见 `docs/VALIDATION.md` §8。
+
+| 修掉的 | 修前实测 |
+|--------|---------|
+| 冷启动兜底进不了判定层 | 建档期连续 6 天严重异常，`risk_level` **全 0**，一条预警都发不出 |
+| `data_quality` 从未落进推理日志 | "降级日跳过持续性统计"这条**写进项目约定的不变量在生产链路里从未生效**（60/60 日志无该字段） |
+| 幅度门槛被 7 天窗稀释、且与量纲脱节 | 连续 3 天各 1.45（都越过各自阈值）被 4 个正常天拉到 0.907，只报 L1 |
+| 持续性统计不看日历 | 5 条日志跨 22 个日历日（断 17 天）仍数出 `consecutive=5` → L3 |
+| 7 天日志窗与 7 天门槛互卡 | circadian 降级模式只要历史含 1 个降级日就永远不可激活 |
+| 三处配置段无人读取 | `alert` 整段、`report.*` 均未生效；`ewma.max_freeze_days` 配置里根本没这个键 |
+| `requirements.txt` 装不上 | `pyaudio` 缺 portaudio 头文件 → pip 整体中止 → torch 一个都装不上 |
+| 周报异常分恒 0.00、周期错配 | 读顶层 `anomaly_score`（双轨后已不存在）；本周无数据时静默拿别的周顶替 |
+| 周轨没有入口、MPDD 契约从未产出 | `run_weekly_pipeline` 零调用方；契约定义了测了但没有链路写过 |
+
+> **这一轮最该记住的不是任何一条具体缺陷**，而是：**全绿不等于没问题，要看绿的是什么。**
+> 当时三条"通过"的断言分别测了 status 流转、validator 的辅助函数、和手搓的假数据，
+> 唯独没测真实链路的输出。
 
 系统验证分三层，证据强度依次递增（完整方案见 `docs/VALIDATION.md`）：
 
@@ -126,7 +157,7 @@ mental-health-sense/
 │   │   ├── trainer.py               # 冷启动（健康门禁+early-stopping）+ 每周微调（剔除偏离天+模型备份）
 │   │   ├── inference.py             # 每日推理引擎
 │   │   ├── data_health.py           # 训练数据健康门禁（MAD离群筛查，防GRU"学坏"）
-│   │   ├── cold_start_fallback.py   # 冷启动兜底（GRU就绪前用滑动均值检测）
+│   │   ├── cold_start_fallback.py   # 冷启动兜底（GRU就绪前用中位数/MAD稳健基线检测）
 │   │   ├── ewma.py                  # EWMA累积基线（替代60天窗口）
 │   │   └── scaler_utils.py          # StandardScaler管理
 │   │
@@ -197,8 +228,8 @@ mental-health-sense/
 
 | 轨道 | 频率 | 功能 | 判定依据 |
 |------|------|------|----------|
-| **每日趋势轨** | 每日02:00 | 读取累积原始数据 → 双轨特征聚合 → 每轨独立趋势分析 → 预警出口 | 每轨 GRU 预测 + 该轨 EWMA 动态阈值 |
-| **周报轨** | 周日03:00 | 汇总一周趋势生成周报 | LLM（fallback: 规则模板） |
+| **每日趋势轨** | 每日03:00 | 读取累积原始数据 → 双轨特征聚合 → 每轨独立趋势分析 → 预警出口 | 每轨 GRU 预测 + 该轨 EWMA 动态阈值 |
+| **周报轨** | 周日04:00 | 双轨微调 + 汇总一周趋势生成周报 | LLM（fallback: 规则模板） |
 
 > 注意"双轨"在本文档有两个不同含义，别混：这张表说的是**调度轨**（每日 / 每周）；
 > 下文的**睡眠轨 / 社交轨**说的是特征与模型的拆分。二者互相独立。
@@ -208,13 +239,15 @@ mental-health-sense/
 ### 数据流架构
 
 ```
-【每日趋势轨：批处理，每天凌晨02:00触发】
+【每日趋势轨：批处理，每天凌晨03:00触发】
 
 data/raw/sleep/{date}.json      ─┐   小贝壳无感睡眠监测仪
 data/raw/activity/{date}.json   ─┼─► 萤石 T1C 人体移动传感器
 data/raw/camera/{date}.json     ─┘   萤石 C6c（边缘人形检测，不出图/不采音）
                                           ↓ 按自然日聚合（无数据则标 missing）
                                       缺失填充 / 数据质量校验
+                              （四态 valid/degraded/insufficient/offline
+                                → 按轨随推理结果落盘，供持续性统计判断这天算不算数）
                                           ↓
                           ┌───────────────┴───────────────┐
                    睡眠轨 8 维                      社交轨 5 维
@@ -230,15 +263,21 @@ data/raw/camera/{date}.json     ─┘   萤石 C6c（边缘人形检测，不�
               （偏离日冻结，上限 14 天）      （偏离日冻结，上限 14 天）
                           ↓                               ↓
                  该轨连续偏离天数统计              该轨连续偏离天数统计
+                 （按自然日回溯，缺日/降级日跳过但连续跳过 >3 天即打断）
                           └───────────────┬───────────────┘
                                           ↓
                     风险类型分类（读 signed_z，方向性判定）
                     睡眠稳定性 / 社会连接减弱 / 作息节律紊乱
                                           ↓
                     Level 0/1/2/3 判定（每轨各自算，取较高者）
+                    + 幅度门槛：severity = 分数/自身阈值，只算在这段 streak 上
                     + 方向闸门：升级到 L2/L3 需有"朝坏方向"的证据
                                           ↓
-                                 预警推送（统一出口）
+                    ┌─────────────────────┴─────────────────────┐
+                    ↓                                           ↓
+            预警推送（统一出口）                  MPDD-AVP 单向证据契约
+            L1 日志 / L2 子女 / L3 +网格员         mpdd_evidence/*.json
+            ⚠️ 当前无冷却去重，见"已知局限"        （旁路，失败不影响主链路）
 ```
 
 > **两轨绝不跨轨比较绝对分**：8 维与 5 维的权重和不同、残差尺度不同，
@@ -249,13 +288,19 @@ data/raw/camera/{date}.json     ─┘   萤石 C6c（边缘人形检测，不�
 | 等级 | 名称 | 触发条件 | 响应措施 |
 |------|------|----------|----------|
 | 0 | 正常 | 无偏离 | 无 |
-| 1 | 关注 | 单日偏离、间歇偏离，或单日高峰值超标 | 记录日志 |
-| 2 | 提醒 | 连续3天偏离 **且** 平均幅度超标（avg_anomaly > sustained_avg）**且**过方向闸门 | 推送子女App |
+| 1 | 关注 | 单日偏离、间歇偏离，或 7 天窗内有单日高峰（`max_severity > high_spike_severity`） | 记录日志 |
+| 2 | 提醒 | 连续3天偏离 **且** 该段平均幅度超标（`avg_severity > sustained_severity`）**且**过方向闸门 | 推送子女App |
 | 3 | 严重 | 连续5天偏离 **且** 平均幅度超标（同提醒级幅度门槛）**且**过方向闸门 | 短信 + 社区网格员 + 强制响铃 |
 
 > 等级按**每轨各自计算、取较高者**（`judge.py`），不跨轨比较绝对分。
+> "连续 N 天"按**自然日**数，不按日志记录条数（见下文"持续性统计的日历语义"）。
 
-> **严重级为何也要幅度门槛？** Level 3 会触发社区网格员介入 + 强提醒，代价高。若仅凭连续天数升级，长达数天但每天只"擦线"越过动态阈值的低幅度偏离也会直冲最高级，与提醒级（带幅度门槛）判定不一致，且过度打扰家人和社区。因此严重级与提醒级共用 `avg_anomaly > sustained_avg` 幅度门槛。
+> **严重级为何也要幅度门槛？** Level 3 会触发社区网格员介入 + 强提醒，代价高。若仅凭连续天数升级，长达数天但每天只"擦线"越过动态阈值的低幅度偏离也会直冲最高级，与提醒级（带幅度门槛）判定不一致，且过度打扰家人和社区。因此严重级与提醒级共用同一条幅度门槛。
+
+> **幅度门槛只算在"驱动本次升级的那段连续偏离"上**，不是整个 7 天窗。用整窗均值会被
+> 窗口里的正常天稀释：实测连续 3 天各 1.45（三天都实打实越过了各自的动态阈值）
+> 被前面 4 个正常天拉到 0.907，卡在门槛下只报 L1。方向闸门早已只看这段 streak，
+> 两个门槛必须看同一段数据。详见 `docs/VALIDATION.md` §8.3。
 
 > **方向闸门是什么？** `anomaly_score` 用的是 **abs** 残差，方向无关——"睡眠效率从
 > 0.88 涨到 0.97"与"掉到 0.68"产生同样大的分数。实测中一次**睡眠全面好转**因此被判到
@@ -358,8 +403,35 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | 个人化基线 | 避免用群体平均误判个体差异（误报率降低 4–6×） |
 | EWMA 动态阈值取 min | 防止老人缓慢衰退后系统"习以为常"变迟钝 |
 | 连续天数门槛 | 单日波动不触发（消融实验：误报率从 3.2 → 0.4 次/天） |
+| 幅度门槛（severity） | 光有天数不够，那段偏离的平均幅度还要高出自身阈值 15% 以上，挡住"连续多天擦线" |
+| 方向闸门 | L2/L3 需有"朝坏方向"的正面证据，防止全面好转被报成严重风险 |
+| 降级日/缺日跳过 | 传感器抖一下既不清零已攒的偏离段，也不凭空算成偏离；但连续跳过 > 3 天就打断 |
+| 日历连续性校验 | "连续 N 天"按自然日数，设备离线前后的两段偏离不会被拼成一段 |
 | ~~冷启动观察期~~（**已取消**） | 曾为"训练后 7 次推理仅记录不报警"。建档期延长到 35 天后，EWMA 初始已有 28 个样本、动态阈值直接稳定，观察期不再必要——留着只是白白多 7 天不报警的盲区。配置项 `cold_start_observation_days` 保留但置 0，代码路径仍在（真机数据若发现阈值预热更慢，可随时调回） |
 | 每日批处理统一出口 | 预警仅在累积数据上连续偏离后发出，不做单日实时报警，避免单点波动打扰家人 |
+
+### 持续性统计的日历语义
+
+"连续 N 天"这句话看着简单，实现上有三个坑，都踩过：
+
+1. **按记录条数数 ≠ 按自然日数**。`load_daily_results` 取的是最近 N 个**文件**；
+   而两轨全不可用那天 `daily_job` 直接跳过推理、**连日志都不生成**。两者叠加，
+   设备离线一段时间后断裂两端的偏离日会被当成连续日拼起来——实测 5 条日志
+   跨越 22 个日历日（中间断 17 天）仍数出 `consecutive=5` → L3。
+   现在统一按自然日逐日回溯（`rules._walk_back`）。
+
+2. **"跳过"必须有上限**。缺日与降级日走同一条路径（都是"这天我们不知道"），
+   既不累加也不打断；但连续跳过超过 `risk.continuity.max_skip_days`（默认 3）
+   就打断连续段——否则一次长时间离线又会把两段无关的偏离粘起来。
+
+3. **加载窗口要够宽**。`circadian_disruption` 的降级模式要求连续 7 天达标，
+   若只加载 7 条日志（今天 + 6 天历史），历史里有一个降级日被跳过，计数上限
+   就掉到 6，规则在**数学上永远不可激活**。而降级模式正是因为睡眠轨不可用才
+   进入的，恰恰是最容易伴随数据质量问题的场景。现在加载天数由
+   `rules.required_history_days()` 从各规则门槛推导（当前 25 天）。
+
+> 等级判定窗口仍固定为最近 **7 个自然日**——"最近状况有多严重"这个问题只该看最近一周；
+> 只有风险类型的持续性统计才回溯更远。
 
 ---
 
@@ -389,14 +461,33 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 **做法**（`weekly_retrain`）：微调只用 `is_deviation=False` 的正常天，排除已被每日推理
 判定为偏离的日期。正常天不足则跳过微调，而非用脏数据。
 
-### 3. 冷启动兜底（消除头两周盲区）
+### 3. 冷启动兜底（消除建档期盲区）
 
-**问题**：GRU 需要建档期才可靠，此前系统若完全不检测，等于头几周盲区。
+**问题**：GRU 需要 35 天建档期才可靠，此前系统若完全不检测，等于头五周是盲区。
 
-**做法**（`src/baseline/cold_start_fallback.py`）：GRU 基线就绪前，用"滑动均值 ± Nσ"的
-加权 z-score 做基础离群检测。`daily_job` 在 `daily_inference` 返回 `cold_start` 时自动切换到
+**做法**（`src/baseline/cold_start_fallback.py`）：GRU 基线就绪前，用**中位数 / MAD 稳健基线**
+的加权 z-score 做基础离群检测。`daily_job` 在 `daily_inference` 返回 `cold_start` 时自动切换到
 兜底检测。sigma 默认 **3.0**，比 GRU 轨更保守——建档期滑动基线本身不稳，宁可漏报也不要
 一开始就误报动摇信任。GRU 一就绪，兜底自动停用。
+
+改用中位数/MAD 而非均值/标准差：建档期只有十几个样本，混入 1-2 个异常天就会把
+均值和标准差拽走（异常天撑大 std → 后续真异常反而检不出）。
+
+> ⚠️ **这一层曾经形同虚设，值得单独说清楚。**
+>
+> 兜底确实算出了偏离、给了带方向的 `signed_z`，但 `judge` 与 `rules` 的状态白名单
+> 只收 `("success","observation")`，**兜底轨的结果整个被丢掉**。实测建档期注入
+> 连续 6 天严重睡眠恶化（`anomaly_score` 166→58，阈值 3.0，`is_deviation` 6/6），
+> `risk_level` **全是 0**，一条预警都发不出——盲区在检测层补上了，预警层原封不动。
+>
+> 现在 `cold_start_fallback` 与 `success`/`observation` 一起由 `src/utils/status.py`
+> 统一定义为"可评估状态"。**加新状态时只改那一个文件**：此前白名单以字面量散在
+> 五处，正是同一个缺陷反复出现的温床。同一场景修复后的升级曲线是
+> `L1 → L1 → L2 → L2 → L3 → L3`。
+>
+> 注意接线不是简单加白名单：兜底的分是稳健 |z|（阈值 3.0，正常天可达 1.8），
+> 与 GRU 轨的残差尺度不可比，所以幅度门槛必须同时改成 severity 相对量——
+> 否则建档期会天天误报 L1。详见 `docs/VALIDATION.md` §8.2 / §8.3。
 
 ### 4. 过拟合抑制与可回滚
 
@@ -493,7 +584,24 @@ python scripts/run_daily_pipeline.py --date 2026-08-15
 
 # 指定老人 ID（如接入真实数据时使用了其它编号）
 python scripts/run_daily_pipeline.py --date 2026-08-15 --elder E001
+
+# 周轨：双轨微调 + 周报
+python scripts/run_weekly_pipeline.py
+python scripts/run_weekly_pipeline.py --no-retrain   # 只出周报，不动基线（排查周报时用）
 ```
+
+**每日推理会产出三样东西**：
+
+| 产物 | 路径 | 说明 |
+|------|------|------|
+| 特征行 | `data/features/{id}/features_{track}.csv` | 同一 `day_key` 重复写入时**幂等覆盖**，补算不会产生重复行 |
+| 推理日志 | `data/logs/daily_inference/{id}_{date}.json` | 双轨分数/阈值/残差 + 数据质量 + 写回的 `risk_level` |
+| 证据契约 | `data/logs/mpdd_evidence/{id}_{date}.json` | 给外部抑郁模型的单向输入（旁路） |
+
+> **补算与重跑是安全的**：特征行幂等覆盖，EWMA 按 `day_key` 去重
+> （`day_key <= last_day_key` 直接拒收），所以重跑同一天不会把分喂进基线两次、
+> 也不会让冻结计数多加一次。乱序补算历史日同样会被挡住——把早已过去的分当成
+> 最新观测喂进指数加权，权重完全错位。
 
 ### 2. 端到端验证（合成数据）
 
@@ -571,6 +679,7 @@ python -m pytest -v
     "ewma_min_samples": 20,
     "ewma_frozen": false,
     "in_observation_period": false,
+    "data_quality": "valid",
     "status": "success"
   },
   "social": {
@@ -579,8 +688,15 @@ python -m pytest -v
     "dynamic_threshold": 2.3347,
     "is_deviation": false,
     "ewma_pool": "weekday",
+    "data_quality": "degraded",
     "status": "success"
-  }
+  },
+  "track_quality": { "sleep": "valid", "social": "degraded" },
+  "is_deviation": false,
+  "consecutive_deviation_days": 0,
+  "risk_type_qualifies": { "sleep_stability": false, "social_decline": false,
+                           "circadian_disruption": false },
+  "risk_level": 0
 }
 ```
 
@@ -591,12 +707,50 @@ python -m pytest -v
 >   用 abs 判方向会让"好转"和"恶化"无法区分（见 `docs/VALIDATION.md` 缺陷⑤）。
 > - **`ewma_pool`**：社交轨分 `weekday`/`weekend` 两池（周末有子女探访效应）；睡眠轨单池 `default`。
 > - **`ewma_frozen`**：当天是否因判偏离而冻结了基线更新（见 `docs/VALIDATION.md` 缺陷④）。
-> - `status` 取值：`success` / `cold_start` / `cold_start_fallback`（GRU 未就绪，走滑动均值兜底）/
->   `data_insufficient` / `observation` / `error`。
+> - **`data_quality`（按轨）**：该轨当天的数据质量，`valid` / `degraded` / `insufficient` / `offline`。
+>   **持续性统计靠它决定这天算不算数**，所以必须随推理结果一起落盘。
+>   曾经它只写进 `features_{track}.csv`、没进推理日志（实测 60/60 个日志都没有该字段），
+>   于是"降级日既不累加也不打断"这条设计在生产链路里从未生效——读不到字段就一律
+>   按 valid 计入，传感器抖动照样能攒成预警。判定按**轨**读：用单一顶层值会让睡眠轨
+>   降级压住社交轨的计数，等于在判定层把双轨的故障隔离又粘回去。
+> - `status` 取值：`success` / `observation` / `cold_start_fallback`（GRU 未就绪，走稳健滑动基线兜底）
+>   —— 这三个是**可评估状态**，能参与判级判型；`cold_start` / `data_insufficient` 不参与。
+>   判据集中在 `src/utils/status.py`，不要在别处再写字面量白名单。
+> - **`risk_type_qualifies` / `risk_level`** 由 `quick_judge` 判定后**写回今天这个文件**，
+>   次日的持续性统计才读得到。破坏这条写回链会让风险类型永远激活不了。
 > - 风险**等级**与风险**类型**由 `src/risk/judge.py` 在两轨推理结果之上单独判定，
 >   **每轨各自算等级、取较高者**，绝不跨轨比较绝对分。
 
 > 某自然日社交数据缺失时，聚合链路返回中性默认值并标记 `data_quality="missing"`，交由每日轨的校验/填充链路据实降级，而非用假的"正常值"喂进 GRU 掩盖真实偏离。
+
+### MPDD-AVP 单向证据契约（mpdd_evidence/*.json）
+
+每日判定后额外产出一份给外部抑郁模型（MPDD-AVP）的证据块：
+
+```json
+{
+  "schema_version": "2.1.0",
+  "elder_id": "E001", "day_key": "2026-08-29", "timezone": "Asia/Shanghai",
+  "sleep_evidence":     { "anomaly_score": 1.03, "is_deviation": false,
+                          "consecutive_days": 0, "signed_z": {...}, "quality": "valid" },
+  "circadian_evidence": { "signed_z": {"rar_amplitude": ..., "rar_iv": ...},
+                          "is_disrupted": false, "quality": "valid" },
+  "social_evidence":    { "anomaly_score": 0.95, "is_deviation": false,
+                          "consecutive_days": 0, "signed_z": {...}, "quality": "valid" },
+  "risk_level": 0,
+  "note": "单向契约：GRU → MPDD-AVP。本系统不消费 MPDD-AVP 输出。"
+}
+```
+
+**契约约束（两侧都要遵守）**：
+
+- MPDD-AVP 可把这些块当**先验/辅助特征**，但不得让本系统的偏离分直接决定抑郁标签；
+- 本系统**不消费** MPDD-AVP 的任何输出——防止个人基线被抑郁判定反向污染。
+  这与"每周微调只用 `is_deviation=False` 的正常天"是同一条防污染原则；
+- `signed_z` 的符号约定是 `observed − predicted`：负值 = 低于个人基线；
+- `quality` 为 `cold_start` 表示那天走的是兜底基线，证据比 `valid` 弱但**不是** `missing`。
+
+> 产出失败只记错误日志，不影响已算好的风险判定——证据契约是旁路输出。
 
 ---
 
@@ -637,7 +791,7 @@ data_health:
   min_bad_features: 2      # 一天中离群特征数达到此值则整天判为离群
   max_outlier_ratio: 0.5   # 离群天占比超过此值则拒绝建档（建议顺延）
 
-# 冷启动兜底（GRU 就绪前用滑动均值检测，消除头两周盲区）
+# 冷启动兜底（GRU 就绪前用中位数/MAD 稳健基线检测，消除建档期盲区）
 cold_start:
   fallback_enabled: true
   fallback_min_days: 5     # 至少积累N天有效数据才启用兜底
@@ -646,19 +800,54 @@ cold_start:
 
 ewma:
   alpha: 0.05              # EWMA平滑系数
-  min_samples_for_dynamic: 20  # 启用动态阈值的最小样本数
+  min_samples_for_dynamic: 20        # 启用动态阈值的最小样本数
+  min_samples_for_dynamic_weekend: 8 # 周末池单独降低（周末只占 2/7，攒 20 个要 70 天）
+  max_freeze_days: 14      # 偏离日冻结上限：连续冻结这么多天后强制恢复喂入
 
 risk:
   sigma_multiplier: 2.5    # 静态阈值倍数
+  # ★ 幅度门槛的单位是 severity = anomaly_score / 当日 dynamic_threshold，不是绝对分
   anomaly_score_thresholds:
-    high_spike: 1.5        # 单日高峰值阈值（触发关注级别）
-    sustained_avg: 1.0     # 连续期平均值阈值（配合连续天数判定提醒级别）
+    high_spike_severity: 1.5   # 单日峰值：即使已恢复也保持关注的门槛
+    sustained_severity: 1.15   # 连续偏离段的平均 severity（配合连续天数判 L2/L3）
   consecutive:
     attention: 1           # Level 1（关注）
     warning: 3             # Level 2（提醒）
     severe: 5              # Level 3（严重）
+  continuity:
+    max_skip_days: 3       # 持续性统计里连续跳过（缺日/降级日）超过几天就打断
   cold_start_observation_days: 0  # 训练后观察期（已取消：建档期 35 天已让阈值稳定）
+
+alert:                     # 由 alert.trigger_alert 读取，缺项回落内置默认
+  level_1: { action: "log_only",           notify: [] }
+  level_2: { action: "push_notification",  notify: ["children"] }
+  level_3: { action: "force_notification", notify: ["children", "community_worker"] }
+
+report:
+  model: "claude-sonnet-5" # 周报正文的 LLM；anthropic 未安装时自动回落规则模板
+  max_tokens: 400
 ```
+
+#### 为什么幅度门槛的单位是 severity 而不是绝对分
+
+系统里有**两套量纲完全不同**的异常分：
+
+| 轨 | `anomaly_score` 的含义 | 正常天典型值 | 阈值 |
+|----|----------------------|------------|------|
+| GRU 轨（基线就绪后） | 加权归一化残差 | 0.5 ~ 1.0 | 1.3 ~ 1.6（动态） |
+| 冷启动兜底轨（建档期） | 稳健加权 \|z\|（中位数/MAD） | 0.8 ~ 1.8 | 3.0（`fallback_sigma`） |
+
+同一个绝对常数对两者不是同一件事——`1.5` 对 GRU 轨是"高峰"，对兜底轨是
+"再普通不过的一天"。而 `severity = 分数 / 自己当天的阈值` 在两套尺度间可比，
+按定义 `severity > 1 ⟺ is_deviation`。
+
+**门槛必须 > 1**：偏离日按定义 severity 就大于 1，若门槛取 1.0 则恒真，
+"防止擦线偏离仅凭连续天数升到 L3"这条防线会**静默失效**（看不出报错，只是不再拦截）。
+
+两个门槛取值不同也是有原因的：`sustained_severity` 只作用在**当前这段连续偏离**上；
+`high_spike_severity` 作用在整个 7 天窗（含已经恢复的日子），而活着的偏离早已被
+`consecutive >= 1` 判成 L1，所以峰值门槛唯一的职责是"已经恢复了，但前几天那个尖峰
+高到仍值得保持关注"——bar 理应更高。
 
 ### realtime_config.yaml（⚠️ 已成孤儿）
 
@@ -749,13 +938,57 @@ python scripts/run_daily_pipeline.py --date "$(date +%F)"
 
 ### 问题5：连续偏离够天数了，等级却封在 L1
 
-大概率是方向闸门生效：驱动升级的那段连续偏离**全是朝好方向**（睡得更好、出门更多）。
-这是刻意设计，不是漏报——好转不该发风险提醒。
+有两个门槛都可能拦住它，按顺序排查：
 
-判断方法：`judge.py` 的返回值里每轨带 `adverse_direction` 字段（**注意它不落盘**，
+**a) 幅度门槛**：那段连续偏离的**平均 severity** 没超过 `sustained_severity`（默认 1.15），
+即每天都只是"擦线"越过自己的阈值。这是刻意设计——L3 会触发网格员介入 + 强提醒，
+不能仅凭天数升级。
+
+判断方法：`judge.py` 的返回值里每轨带 `avg_severity` / `max_severity`。
+手算也行：`anomaly_score / dynamic_threshold`，两个值日志里都有。
+
+**b) 方向闸门**：驱动升级的那段连续偏离**全是朝好方向**（睡得更好、出门更多）。
+好转不该发风险提醒。
+
+判断方法：返回值里每轨带 `adverse_direction` 字段（**注意它与 `avg_severity` 都不落盘**，
 `daily_inference/*.json` 里没有，需要在代码里取或加日志）。
 若你认为该报，检查日志里该轨 `signed_z` 的符号是否与
 `config/feature_weights.json` 中该维的 `direction` 一致。
+
+### 问题6：建档期（前 35 天）完全没有预警
+
+先确认这不是"设计如此"。建档期走的是**冷启动兜底**，它**能**出等级——
+`status` 应为 `cold_start_fallback` 而非 `cold_start`。
+
+- `status == "cold_start"`：兜底没启动。查 `cold_start.fallback_enabled` 是否为 true，
+  以及该轨历史有效数据是否够 `fallback_min_days`（默认 5 天）。
+- `status == "cold_start_fallback"` 但 `is_deviation` 恒 false：兜底的 sigma 是 **3.0**，
+  比 GRU 轨保守得多，正常波动本来就不该报。
+- `is_deviation` 为 true 但 `risk_level` 为 0：**这是 bug**，说明状态白名单又漏了。
+  查 `src/utils/status.py` 的 `EVALUABLE_STATUSES`，以及是否有人在别处新写了字面量白名单。
+
+### 问题7：日志有空洞时"连续 N 天"数得不对
+
+先确认预期：缺日与降级日**都被跳过**（既不累加也不打断），但**连续跳过超过
+`risk.continuity.max_skip_days`（默认 3）就打断连续段**。
+
+- 断 2 天 → 不打断，前后视为同一段；
+- 断 17 天 → 打断，前后是两段无关的偏离。
+
+两轨全不可用那天 `daily_job` **不生成日志文件**，所以磁盘上的空洞就是"那天没测到"。
+若你需要更宽松/更严格，调 `max_skip_days`，不要去改计数逻辑。
+
+### 问题8：改了 `config/settings.yaml` 但没生效
+
+本轮之前确实有三处配置是死的（`alert` 整段、`report.*`、以及压根不存在的
+`ewma.max_freeze_days`），现已全部接线。若仍不生效：
+
+- 确认改的是 `config/settings.yaml`——`config/realtime_config.yaml` 是**孤儿文件**，
+  无任何代码读取；
+- 确认调用链传了 `config`：`trigger_alert(..., config=config)` 不传时用的是
+  `alert.py` 内置默认；
+- `ewma.max_freeze_days` 对**已建档**的基线不生效——状态文件里存的值优先，
+  已有基线保持自己建档时的口径直到重新建档。
 
 ---
 
@@ -775,8 +1008,28 @@ MIT
 
 ---
 
-**最后更新**：2026-07-29  
-**项目版本**：v2.1（在 v1.8 基础上：**单轨 6 维 → 双轨（睡眠 8 维 / 社交 5 维）**，两轨各有独立 GRU 与 scaler，从结构上切断跨类型"串味"；风险类型 2→3（睡眠稳定性 / 社会连接减弱 / 作息节律紊乱），规则改为"必选维 + 可选池"结构，`threshold_ratio` 按规则可配；`social_turns` 随音频链路删除，社会接触改由 C6c 边缘侧人形检测的 `copresence_min` 承担；`hrv_rmssd` 降级为 `night_hr_mean` 弱代理并降权；建档期 21→35 天、取消冷启动观察期；EWMA 增加**偏离日冻结**（上限 14 天），风险判定增加**方向闸门**，`validate_synthetic.py` 补固定 torch 种子——修复了三个一层压一层的缺陷：持续性异常被自适应基线掩盖、好转被判成"严重风险"、以及单维门槛对变异系数不同的维不等价（`copresence_min` 的 z 在门槛上抖动、社交崩塌报不出类型），详见 `docs/VALIDATION.md` 缺陷④⑤⑥。）
+**最后更新**：2026-07-31  
+**项目版本**：v2.1.1
+
+> **v2.1.1 要点（2026-07-31 代码走查，不改算法思路，只把已有设计真正接通）**：
+> ①**冷启动兜底接进判定层**——此前 `judge`/`rules` 的状态白名单漏了
+> `cold_start_fallback`，整个 35 天建档期一条预警都发不出（实测连续 6 天严重异常
+> `risk_level` 全 0）；新增 `src/utils/status.py` 作白名单的单一事实来源。
+> ②**幅度门槛改用 severity**（`分数/自身阈值`）并只算在驱动升级的那段 streak 上——
+> 绝对常数既会被 7 天窗里的正常天稀释，又无法同时适配 GRU 轨与兜底轨两套量纲。
+> ③**持续性统计改按自然日回溯**，缺日与降级日统一跳过但连续跳过 >3 天即打断
+> （此前 5 条日志跨 22 个日历日仍数出 consecutive=5 → L3）；加载天数由规则门槛推导，
+> 解开"7 天日志窗 vs 7 天门槛"的死锁。
+> ④**`data_quality` 按轨落进推理日志**——此前该标记只进 features CSV，
+> "降级日跳过持续性统计"这条不变量在生产链路里从未生效。
+> ⑤接线三处死配置（`alert` 整段 / `report.*` / 新增 `ewma.max_freeze_days`）；
+> 清理 `requirements.txt` 中 6 项零引用依赖（`pyaudio` 会让整条 pip install 中止）。
+> ⑥补周轨入口 `scripts/run_weekly_pipeline.py`、产出 MPDD 证据契约、
+> 修周报统计恒 0.00 与周期错配。
+> 测试 312→332，范围 1 19→20（新增"兜底能出等级"断言），范围 2 保持 9/9。
+> 详见 `docs/VALIDATION.md` §8。**预警冷却/去重仍未做**，是当前第一优先级。
+
+> v2.1 要点（在 v1.8 基础上：**单轨 6 维 → 双轨（睡眠 8 维 / 社交 5 维）**，两轨各有独立 GRU 与 scaler，从结构上切断跨类型"串味"；风险类型 2→3（睡眠稳定性 / 社会连接减弱 / 作息节律紊乱），规则改为"必选维 + 可选池"结构，`threshold_ratio` 按规则可配；`social_turns` 随音频链路删除，社会接触改由 C6c 边缘侧人形检测的 `copresence_min` 承担；`hrv_rmssd` 降级为 `night_hr_mean` 弱代理并降权；建档期 21→35 天、取消冷启动观察期；EWMA 增加**偏离日冻结**（上限 14 天），风险判定增加**方向闸门**，`validate_synthetic.py` 补固定 torch 种子——修复了三个一层压一层的缺陷：持续性异常被自适应基线掩盖、好转被判成"严重风险"、以及单维门槛对变异系数不同的维不等价（`copresence_min` 的 z 在门槛上抖动、社交崩塌报不出类型），详见 `docs/VALIDATION.md` 缺陷④⑤⑥。）
 
 > v1.7 要点（在 v1.6 基础上）：①冷启动建档期 14→21 天并提为可配置项 `build_days`，附 20-seed 过拟合对比实验；②修复风险类型分类两处缺陷——"永不激活"（日志不写回 risk_types）与"正常日误激活"（类型判定挂靠 is_deviation）；③新增合成数据验证脚本 `validate_synthetic.py`（范围1跑通）与 `validate_discriminative.py`（范围2判别力，含真实噪声+混淆项）；④新增 `docs/TRAINING.md` GRU 训练详解。⑤修复模拟数据异常注入天数（25-30 → 40-46）与总天数（50 → 60），避开新建档期+观察期。测试 134 全绿。已知待办：跨类型"串味"（共享GRU溢出）、真实传感器采集/推送仍为桩。文档：本 README（总览+现状）、`docs/TRAINING.md`（训练详解）、`docs/TODO.md`、`docs/VALIDATION.md`（三层验证+§7执行记录）
 
