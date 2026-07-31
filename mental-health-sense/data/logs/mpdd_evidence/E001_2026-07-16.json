@@ -2,39 +2,39 @@
   "schema_version": "2.1.0",
   "elder_id": "E001",
   "day_key": "2026-07-16",
-  "timezone": "Asia/Shanghai",
+  "timezone": "+08",
   "sleep_evidence": {
-    "anomaly_score": 1.039,
+    "anomaly_score": 1.0549,
     "is_deviation": false,
     "consecutive_days": 0,
     "signed_z": {
-      "sleep_efficiency": -2.2713,
-      "waso_min": 1.5562,
-      "sol_min": -0.2181,
-      "bed_exit_count": -0.6754,
-      "deep_sleep_ratio": -0.8767,
-      "sleep_onset_clock": -0.7413,
-      "night_hr_mean": -0.2908,
-      "daytime_nap_min": 2.2061
+      "sleep_efficiency": -2.1568,
+      "waso_min": 1.6043,
+      "sol_min": -0.145,
+      "bed_exit_count": -0.6289,
+      "deep_sleep_ratio": -1.7347,
+      "sleep_onset_clock": -0.7093,
+      "night_hr_mean": -0.3335,
+      "daytime_nap_min": 2.0342
     },
     "quality": "valid"
   },
   "circadian_evidence": {
     "signed_z": {
-      "rar_amplitude": -0.147,
-      "rar_iv": -0.5173
+      "rar_amplitude": -0.1575,
+      "rar_iv": -0.4726
     },
     "is_disrupted": false,
     "quality": "valid"
   },
   "social_evidence": {
-    "anomaly_score": 0.6805,
+    "anomaly_score": 0.6995,
     "is_deviation": false,
     "consecutive_days": 0,
     "signed_z": {
-      "copresence_min": 0.6038,
-      "out_of_home_min": -2.1425,
-      "activity_counts": -0.5641
+      "copresence_min": 0.815,
+      "out_of_home_min": -2.394,
+      "activity_counts": -0.4149
     },
     "quality": "valid"
   },

@@ -2,7 +2,7 @@
   "schema_version": "2.1.0",
   "elder_id": "D_TN_single_spike",
   "day_key": "2026-01-25",
-  "timezone": "Asia/Shanghai",
+  "timezone": "+08",
   "sleep_evidence": {
     "anomaly_score": 0.8171,
     "is_deviation": false,

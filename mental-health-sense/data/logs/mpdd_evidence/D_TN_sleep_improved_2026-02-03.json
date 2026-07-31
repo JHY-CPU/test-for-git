@@ -2,7 +2,7 @@
   "schema_version": "2.1.0",
   "elder_id": "D_TN_sleep_improved",
   "day_key": "2026-02-03",
-  "timezone": "Asia/Shanghai",
+  "timezone": "+08",
   "sleep_evidence": {
     "anomaly_score": 0.9963,
     "is_deviation": false,

@@ -2,7 +2,7 @@
   "schema_version": "2.1.0",
   "elder_id": "D_TP_social",
   "day_key": "2026-01-22",
-  "timezone": "Asia/Shanghai",
+  "timezone": "+08",
   "sleep_evidence": {
     "anomaly_score": 0.5811,
     "is_deviation": false,

@@ -2,7 +2,7 @@
   "schema_version": "2.1.0",
   "elder_id": "D_TP_sleep_drift",
   "day_key": "2026-02-17",
-  "timezone": "Asia/Shanghai",
+  "timezone": "+08",
   "sleep_evidence": {
     "anomaly_score": 4.1097,
     "is_deviation": true,

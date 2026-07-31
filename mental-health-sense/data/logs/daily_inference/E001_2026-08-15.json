@@ -3,83 +3,104 @@
   "day_key": "2026-08-15",
   "sleep": {
     "track": "sleep",
-    "anomaly_score": 5.2431,
-    "static_threshold": 2.2964,
-    "ewma_threshold": 1.4625,
-    "dynamic_threshold": 1.4625,
+    "anomaly_score": 5.3682,
+    "static_threshold": 2.3059,
+    "ewma_threshold": 1.4606,
+    "dynamic_threshold": 1.4606,
     "is_deviation": true,
     "signed_residuals": {
-      "sleep_efficiency": -13.0473,
-      "waso_min": 7.3732,
-      "sol_min": 4.7036,
-      "bed_exit_count": 2.9926,
-      "deep_sleep_ratio": -2.6715,
-      "sleep_onset_clock": 0.6832,
-      "night_hr_mean": 0.1463,
-      "daytime_nap_min": -1.8941
+      "sleep_efficiency": -12.9899,
+      "waso_min": 6.9682,
+      "sol_min": 5.1168,
+      "bed_exit_count": 3.8678,
+      "deep_sleep_ratio": -3.2672,
+      "sleep_onset_clock": 0.615,
+      "night_hr_mean": -0.196,
+      "daytime_nap_min": -1.6475
     },
     "abs_residuals": {
-      "sleep_efficiency": 13.0473,
-      "waso_min": 7.3732,
-      "sol_min": 4.7036,
-      "bed_exit_count": 2.9926,
-      "deep_sleep_ratio": 2.6715,
-      "sleep_onset_clock": 0.6832,
-      "night_hr_mean": 0.1463,
-      "daytime_nap_min": 1.8941
+      "sleep_efficiency": 12.9899,
+      "waso_min": 6.9682,
+      "sol_min": 5.1168,
+      "bed_exit_count": 3.8678,
+      "deep_sleep_ratio": 3.2672,
+      "sleep_onset_clock": 0.615,
+      "night_hr_mean": 0.196,
+      "daytime_nap_min": 1.6475
     },
     "signed_z": {
-      "sleep_efficiency": -16.7529,
-      "waso_min": 6.2802,
-      "sol_min": 3.8019,
-      "bed_exit_count": 3.4635,
-      "deep_sleep_ratio": -4.6365,
-      "sleep_onset_clock": 0.7018,
-      "night_hr_mean": 0.1336,
-      "daytime_nap_min": -3.4108
+      "sleep_efficiency": -15.241,
+      "waso_min": 6.2591,
+      "sol_min": 4.0462,
+      "bed_exit_count": 4.1182,
+      "deep_sleep_ratio": -5.5397,
+      "sleep_onset_clock": 0.7932,
+      "night_hr_mean": -0.1672,
+      "daytime_nap_min": -3.0195
     },
     "signed_available": true,
     "ewma_pool": "default",
     "data_quality": "valid",
     "ewma_frozen": true,
-    "ewma_n": 47,
+    "ewma_rerun": false,
+    "valid_features": [
+      "sleep_efficiency",
+      "waso_min",
+      "sol_min",
+      "bed_exit_count",
+      "deep_sleep_ratio",
+      "sleep_onset_clock",
+      "night_hr_mean",
+      "daytime_nap_min"
+    ],
+    "skipped_features": [],
+    "ewma_n": 32,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
   },
   "social": {
     "track": "social",
-    "anomaly_score": 0.9839,
-    "static_threshold": 2.3164,
-    "ewma_threshold": 1.3043,
-    "dynamic_threshold": 1.3043,
+    "anomaly_score": 1.1037,
+    "static_threshold": 2.3767,
+    "ewma_threshold": 1.2543,
+    "dynamic_threshold": 1.2543,
     "is_deviation": false,
     "signed_residuals": {
-      "copresence_min": 1.7162,
-      "out_of_home_min": -1.1791,
-      "rar_amplitude": -0.7691,
-      "rar_iv": -0.8732,
-      "activity_counts": -0.2782
+      "copresence_min": 1.8434,
+      "out_of_home_min": -1.6503,
+      "rar_amplitude": -0.6063,
+      "rar_iv": -0.8504,
+      "activity_counts": -0.5193
     },
     "abs_residuals": {
-      "copresence_min": 1.7162,
-      "out_of_home_min": 1.1791,
-      "rar_amplitude": 0.7691,
-      "rar_iv": 0.8732,
-      "activity_counts": 0.2782
+      "copresence_min": 1.8434,
+      "out_of_home_min": 1.6503,
+      "rar_amplitude": 0.6063,
+      "rar_iv": 0.8504,
+      "activity_counts": 0.5193
     },
     "signed_z": {
-      "copresence_min": 2.0363,
-      "out_of_home_min": -1.5152,
-      "rar_amplitude": -0.554,
-      "rar_iv": -0.7517,
-      "activity_counts": -0.2849
+      "copresence_min": 2.2135,
+      "out_of_home_min": -2.3187,
+      "rar_amplitude": -0.4267,
+      "rar_iv": -0.7326,
+      "activity_counts": -0.4878
     },
     "signed_available": true,
     "ewma_pool": "weekend",
     "data_quality": "valid",
-    "ewma_frozen": true,
-    "ewma_n": 12,
+    "ewma_frozen": false,
+    "ewma_rerun": false,
+    "valid_features": [
+      "copresence_min",
+      "out_of_home_min",
+      "rar_amplitude",
+      "rar_iv",
+      "activity_counts"
+    ],
+    "skipped_features": [],
+    "ewma_n": 9,
     "ewma_min_samples": 8,
     "in_observation_period": false,
     "status": "success"
@@ -94,5 +115,11 @@
     "social": "valid"
   },
   "is_deviation": true,
-  "consecutive_deviation_days": 1
+  "consecutive_deviation_days": 8,
+  "risk_type_qualifies": {
+    "sleep_stability": true,
+    "social_decline": false,
+    "circadian_disruption": false
+  },
+  "risk_level": 3
 }
