@@ -5,8 +5,8 @@
     "track": "sleep",
     "anomaly_score": 5.2431,
     "static_threshold": 2.2964,
-    "ewma_threshold": 1.4992,
-    "dynamic_threshold": 1.4992,
+    "ewma_threshold": 1.4625,
+    "dynamic_threshold": 1.4625,
     "is_deviation": true,
     "signed_residuals": {
       "sleep_efficiency": -13.0473,
@@ -42,7 +42,7 @@
     "ewma_pool": "default",
     "data_quality": "valid",
     "ewma_frozen": true,
-    "ewma_n": 33,
+    "ewma_n": 47,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
@@ -51,8 +51,8 @@
     "track": "social",
     "anomaly_score": 0.9839,
     "static_threshold": 2.3164,
-    "ewma_threshold": 1.2336,
-    "dynamic_threshold": 1.2336,
+    "ewma_threshold": 1.3043,
+    "dynamic_threshold": 1.3043,
     "is_deviation": false,
     "signed_residuals": {
       "copresence_min": 1.7162,
@@ -78,8 +78,8 @@
     "signed_available": true,
     "ewma_pool": "weekend",
     "data_quality": "valid",
-    "ewma_frozen": false,
-    "ewma_n": 9,
+    "ewma_frozen": true,
+    "ewma_n": 12,
     "ewma_min_samples": 8,
     "in_observation_period": false,
     "status": "success"
@@ -94,11 +94,5 @@
     "social": "valid"
   },
   "is_deviation": true,
-  "consecutive_deviation_days": 8,
-  "risk_type_qualifies": {
-    "sleep_stability": true,
-    "social_decline": false,
-    "circadian_disruption": false
-  },
-  "risk_level": 3
+  "consecutive_deviation_days": 1
 }

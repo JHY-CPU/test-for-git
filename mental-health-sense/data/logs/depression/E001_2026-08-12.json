@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0.0",
+  "elder_id": "E001",
+  "day_key": "2026-08-12",
+  "assessed_at": "2026-08-12T00:00:00+08:00",
+  "valid_until": "2026-09-10",
+  "status": "low_confidence",
+  "result": {
+    "level": "正常",
+    "phq9_median": 3.684,
+    "phq9_spread": 0.0,
+    "class_probs": {
+      "正常": 0.927228,
+      "轻度": 0.032454,
+      "重度": 0.040318
+    }
+  },
+  "low_confidence_reasons": [
+    "片段数 1 < 2，单段结论不可靠"
+  ],
+  "evidence": {
+    "n_clips": 1,
+    "n_rejected": 0,
+    "source_duration_sec": 21.989,
+    "clips": [
+      {
+        "start": 0.0,
+        "end": 21.989,
+        "phq9": 3.684,
+        "level": "正常",
+        "face_ratio": 0.978,
+        "frontal_ratio": 1.0
+      }
+    ]
+  },
+  "provenance": {
+    "checkpoint": "checkpoints/Track1/A-V-P/ternary/best_model_2026-04-30-07.18.39.pth",
+    "description_sha256": "0bad873709ffecc130d1e30e9be54d9512f744bfa03aa4546fe9a996b27bd1cb",
+    "device": "cuda",
+    "batch_size": 64,
+    "frame_sample_rate": 1,
+    "mpdd_git_rev": "5769083"
+  },
+  "calibration": {
+    "validated_on_site": false,
+    "warning": "模型在其验证集上对全部样本预测同一类别，且未在本机位/本人身上校准，结论不可作为任何判断依据"
+  },
+  "note": "群体基线绝对评估，与个人基线偏离分不可比、不得合并或相互印证。非临床诊断。"
+}

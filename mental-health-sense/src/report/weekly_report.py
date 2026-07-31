@@ -156,6 +156,7 @@ def generate_weekly_report(
 
 {_format_track_stats(week_results)}
 
+{_format_depression_section(elder_id, week_end_str, config)}
 ## 处置建议
 
 {risk_result.get('recommendation', '无特殊建议')}
@@ -166,6 +167,77 @@ def generate_weekly_report(
     logger.info(f"  └─ 周报已保存: {elder_id}_{week_start_str}")
 
     return report
+
+
+def _format_depression_section(
+    elder_id: str, as_of: str, config: dict | None = None
+) -> str:
+    """抑郁评估章节（MPDD 群体基线，旁路只读）。
+
+    ★ 刻意**另起一节**，不并进上面的"监测详情"表格。
+
+      那张表的三行都是"跟自己比"的趋势（signed_z 相对个人基线），抑郁是"跟大众比"
+      的绝对判断。放进同一张表，等于在版面上暗示两者可比、可相互印证——这与
+      `_format_track_stats` 里"两轨的分绝不能平均或并列比大小"是同一条不变量，
+      只是发生在展示层而不是计算层。
+
+    读不到就静默显示"暂无最新评估"：这是旁路输出，MPDD 环境挂掉、契约文件损坏，
+    都不该让整份周报生成失败。本函数只 import store（零重依赖），
+    不碰 runner / clip_source，所以 MPDD 那套依赖压根不会被加载。
+    """
+    dep_cfg = (config or {}).get("depression", {}) or {}
+    if not dep_cfg.get("enabled", False) or not dep_cfg.get("show_in_report", False):
+        return ""
+
+    try:
+        from src.depression.store import summarize_for_report
+        view = summarize_for_report(elder_id, as_of=as_of)
+    except Exception as e:
+        logger.warning(f"  └─ 抑郁评估章节跳过: {e}")
+        return ""
+
+    header = "## 情绪状态评估（研究性，未校准）\n\n"
+
+    if not view["displayable"]:
+        # ★ 绝不拿过期的旧分顶替今天。抑郁评估天然稀疏（要"有正脸 + 有连续语音"
+        # 的片段，独居老人可能几周才有一次），比周报本身更容易踩这个坑——
+        # 而"本周无数据时静默拿别的周顶替"正是本文件修过的缺陷。
+        return f"{header}- 暂无最新评估（{view['reason']}）\n\n"
+
+    latest = view["latest"]
+    result = latest.get("result") or {}
+    ev = latest.get("evidence", {})
+
+    lines = [
+        f"- 最近评估：{latest['day_key']}（{ev.get('n_clips', 0)} 段样本）",
+        f"- 结果：{result.get('level', '—')}"
+        + (
+            f" · 估计 PHQ-9 ≈ {result['phq9_median']}"
+            f"（段间波动 ±{result.get('phq9_spread', 0)}）"
+            if result.get("phq9_median") is not None else ""
+        ),
+    ]
+
+    # 历史时间线：大众基线对个体差异没有免疫力——天生表情少、语速慢、口音重的
+    # 老人可能常年被判同一等级。排成序列看"变没变"而不是"高不高"，
+    # 才能把这类固定偏置降成背景噪音。只是展示层排序，不涉及任何拟合。
+    timeline = view["timeline"]
+    if len(timeline) >= 2:
+        trail = " → ".join(f"{t['day_key'][5:]} {t['level']}" for t in timeline[-4:])
+        changed = timeline[-1]["level"] != timeline[-2]["level"]
+        lines.append(f"- 历次：{trail}　← {'**较上次有变化**' if changed else '基本持平'}")
+
+    for reason in latest.get("low_confidence_reasons", []):
+        lines.append(f"- ⚠️ 证据说明：{reason}")
+
+    warning = (latest.get("calibration") or {}).get("warning", "")
+    body = "\n".join(lines)
+    return (
+        f"{header}{body}\n\n"
+        f"> ⚠️ {warning}。\n"
+        f"> 本项是基于群体模型的绝对评估，与上方\"个人基线偏离\"分属不同尺度，"
+        f"不可相互印证。\n\n"
+    )
 
 
 _TRACK_LABELS = {"sleep": "睡眠轨", "social": "社会连接轨"}

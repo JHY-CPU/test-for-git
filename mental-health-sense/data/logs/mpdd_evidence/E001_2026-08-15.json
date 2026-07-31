@@ -6,7 +6,7 @@
   "sleep_evidence": {
     "anomaly_score": 5.2431,
     "is_deviation": true,
-    "consecutive_days": 7,
+    "consecutive_days": 0,
     "signed_z": {
       "sleep_efficiency": -16.7529,
       "waso_min": 6.2802,
@@ -38,6 +38,6 @@
     },
     "quality": "valid"
   },
-  "risk_level": 3,
+  "risk_level": 1,
   "note": "单向契约：GRU → MPDD-AVP。本系统不消费 MPDD-AVP 输出。"
 }

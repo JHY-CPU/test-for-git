@@ -206,3 +206,56 @@ report:
   model: "claude-sonnet-5"
   max_tokens: 400
   template: "weekly_report_v1"
+
+# ===== 抑郁评估（MPDD 旁路通道）=====
+#
+# ★ 群体绝对基线，与两条 GRU 个人基线轨完全独立：不参与建档 / 微调 / EWMA / 判级。
+#   分数绝不与 anomaly_score 做任何算术——尺度不可比（一个是"跟别人比"，一个是
+#   "跟你自己平时比"），理由同"绝不跨轨比较绝对分"。睡眠轨和社交轨这两条自家的
+#   轨都不敢比，何况训练目标完全不同的外部模型。
+#   更要紧的是防正反馈：若抑郁分能标记异常日，异常日会被排除出每周微调，
+#   个人基线越缩越窄，反过来又佐证抑郁判定。约束的完整论证见
+#   src/depression/__init__.py。
+depression:
+  enabled: true
+  show_in_report: true
+
+  # ⚠️ mpdd_root 不可改动：OpenFace 的 FaceLandmarkImg 把
+  # third_party/OpenBLAS/install/lib 的**绝对路径**编译进了 RUNPATH，
+  # 移动或改名后启动即报 libopenblas.so.0 找不到。
+  mpdd_root: "/home/zhousenyu/project/MPDD-AVG-2026"
+  # 独立解释器：MPDD 需要 transformers / librosa / av / cv2 + 几个 G 的权重，
+  # 这些刻意不进本项目的 requirements.txt——本仓刚因 pyaudio 缺 portaudio 头文件
+  # 导致整条 pip install 中止、torch 一个都装不上（见 requirements.txt 尾部）。
+  # 隔离靠进程边界：MPDD 环境炸了，日管道照常跑。
+  python_bin: "/home/zhousenyu/software/anaconda3/envs/MPDD/bin/python"
+  checkpoint: "checkpoints/Track1/A-V-P/ternary/best_model_2026-04-30-07.18.39.pth"
+
+  # 下面三项任意一个变了，推理数值就会变（batch_size 改变 cuDNN kernel 选择，
+  # frame_sample_rate 改变插值到 target_t=128 之前的序列长度，CPU/GPU 是两套
+  # 浮点实现）。钉死并写进契约的 provenance，否则历史分数不可比。
+  # 实测：同机同版本下 MPDD 推理逐位可复现（无 RNG、全程 .eval()、无反向传播）。
+  device: "cuda"
+  batch_size: 64
+  frame_sample_rate: 1
+  timeout_sec: 1800
+
+  clip:
+    top_k: 3                 # 一次评估最多取几段
+    min_dur: 10.0
+    max_dur: 45.0
+    crop: "face"             # 重取景贴近训练构图（训练数据是访谈视频）
+
+  assessment:
+    min_clips: 2             # 少于此数标 low_confidence——单段结论不可靠
+    max_spread_phq9: 6.0     # 段间 PHQ-9 极差超过它标 low_confidence（模型自己在打架）
+    valid_days: 30           # 有效期；过期一律显示"暂无最新评估"，绝不拿旧分顶今天
+
+  # ⚠️ 刻意关闭，两个独立原因，任一成立都不该开：
+  #   1. alert.py 至今没有冷却 / 去重 / 抑制机制（PERM_step 实测连续 91 天每天
+  #      报 L3 = 91 次短信 + 强制响铃 + 网格员）。再加一个预警源只会加速家属
+  #      关掉通知，而通知一关，真正的新变化也收不到了。见 VALIDATION §7.3。
+  #   2. 当前 checkpoint 在其验证集上对全部 9 个样本预测同一类别
+  #      （混淆矩阵 [[6,0,0],[2,0,0],[0,1,0]]，Macro-F1 0.286，Kappa 0.129），
+  #      且未在本机位 / 本人身上校准。
+  alert: false

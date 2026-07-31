@@ -74,6 +74,87 @@ def get_feature_columns(track: str) -> list[str]:
     return [DAY_KEY_COL] + get_feature_names(track) + META_COLS
 
 
+# ========== 原子写 ==========
+#
+# 本模块此前所有落盘都是就地 `open(path, "w")`，写到一半被 kill / OOM / 断电就留下
+# 半截文件。两个具体后果：
+#
+#   1. `save_daily_features` 是**整表读-改-写**（同日幂等覆盖分支要把整个 DataFrame
+#      重写一遍）。崩在中间 → `features_{track}.csv` 只剩前半段 → 整个建档期历史
+#      不可恢复，`train_initial_baseline` / `weekly_retrain` / 冷启动兜底全部失去
+#      数据源。这是单点、不可逆的数据损失。
+#   2. 单个推理日志被截断 → `load_daily_results` 抛 JSONDecodeError → judge、周报、
+#      微调**全部永久崩溃**，直到有人手工把那个文件删掉。一个坏文件瘫掉整条链路。
+#
+# temp + os.replace 是 POSIX 保证的原子替换：要么是完整的旧内容，要么是完整的新
+# 内容，不存在中间态。临时文件放在**目标同目录**是必须的——跨文件系统时
+# os.replace 会退化成拷贝，原子性就没了。
+
+def _current_umask() -> int:
+    """读取当前 umask（os 只提供"设置并返回旧值"，只能设回去）。"""
+    import os
+
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+def atomic_write_text(filepath: str | Path, text: str, encoding: str = "utf-8") -> None:
+    """原子写文本：先写同目录临时文件，再 os.replace 替换。"""
+    import os
+    import tempfile
+
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(filepath.parent), prefix=f".{filepath.name}.", suffix=".tmp"
+    )
+    try:
+        # mkstemp 建的文件是 0600，直接 replace 过去会让数据文件的权限与同目录
+        # 其它文件（0644）不一致——运维用别的账号来看日志时会莫名其妙读不到。
+        # 按 umask 还原成常规权限。
+        os.chmod(tmp_path, 0o666 & ~_current_umask())
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+            # fsync 前先 flush：Python 缓冲区里的内容不 flush 的话 fsync 同步的是
+            # 一个还没收到数据的文件描述符，等于没做。
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    except BaseException:
+        # 失败时清掉临时文件，别在数据目录里留一地 .tmp 垃圾。
+        # 用 BaseException 而非 Exception：KeyboardInterrupt / SystemExit 同样
+        # 需要清理，而它们不是 Exception 的子类。
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_json(filepath: str | Path, payload: Any, indent: int = 2) -> None:
+    """原子写 JSON（含 numpy 类型转换）。"""
+    text = json.dumps(
+        _to_jsonable(payload), ensure_ascii=False, indent=indent
+    )
+    atomic_write_text(filepath, text)
+
+
+def _to_jsonable(obj):
+    """把 numpy 标量/数组递归转成 json 可序列化的原生类型。"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 # ========== 特征数据读写 ==========
 
 def save_daily_features(
