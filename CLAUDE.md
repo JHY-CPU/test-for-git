@@ -20,7 +20,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 > 核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest；`anthropic` 只用于周报正文，未装则自动回落规则模板。`funasr` / `modelscope` / `pyaudio` / `scipy` / `opencv-python` / `APScheduler` 已于 2026-07-31 从 `requirements.txt` 移除（零引用；其中 `pyaudio` 缺 portaudio 头文件会让整条 pip install 中止，torch 一个都装不上）。
 
 ```bash
-# 测试（21 文件 / 442 用例）
+# 测试（22 文件 / 475 用例）
 python -m pytest                                   # pytest.ini 已设 testpaths=tests 与 -v
 python -m pytest tests/test_risk_judge.py
 python -m pytest tests/test_risk_judge.py::TestJudgeRiskLevel::test_xxx
@@ -35,6 +35,10 @@ python scripts/run_weekly_pipeline.py              # 周轨：双轨微调 + 周
 # 抑郁评估（MPDD 旁路通道，事件驱动，**不挂在日管道里**）
 python scripts/run_depression_assessment.py --elder E001 --date 2026-08-12 \
     --video /path/to/footage.mp4
+
+# 预警事件：查看 / 确认（确认后同级持续静默，但升级仍会破静默）
+python scripts/ack_alert.py --elder E001 --show
+python scripts/ack_alert.py --elder E001
 
 # 端到端验证（单测不覆盖判定链，改算法/配置后必须重跑）
 python scripts/validate_synthetic.py               # 范围1：链路跑通 + 双轨信号隔离，20 断言（--keep 保留 V001 数据）
@@ -84,6 +88,37 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 
 `validator.py` 的四态 `valid / degraded / insufficient / offline` 贯穿全链路。degraded/insufficient 的日子在持续性统计中被**跳过**（既不累加也不打断，见 `rules._counts_toward_consecutive`），**缺日同理**（两轨全不可用那天不生成日志）；但连续跳过超过 `risk.continuity.max_skip_days`（默认 3）即打断，否则一次长时间离线会把两段无关的偏离粘成一段。质量标记按轨判定：`data_quality` 随推理结果逐轨落盘，单一顶层值会让睡眠轨降级压住社交轨的计数。`copresence_min` 禁止前向填充（"今天有没有人来"取决于子女安排，用昨天填等于伪造社会接触）。单轨失败是正常降级场景，两轨同时不可用才算整体失败。
 
+### 预警是事件驱动的，不是每日状态
+
+`judge` 每天判等级，但 `alert.trigger_alert` **只在状态变化时通知**：
+开始 / 升级 / 出现新风险类型 / 缓解。同级持续不重复推送，改由周报的
+「预警回执」承担告知义务（静默与"系统挂了"必须可区分）。
+
+修复前：E001 60 天 12 次推送对应 4 个真实事件；`PERM_step` 91 天 91 次。
+修复后：4 次 / 4 次。事件模型在 `src/risk/alert_state.py`。
+
+改动这一层时必须守住三条：
+
+- **★ 升级穿透一切抑制**（冷却、已确认、同日幂等分支）。纯粹按"同一等级 X 天内
+  最多一次"做冷却会在 L2 的冷却窗内吃掉 L3——拿误报换漏报，比没有冷却更糟。
+  `decide()` 里升级判定排在所有抑制判据**之前**，
+  `tests/test_alert_events.py::TestEscalationBypassesEverything` 是守门员。
+- **两条事件流独立**：`baseline`（GRU 双轨）与 `depression`（MPDD）各自计数、
+  各自冷却、互不压制——理由同"绝不跨轨比较绝对分"。
+- **`trigger_alert` 必须收到 `day_key`**。不传会把"今天"盖到历史判定上，
+  冷却窗与事件边界全算错——同 `judge_risk_level` 被迫加 `today_key`。
+
+事件边界复用 `risk.continuity.max_skip_days`，与 `continuity.walk_back_days`
+的断段语义一致。状态落在 `data/logs/alert_state/{id}.json`（原子写）——
+每日批处理的内存态活不过今天，同 `ewma` 的 `freeze_streak`。
+
+新增 `alert:` 段的配置键时必须同步扩 `alert.py:_actions_for` 的**白名单元组**，
+否则会被静默丢弃。
+
+`tests/conftest.py` 有一个 **autouse fixture** 把事件状态隔离到 tmp。
+删掉它会让测试往真实 `data/logs/` 写状态并跨会话残留——第二次跑同一条用例
+就变成"冷却中"，制造不可复现的绿色。
+
 ### 抑郁评估是旁路，不是第三条轨
 
 `src/depression/`（MPDD 群体基线）与两条 GRU 个人基线轨**完全独立**。四条硬约束，
@@ -129,4 +164,4 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 - **注释写"为什么"**：本仓库的注释与 docstring 大量记录"这行代码是被哪条失效链逼出来的"（配置文件里也是）。改动这些区域时保持同样密度，并在文档里同步结论。全仓库文档/注释/提交信息均为中文。
 - 提交信息格式：`类型：描述`（修复/文档/重构/测试/新增/配置/数据/脚本/删除）。
 - 文档与代码的一致性：`docs/README.md` 的"项目结构"章节已于 2026-07-31 校准到实际文件树；若再次改动目录结构，同步更新该章节。
-- 已知未解决（`docs/TODO.md`）：①**永久性变化会无限期每日报 L3**，检测层是对的，缺口在预警策略层——`alert.py` 仍无任何冷却/去重/抑制机制（优先级最高；`max_freeze_days` 已提到配置，但那只缓解阈值追赶速度，不是解法）；②残差统计未按周内分池，有周末效应的维 z 分被系统性压小；③GRU 固定 7 天窗对持续性变化钝感，异常持续到第 3 天后输入窗被异常日填满、残差收缩。
+- 已知未解决（`docs/TODO.md`）：①**MPDD checkpoint 未在本机位校准**（在其验证集上对全部样本预测同一类别，Macro-F1 0.286），故 `depression.alert` 仍置 false，设备到货后必须做域验证；②残差统计未按周内分池，有周末效应的维 z 分被系统性压小；③GRU 固定 7 天窗对持续性变化钝感，异常持续到第 3 天后输入窗被异常日填满、残差收缩。
