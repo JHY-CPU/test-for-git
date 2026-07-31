@@ -8,7 +8,8 @@
 - **双轨每日批处理**：每日读取累积的传感器数据（`data/raw/`），聚合为双轨特征（睡眠 8 维 / 社交 5 维）后**各自独立**做趋势推理与预警，无独立实时运行时
 - **克制预警**：预警仅在连续多日偏离后发出，避免单日波动过度敏感打扰家人
 - **个人化基线**：为该老人独立建模（PersonalBaselineGRU + EWMA动态阈值），"自己和自己比"
-- **多传感器融合**：小贝壳无感睡眠监测仪 + 萤石 T1C 人体移动传感器 + C6c 摄像机（边缘侧人形检测，**不出图、不采音频**）
+- **多传感器融合**：小贝壳无感睡眠监测仪 + 萤石 T1C 人体移动传感器 + C6c 摄像机（边缘侧人形检测）
+- **三线并行监测**：睡眠障碍 / 孤独（GRU 个人基线，两条独立轨） + 抑郁（MPDD 群体基线，旁路只读通道）
 - **趋势判定**：连续3-5天偏离才触发预警，避免单日波动误报
 - **文件驱动数据流**：各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`，每日管道从此累积读取
 
@@ -18,7 +19,7 @@
 
 > 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
 
-**核心算法层已完工并验证**：332 个单元测试全部通过；范围 1（链路正确性）20/20、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
+**核心算法层已完工并验证**：442 个单元测试全部通过；范围 1（链路正确性）20/20、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
 
 > ⚠️ **实现成熟度：算法是真的，硬件对接与外部服务大多还是"桩/模拟"。** 这是科研原型阶段的正常状态，但必须讲清楚，避免误以为"能上真机"：
 
@@ -66,7 +67,7 @@
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 332 单测（14 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 442 单测（21 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
 | **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 判别力脚本 `validate_discriminative.py`（10 场景，含 4 项混淆 + 1 项已知漏报），当前 **9/9**（KM 场景不计分）；已借此修复 5 个真实缺陷，仍有 2 项已知局限（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
@@ -113,7 +114,7 @@ python scripts/run_daily_pipeline.py --date 2026-08-15
 # 5. 周轨：双轨微调 + 周报（--no-retrain 只出周报，不动基线）
 python scripts/run_weekly_pipeline.py
 
-# 6. 运行测试（14 个测试文件 / 332 用例）
+# 6. 运行测试（21 个测试文件 / 442 用例）
 python -m pytest
 ```
 
@@ -124,9 +125,8 @@ python -m pytest
 ```
 mental-health-sense/
 ├── config/                          # 配置文件
-│   ├── settings.yaml                # 全局配置（GRU、训练、EWMA、风险阈值）
-│   ├── feature_weights.json         # 特征权重（加权残差计算）
-│   └── realtime_config.yaml         # ⚠️ 孤儿文件：实时运行时已删除，无代码读取，仅历史留存
+│   ├── settings.yaml                # 全局配置（GRU、训练、EWMA、风险阈值、抑郁通道）
+│   └── feature_weights.json         # 特征权重（加权残差计算）
 │
 ├── data/                            # 数据目录
 │   ├── raw/                         # 原始传感器数据（JSON）
@@ -147,9 +147,12 @@ mental-health-sense/
 │   │       └── baseline_meta.json            # 元信息（两轨共用，按 track 分键）
 │   ├── logs/                        # 推理日志、证据契约和周报
 │   │   ├── daily_inference/         # 每日双轨推理结果（JSON）
-│   │   ├── mpdd_evidence/           # 给 MPDD-AVP 的单向证据契约（JSON）
+│   │   ├── mpdd_evidence/           # GRU → MPDD 的单向证据契约（JSON）
+│   │   ├── depression/              # MPDD → 展示层的抑郁评估契约（JSON，反方向）
 │   │   └── weekly_reports/          # 周报（LLM 或规则模板）
-│   └── elder_configs.json           # 老人元数据（姓名、描述）
+│   ├── depression/                  # 抑郁通道的输入
+│   │   └── E001/description.txt     # 个人介绍（英文，冻结；改动会改变分数）
+│   └── elder_configs.json           # 老人元数据（生成产物，非输入）
 │
 ├── src/                             # 源代码
 │   ├── baseline/                    # GRU个人基线模型
@@ -171,6 +174,15 @@ mental-health-sense/
 │   │       ├── ezviz_events.py      # 萤石 T1C PIR 事件
 │   │       └── circadian.py         # 小时活动序列 → RA / IV
 │   │
+│   ├── depression/                  # ★ 抑郁评估旁路（MPDD 群体基线，不参与个人基线）
+│   │   ├── status.py                # 状态枚举 + 可展示白名单（单一事实来源）
+│   │   ├── contract.py              # 契约 schema、组装与校验
+│   │   ├── aggregate.py             # 多片段 → 单次结论（中位数 + 离散度）
+│   │   ├── store.py                 # 读写 + 有效期（展示层唯一入口，零重依赖）
+│   │   ├── clip_source.py           # ClipSource 抽象：现在传录像 / 将来接实时流
+│   │   ├── runner.py                # 编排：取片段 → 逐段推理 → 聚合 → 落盘
+│   │   └── mpdd_process.py          # subprocess 封装（环境钉死 + 超时 + 退出码）
+│   │
 │   ├── risk/                        # 风险判定层
 │   │   ├── rules.py                 # 3类风险类型（睡眠稳定性/社会连接/作息节律）
 │   │   ├── judge.py                 # 4级风险判定（每轨各自算等级取较高者 + 方向闸门）
@@ -185,8 +197,9 @@ mental-health-sense/
 │   │   └── weekly_job.py            # 趋势轨（周日04:00）
 │   │
 │   ├── utils/                       # 工具函数
-│       ├── io.py                    # 文件读写、路径管理
+│       ├── io.py                    # 文件读写、路径管理、原子写
 │       ├── status.py                # 推理状态枚举与"可评估"判据（单一事实来源）
+│       ├── continuity.py            # 日历回溯（判级与判型共用，两侧曾不一致）
 │       ├── seeding.py               # 确定性种子派生（crc32，绝不用内置 hash()）
 │       ├── logger.py                # 日志配置
 │       └── metrics.py               # 评估指标
@@ -196,10 +209,11 @@ mental-health-sense/
 │   ├── train_all_baselines.py       # 双轨建档（两轨各一个 GRU/scaler/残差统计/EWMA）
 │   ├── run_daily_pipeline.py        # 手动触发每日推理
 │   ├── run_weekly_pipeline.py       # 手动触发周轨（微调 + 周报）
+│   ├── run_depression_assessment.py # 抑郁评估（事件驱动，不挂日管道）
 │   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
 │   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（10场景+混淆项，层次B）
 │
-├── tests/                           # 单元测试（14 个测试文件 / 332 用例，确定性可复现）
+├── tests/                           # 单元测试（21 个测试文件 / 442 用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -207,6 +221,8 @@ mental-health-sense/
 │   ├── test_gru_model.py            # GRU模型测试
 │   ├── test_imputer.py              # 缺失值处理（前向填充）测试
 │   ├── test_validator.py            # 数据质量校验测试
+│   ├── test_regression_2026_07_31.py # ★ 第二轮走查缺陷回归（全部打在真实链路输出上）
+│   ├── test_depression_*.py         # 抑郁通道：状态/契约/聚合/存储/隔离守卫/编排
 │   ├── test_risk_judge.py           # 风险判定测试（含低/高幅度连续偏离回归）
 │   ├── test_risk_rules.py           # 风险规则测试
 │   ├── test_alert.py                # 预警推送测试
@@ -532,8 +548,17 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | `out_of_home_min` 疑似外出时长 | 2.5 | ↓ | 中强。**测量为推断**（由室内无人推断外出），命名保留"疑似"以示不确定 |
 
 > **对话轮次已移除**：v2.0 的 `social_turns` 依赖拾音器 VAD，音频链路整体删除后，
-> 社会接触改由 C6c 边缘侧人形检测的 `copresence_min` 承担。这是**隐私换指标粒度**的取舍——
-> 不再采集音频，代价是拿不到"是否在交谈"，只能知道"是否有人同处一室"。
+> 社会接触改由 C6c 边缘侧人形检测的 `copresence_min` 承担。代价是拿不到“是否在交谈”，
+> 只能知道“是否有人同处一室”。
+>
+> **⚠️ 隐私边界已于 2026-07-31 重新划定，务必区分两件事：**
+>
+> - **GRU 管线仍然完全不使用音频**。社交轨的 5 维一维未变，`copresence_min`
+>   只来自边缘侧人形检测的逐秒人数，视频不出户、只上报当日聚合分钟数。
+> - **设备会录制短音视频片段**，供独立的抑郁评估模块（MPDD 旁路通道）使用。
+>   片段落盘在 `data/raw/video_clips/`，只在检测到“有正脸 + 有连续语音”时导出。
+>
+> 这两条在知情同意书上是**不同条目**，不能合并成一句“我们现在录音了”。
 
 ---
 
@@ -624,7 +649,7 @@ python scripts/validate_discriminative.py --only TN_sleep_improved   # 只跑单
 ### 3. 运行测试
 
 ```bash
-# 所有单元测试（14 个测试文件 / 332 用例）
+# 所有单元测试（21 个测试文件 / 442 用例）
 python -m pytest
 
 # 更详细输出
@@ -754,6 +779,175 @@ python -m pytest -v
 
 ---
 
+## 抑郁评估旁路通道（depression/*.json）
+
+第三条监测线。**与两条 GRU 轨完全独立**，实现在 `src/depression/`。
+
+### 为什么是旁路而不是第三条轨
+
+| | GRU 睡眠轨 / 社交轨 | MPDD 抑郁通道 |
+|---|---|---|
+| 基线类型 | **个人相对**（跟你自己平时比） | **群体绝对**（跟别人比） |
+| 节律 | 每日批处理 | 事件驱动（有合格录像才评估） |
+| 判据 | 残差 / EWMA / 连续天数 / 方向闸门 | 单次多模态分类 + PHQ-9 回归 |
+| 产出 | risk_level 0~3 | 等级 + PHQ-9 估计 |
+
+两者**尺度不可比**，这与本项目"绝不跨轨比较绝对分"是同一条不变量——
+睡眠轨和社交轨这两条自家的轨都不敢比（维度数与权重和不同），何况训练目标
+完全不同的外部模型。
+
+更要紧的是**防正反馈**。若抑郁分能标记异常日，会形成自我强化的闭环：
+
+```
+抑郁判高 → 该日标为异常 → 异常日被排除出每周微调
+        → 个人基线越缩越窄 → 更容易判偏离 → 偏离又被拿去佐证抑郁 → …
+```
+
+每一步单独看都"合理"，合起来是系统自己证明自己。这与"系统会习惯异常"
+（VALIDATION 缺陷④⑤⑥）是同一族病的镜像版本。
+
+### 四条硬约束（由 `tests/test_depression_isolation.py` 静态守卫）
+
+1. `src/baseline/`、`src/risk/`、`src/data_pipeline/`、`src/scheduler/` **不得导入** `src.depression`
+2. 不写 `features_*.csv`、不碰 `residual_stats` / `ewma` / `weekly_retrain`
+3. 输出不进入 `judge_risk_level` 的 `risk_level` 与 `per_track`
+4. MPDD 的依赖（transformers / librosa / av / cv2）**不进 `requirements.txt`**
+
+第 4 条靠**进程边界**实现：`runner.py` 用 `depression.python_bin` 指定的独立
+解释器 subprocess 调用 MPDD 仓。一旦那些依赖进了主链路的 import 图，
+任何一个 import 失败都会让睡眠和社交监测一起挂——这与"单轨失败是正常降级、
+两轨同时不可用才算整体失败"是同一条原则。
+
+**验收标准**：把整个 MPDD 仓改名，`python -m pytest` 必须全过、
+`run_daily_pipeline` 必须正常出结果。
+
+### 分层（决定了谁能 import 谁）
+
+```
+status / contract / aggregate / store   零重依赖，只用标准库
+clip_source / runner / mpdd_process     碰 subprocess 与外部仓
+```
+
+`weekly_report.py` **只准 import `store`**。MPDD 环境挂掉时周报照常渲染，
+那一节显示"暂无最新评估"。
+
+### 用法
+
+```bash
+# 前置：个人介绍文本（英文，一旦确定必须冻结）
+#   data/depression/{elder_id}/description.txt
+
+# 设备到货前：手工传录像
+python scripts/run_depression_assessment.py --elder E001 --date 2026-08-12 \
+    --video /path/to/footage.mp4
+```
+
+链路：`extract_clips_from_surveillance.py`（VAD + OpenFace 筛片段）
+→ 逐段 `infer_elder_depression.py` → 中位数聚合 → 落契约 → 周报展示。
+
+> **刻意不用 MPDD 的 `--run_infer`**：它内部是 `subprocess.run(..., check=False)`，
+> 退出码被丢弃、失败不打印、manifest 里也不留痕迹。若每段推理都崩了，父进程
+> 仍然 exit 0，磁盘上只有 mp4 没有 JSON——静默全失败。我们自己逐段驱动，
+> 才能看见每一个退出码。
+
+### 契约字段（`data/logs/depression/{id}_{date}.json`）
+
+```json
+{
+  "schema_version": "1.0.0", "elder_id": "E001", "day_key": "2026-08-12",
+  "assessed_at": "2026-08-12T00:00:00+08:00", "valid_until": "2026-09-10",
+  "status": "low_confidence",
+  "result": { "level": "正常", "phq9_median": 3.684, "phq9_spread": 0.0,
+              "class_probs": {"正常": 0.927, "轻度": 0.032, "重度": 0.040} },
+  "low_confidence_reasons": ["片段数 1 < 2，单段结论不可靠"],
+  "evidence": { "n_clips": 1, "n_rejected": 0, "source_duration_sec": 21.989,
+                "clips": [{"start": 0.0, "end": 21.989, "phq9": 3.684,
+                           "face_ratio": 0.978, "frontal_ratio": 1.0}] },
+  "provenance": { "checkpoint": "...", "description_sha256": "0bad8737...",
+                  "device": "cuda", "batch_size": 64, "frame_sample_rate": 1,
+                  "mpdd_git_rev": "5769083" },
+  "calibration": { "validated_on_site": false, "warning": "..." },
+  "note": "群体基线绝对评估，与个人基线偏离分不可比、不得合并或相互印证。非临床诊断。"
+}
+```
+
+**`provenance` 里三个字段不是装饰**，缺一个就会出现"分数莫名其妙变了但查不出原因"：
+
+- `description_sha256` —— MPDD 吃的是个人介绍文本的 1024 维 RoBERTa 嵌入。
+  **这份文本改一个字分数就变，而与老人的实际状态毫无关系。** 必须像 scaler
+  一样冻结并留指纹。
+- `device` / `batch_size` / `frame_sample_rate` —— 实测同机同版本下推理逐位可复现
+  （无 RNG、全程 `.eval()`、无反向传播），但这三项任一改变数值就会变。
+  注意 `infer_elder_depression.py` 在 CUDA 不可用时会**静默降级到 CPU**，
+  所以记录的是**实际生效**的那个（从 stderr 捞）。
+
+### 状态机
+
+| status | 含义 | 显示分数？ |
+|---|---|---|
+| `assessed` | 正常出分 | ✅ |
+| `low_confidence` | 片段数不足，或段间分歧过大 | ✅（加"证据不足"提示） |
+| `stale` | 超过 `valid_days` | ❌ |
+| `no_clip` | 有录像但一段都没通过筛选 | ❌ |
+| `no_source` | 当天没有录像 | ❌ |
+| `failed` | 截取或推理报错 | ❌ |
+
+判据集中在 `src/depression/status.py`，**别处不得再写字面量白名单**——
+`cold_start_fallback` 那次教训（三处白名单漏了它，建档期 35 天一条预警发不出）
+就是这么来的。
+
+**过期一律显示"暂无最新评估"，绝不拿旧分顶今天。** 抑郁评估天然稀疏
+（要"有正脸 + 有连续语音"的片段，独居老人可能几周才有一次），比周报本身
+更容易踩这个坑。
+
+### ⚠️ 当前模型未校准，不接预警出口
+
+`depression.alert` 配置项刻意置 `false`，两个独立原因，任一成立都不该开：
+
+1. **`alert.py` 至今没有冷却 / 去重 / 抑制机制**。`PERM_step` 实测连续 91 天
+   每天报 L3 = 91 次短信 + 强制响铃 + 网格员介入（VALIDATION §7.3）。
+   再加一个预警源只会加速家属关掉通知，而通知一关，真正的新变化也收不到了。
+2. **checkpoint 在其验证集上对全部 9 个样本预测同一类别**
+   （混淆矩阵 `[[6,0,0],[2,0,0],[0,1,0]]`，Macro-F1 0.286，Kappa 0.129），
+   且未在本机位 / 本人身上校准。
+
+所以周报里那一节带**未校准警示**，措辞是"情绪状态评估（研究性，未校准）"，
+并明确写"结论不可作为任何判断依据"。对外口径仍是行为观察，不下诊断。
+
+### 展示：为什么周报里要排"历次"时间线
+
+大众基线对个体差异**没有免疫力**——天生表情少、语速慢、口音重的老人可能
+常年被判同一等级。只看单次绝对等级会把这类人固定误报。把历次评估排成序列
+看"变没变"而不是"高不高"，能把这种固定偏置降成背景噪音。
+
+这只是展示层排序，**不涉及任何拟合、不产生个人基线**（真做个人基线就违反了
+上面第 2、3 条约束，而且抑郁评估样本太稀疏，也根本估不出来）。
+
+### 设备到货后：一路流，两个消费者
+
+摄像头到货后要接实时流，且**同一路流必须同时供给 MPDD 与 GRU 社交轨**。
+设计已在 `src/depression/clip_source.py` 的 docstring 里写明：
+
+```
+        C6c RTSP ──► 采集进程 ──┬── 1fps 帧 → 人形检测 → data/raw/camera/{id}/{date}.json → GRU
+                                └── 音视频环缓 → 触发器 → data/raw/video_clips/{id}/{date}/ → MPDD
+```
+
+- 扇出点必须在**解码之后、处理之前**（RTSP 并发有限，两个进程各拉一路等于解码两遍）
+- GRU 那一支**零代码改动**：`camera.py` 的去抖 / ROI 过滤 / 共处时长计算都是现成的，
+  `data/raw/camera/{id}/{date}.json` 就是 `daily_job` 现在读的路径与格式
+- 不做全量录像：环形缓冲只留最近 ~90 秒，触发才落盘（全天 1080p ≈15~30 GB/天 → 几十 MB/天）
+- 实时触发器**不能用 OpenFace**（逐图片 shell-out，跑不了实时），只做轻量粗筛，
+  夜间再用现成的 `extract_clips` 那套硬筛选精挑
+- ★ **采集进程不许产出任何结论**，只产出上面两样东西。判定全部留在日批处理里——
+  本仓删过一次实时运行时（`0dddad1`），教训是"三条路径各写各的，实时采集到的
+  特征和每日轨读取的不一定是同一份"
+
+`ClipSource` 抽象隔开了"现在传录像"与"将来接实时流"：`runner` 只认片段目录，
+不关心片段怎么来的。设备到货时换 `StreamClipSource` 的实现，下游一行不改。
+
+---
+
 ## 配置说明
 
 ### settings.yaml（全局配置）
@@ -849,12 +1043,6 @@ report:
 `consecutive >= 1` 判成 L1，所以峰值门槛唯一的职责是"已经恢复了，但前几天那个尖峰
 高到仍值得保持关注"——bar 理应更高。
 
-### realtime_config.yaml（⚠️ 已成孤儿）
-
-实时采集运行时已在本次重构中删除，`config/realtime_config.yaml` 文件仍在仓库中，
-但**已无任何代码读取**，仅作历史留存。系统当前唯一生效的配置是上文的 `settings.yaml`。
-
----
 
 ## 消融实验设计
 
@@ -983,7 +1171,7 @@ python scripts/run_daily_pipeline.py --date "$(date +%F)"
 本轮之前确实有三处配置是死的（`alert` 整段、`report.*`、以及压根不存在的
 `ewma.max_freeze_days`），现已全部接线。若仍不生效：
 
-- 确认改的是 `config/settings.yaml`——`config/realtime_config.yaml` 是**孤儿文件**，
+- 确认改的是 `config/settings.yaml`（本项目唯一的运行配置）——
   无任何代码读取；
 - 确认调用链传了 `config`：`trigger_alert(..., config=config)` 不传时用的是
   `alert.py` 内置默认；

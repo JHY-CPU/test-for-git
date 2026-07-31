@@ -72,14 +72,30 @@ class TestCoreDoesNotImportDepression:
 
     def test_动态导入也拦住(self):
         """ast 已覆盖 import / from-import（含函数内的延迟导入），
-        但 importlib.import_module("src.depression.x") 这类字符串形式绕得过去。
-        这里补一遍文本扫描，只匹配模块路径本身，不误伤普通注释。"""
+        但 `importlib.import_module("src.depression.x")` 这类字符串形式绕得过去。
+
+        只扫**非 docstring 的字符串字面量**：动态导入的模块名一定是运行时字符串，
+        而 docstring 与注释里提到路径是正当的文档行为（例如 camera.py 的隐私说明
+        需要指明抑郁模块在哪）。用整文件文本扫描会把文档也判成违规，
+        那种误报会逼着人把有价值的注释删掉——防线不该有这种副作用。
+        """
         for py_file in _protected_files():
-            text = py_file.read_text(encoding="utf-8")
-            for pattern in ("src.depression", "src/depression"):
-                assert pattern not in text, (
-                    f"{py_file.relative_to(PROJECT_ROOT)} 出现 {pattern!r}，"
-                    f"疑似以动态方式引用抑郁模块"
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            docstrings = {
+                ast.get_docstring(node, clean=False)
+                for node in ast.walk(tree)
+                if isinstance(
+                    node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                )
+            }
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if node.value in docstrings:
+                    continue
+                assert "src.depression" not in node.value, (
+                    f"{py_file.relative_to(PROJECT_ROOT)}:{node.lineno} 的字符串字面量"
+                    f"含 'src.depression'，疑似 importlib 动态导入"
                 )
 
 

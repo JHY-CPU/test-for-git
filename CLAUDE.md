@@ -7,7 +7,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Git 仓库根是 `test-for-git/`，项目实际在子目录 `mental-health-sense/`——**所有命令都从该子目录执行**（脚本用 `sys.path.insert` 挂项目根，`data/` 路径由 `src/utils/io.py:get_project_root()` 推出，均以它为基准）。
 
 - 主文档是 `mental-health-sense/docs/README.md`（不在项目根），另有 `docs/TRAINING.md`（GRU 训练详解）、`docs/VALIDATION.md`（三层验证框架 + §7 执行记录 + §8 代码走查，代码里的"缺陷④⑤⑥"指 §7）、`docs/TODO.md`（已知未解决问题）。
-- 根目录的 `test_model.py` 是一份独立的 SenseVoice ASR 试验脚本，音频子系统删除后的遗留，与本项目无关。
 
 ## 常用命令
 
@@ -21,7 +20,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 > 核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest；`anthropic` 只用于周报正文，未装则自动回落规则模板。`funasr` / `modelscope` / `pyaudio` / `scipy` / `opencv-python` / `APScheduler` 已于 2026-07-31 从 `requirements.txt` 移除（零引用；其中 `pyaudio` 缺 portaudio 头文件会让整条 pip install 中止，torch 一个都装不上）。
 
 ```bash
-# 测试（14 文件 / 332 用例）
+# 测试（21 文件 / 442 用例）
 python -m pytest                                   # pytest.ini 已设 testpaths=tests 与 -v
 python -m pytest tests/test_risk_judge.py
 python -m pytest tests/test_risk_judge.py::TestJudgeRiskLevel::test_xxx
@@ -32,6 +31,10 @@ python scripts/generate_simulation_data.py         # 60 天双轨模拟数据
 python scripts/train_all_baselines.py              # 双轨建档（--track sleep 只训一轨）
 python scripts/run_daily_pipeline.py --date 2026-08-15
 python scripts/run_weekly_pipeline.py              # 周轨：双轨微调 + 周报（--no-retrain 只出周报）
+
+# 抑郁评估（MPDD 旁路通道，事件驱动，**不挂在日管道里**）
+python scripts/run_depression_assessment.py --elder E001 --date 2026-08-12 \
+    --video /path/to/footage.mp4
 
 # 端到端验证（单测不覆盖判定链，改算法/配置后必须重跑）
 python scripts/validate_synthetic.py               # 范围1：链路跑通 + 双轨信号隔离，20 断言（--keep 保留 V001 数据）
@@ -81,9 +84,43 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 
 `validator.py` 的四态 `valid / degraded / insufficient / offline` 贯穿全链路。degraded/insufficient 的日子在持续性统计中被**跳过**（既不累加也不打断，见 `rules._counts_toward_consecutive`），**缺日同理**（两轨全不可用那天不生成日志）；但连续跳过超过 `risk.continuity.max_skip_days`（默认 3）即打断，否则一次长时间离线会把两段无关的偏离粘成一段。质量标记按轨判定：`data_quality` 随推理结果逐轨落盘，单一顶层值会让睡眠轨降级压住社交轨的计数。`copresence_min` 禁止前向填充（"今天有没有人来"取决于子女安排，用昨天填等于伪造社会接触）。单轨失败是正常降级场景，两轨同时不可用才算整体失败。
 
+### 抑郁评估是旁路，不是第三条轨
+
+`src/depression/`（MPDD 群体基线）与两条 GRU 个人基线轨**完全独立**。四条硬约束，
+由 `tests/test_depression_isolation.py` 静态守卫：
+
+1. `src/baseline/`、`src/risk/`、`src/data_pipeline/`、`src/scheduler/` **不得导入** `src.depression`
+2. 不写 `features_*.csv`、不碰 `residual_stats` / `ewma` / `weekly_retrain`
+3. 不进 `judge_risk_level` 的 `risk_level` 与 `per_track`
+4. MPDD 的依赖（transformers / librosa / av / cv2）**不进 `requirements.txt`**
+
+理由有两层。**尺度不可比**：一个是群体绝对分，一个是个人相对分，
+与“绝不跨轨比较绝对分”同理。**更要紧的是防正反馈**：若抑郁分能标记异常日，
+异常日会被排除出每周微调 → 个人基线越缩越窄 → 更容易判偏离 → 又佐证抑郁，
+自己证明自己。
+
+分层：`status` / `contract` / `aggregate` / `store` 零重依赖；`clip_source` / `runner` /
+`mpdd_process` 才碰 subprocess。**周报只准 import `store`**——MPDD 环境挂掉时
+周报必须照常渲染。第 4 条靠进程边界实现（`depression.python_bin` 指定独立解释器）。
+
+几个实现约束：
+- **不用 MPDD 的 `--run_infer`**：它内部 `check=False`，静默吞掉全部推理失败而父进程
+  仍 exit 0。自己逐段驱动才能看见退出码。
+- **MPDD 仓不可移动/改名**：OpenFace 的 RUNPATH 是编译进去的绝对路径。
+- 子进程必须钉死 `HF_HUB_OFFLINE` / `TORCH_HOME` / `TMPDIR` / `NUMBA_CACHE_DIR`，
+  并剔除系统 `PYTHONPATH`（本机 `/opt/ros/humble` 会污染 MPDD 解释器）。
+- `depression.alert` 刻意为 `false`：`alert.py` 还没有冷却/去重，且当前 checkpoint
+  在其验证集上对全部样本预测同一类别（Macro-F1 0.286），未在本机位校准。
+
+### 持续性统计的日历回溯是共用的
+
+`src/utils/continuity.py:walk_back_days` 同时被 `rules`（判型）与 `judge`（判级）使用。
+两侧曾经不一致——degraded 日在判型时被跳过、判级时却被计入，导致同一段数据
+“不激活风险类型却报 L3”。改动持续性语义时必须两侧一起看。
+
 ### 实现成熟度
 
-算法层是真的；硬件与外部服务是桩：`adapters/{xiaobeike,camera,ezviz_events}.py` 的 `_read_raw` 全部 `raise NotImplementedError`（只有 mock/file 模式可跑），`alert.py` 只写日志字符串。`config/realtime_config.yaml` 是孤儿文件，无任何代码读取。
+算法层是真的；硬件与外部服务是桩：`adapters/{xiaobeike,camera,ezviz_events}.py` 的 `_read_raw` 全部 `raise NotImplementedError`（只有 mock/file 模式可跑），`alert.py` 只写日志字符串。`config/settings.yaml` 是唯一的运行配置（`paths:` / `scheduler:` 等死配置段已删）。
 
 ## 约定与坑
 
