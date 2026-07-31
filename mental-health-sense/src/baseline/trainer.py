@@ -175,6 +175,42 @@ def _build_windows(
     )
 
 
+def _last_contiguous_span(df, day_key_col: str = DAY_KEY_COL):
+    """取 df 里**最后一段日期连续**的行（按自然日判断，非行号）。
+
+    GRU 的输入窗口 data_norm[i-window:i] 隐含"这 window 行是相邻的 window 天"。
+    一旦中间剔掉了 degraded / 偏离天，这个假设就不成立，模型学到的是错误的
+    时间关系。取最后一段连续日虽然会损失样本，但保证喂进去的确实是连续的天。
+
+    取"最后一段"而不是"最长一段"：微调的目的是跟上老人**最近**的状态，
+    用三个月前的一段长数据去微调没有意义。
+    """
+    from datetime import datetime, timedelta
+
+    if len(df) == 0:
+        return df
+
+    keys = df[day_key_col].tolist()
+    start_idx = 0
+    for i in range(len(keys) - 1, 0, -1):
+        try:
+            prev = datetime.strptime(str(keys[i - 1]), "%Y-%m-%d")
+            cur = datetime.strptime(str(keys[i]), "%Y-%m-%d")
+        except ValueError:
+            start_idx = i          # 日期解析不了就从这里断开，保守处理
+            break
+        if cur - prev != timedelta(days=1):
+            start_idx = i
+            break
+
+    if start_idx:
+        logger.info(
+            f"  └─ 日期不连续，取最后一段连续 {len(keys) - start_idx} 天"
+            f"（丢弃前 {start_idx} 天，避免把非相邻日当成相邻日喂进窗口）"
+        )
+    return df.iloc[start_idx:]
+
+
 def _residual_stats_from(pred: torch.Tensor, target: torch.Tensor) -> dict:
     """
     双残差契约：signed 与 abs 两套统计各自独立维护。
@@ -247,8 +283,19 @@ def train_initial_baseline(
     names = get_feature_names(track)
 
     # 1. 读取该轨特征数据
+    # ★ 必须同时剔除含缺测维（NaN）的行，不能只看 data_quality。
+    #   缺 1 维时质量仍判 valid（DEGRADED_THRESHOLD=2），而缺测维现在保持 NaN
+    #   （imputer 不再填 0）。把 NaN 喂进 StandardScaler.fit 会让 mean_/scale_
+    #   变成 NaN，整条基线报废；而旧的"填 0"写法虽然不炸，却把一个 −15σ 的点
+    #   算进了归一化基准——两种都不能要。scaler 一旦建档就永久冻结，
+    #   这里的每一行都会影响之后所有 signed_z 的分母。
     df = load_features_csv(elder_id, track)
     valid_df = df[df["data_quality"] == "valid"].sort_values(DAY_KEY_COL)
+    complete_mask = valid_df[names].notna().all(axis=1)
+    dropped = int((~complete_mask).sum())
+    if dropped:
+        logger.info(f"  └─ [{track}] 建档剔除 {dropped} 个含缺测维的日子")
+    valid_df = valid_df[complete_mask]
 
     if len(valid_df) < build_days:
         raise ValueError(
@@ -473,7 +520,9 @@ def weekly_retrain(
         logger.warning(f"  └─ [{track}] 无法获取最近数据，跳过微调")
         return
 
+    # 同建档：含缺测维（NaN）的行不参与微调，理由见 train_initial_baseline
     df = df[df["data_quality"] == "valid"].sort_values(DAY_KEY_COL)
+    df = df[df[names].notna().all(axis=1)]
     df_recent = df.tail(recent_days).copy()
 
     # 剔除异常天：若某天已被 daily_inference 判为该轨 is_deviation=True，
@@ -495,6 +544,16 @@ def weekly_retrain(
             if excluded:
                 logger.info(f"  └─ 微调剔除 {excluded} 个偏离天（防基线被异常期污染）")
 
+    # ★ 只保留**最后一段连续自然日**。
+    #
+    # 上面剔完 degraded 与偏离天之后，df_recent 的行与行之间不再是相邻的日子，
+    # 而 _build_windows 仍然把 data_norm[i-window:i] 当成"前 window 天"。
+    # 于是模型会用 8/10/11/15 号去预测 16 号，学到的"昨天→今天"关系是假的；
+    # 剔除得越多（也就是异常越严重时）窗口越失真——正好在最需要基线准确的时候。
+    #
+    # 这与本轮统一的日历语义一致：持续性统计已经按自然日回溯（continuity.py），
+    # 模型输入没有理由继续按行号。
+    df_recent = _last_contiguous_span(df_recent)
     recent = df_recent[names].to_numpy(dtype=np.float64)
 
     if len(recent) < window + 3:
@@ -539,11 +598,15 @@ def weekly_retrain(
     # 5. 在留出段估新统计；留出段太短则退回全段（并记录，因为此时阈值偏乐观）
     X_eval, y_eval, _ = _build_windows(data_norm, window, split, n)
     if len(X_eval) < 2:
-        logger.warning(
-            f"  └─ [{track}] 留出段不足 2 个样本，退回用全段估残差统计"
-            f"（阈值会偏紧，下次数据充足时自动恢复）"
+        # ★ 不再退回全段。用训练集残差估阈值会让 std 趋零 → 阈值分母趋零 →
+        #   建档期一过疯狂误报，这是本仓明令禁止的失效链（"残差统计只能在
+        #   留出段估计"）。原来的退路在 n ≥ window+3 时不可达，但它一旦可达
+        #   就会**静默违反**这条不变量——只留一行 warning，没人会注意到。
+        #   宁可显式失败：微调跳过一次没有代价，阈值被悄悄弄坏有。
+        raise ValueError(
+            f"[{track}] 留出段只有 {len(X_eval)} 个样本（需 ≥2），无法估残差统计。"
+            f"残差统计只能在留出段估计，不得退回训练集。"
         )
-        X_eval, y_eval = X_train, y_train
 
     model.eval()
     with torch.no_grad():

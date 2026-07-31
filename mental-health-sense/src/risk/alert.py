@@ -137,7 +137,11 @@ def trigger_alert(
 
     # 执行推送（当前为模拟，实际对接推送服务）
     alert_result = {
-        "alerted": risk_level >= AlertLevel.WARNING,
+        # 用归一化后的 level_enum，不用原始整数：trigger_alert("E001", 99)
+        # 会被上面的 try 兜成 NORMAL，但 `99 >= WARNING` 仍为真，于是返回
+        # {"alerted": True, "level": "NORMAL", "actions": [], "message": ""}
+        # ——上层据此以为发过预警，实际一个动作都没执行。
+        "alerted": level_enum >= AlertLevel.WARNING,
         "level": level_enum.name,
         "label": _get_level_label(risk_level),
         "actions": _execute_alert_actions(elder_id, level_enum, actions_config, risk_types),

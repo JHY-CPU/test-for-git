@@ -78,6 +78,13 @@ def main():
     logger.info("=" * 46)
     logger.info("每日推理完成")
 
+    # ★ 非 success 必须以非零码退出。
+    # 推理/判定异常曾被 run_daily_pipeline 内部吞掉，脚本照样 exit 0，
+    # cron 与监控全绿而老人当天零监测。全绿的退出码不该盖住真实故障。
+    if result["status"] != "success":
+        logger.error(f"  管道未正常完成: status={result['status']}, error={result.get('error')}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

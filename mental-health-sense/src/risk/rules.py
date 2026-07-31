@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.baseline.scaler_utils import TRACK_SLEEP, TRACK_SOCIAL
+from src.utils.continuity import walk_back_days
 from src.utils.status import is_evaluable
 
 
@@ -102,9 +103,20 @@ def build_risk_rules(config: dict | None = None) -> dict[str, RiskRule]:
             ],
             optional=[],
             min_optional=0,
-            # 1.2 而非 1.5：三项全中且无可选池，门槛可低而联合误报率仍极低。
-            # 另一层原因是 out_of_home_min 的残差 std 被周末双峰抬高（见 settings.yaml 注释）。
-            threshold_ratio=social_cfg.get("threshold_ratio", 1.2),
+            # ★ 默认值必须与 settings.yaml 一致（1.0），不能是 1.2。
+            #
+            # settings.yaml 用近 30 行论证过 1.2 是"假绿"：copresence_min 的 z
+            # 恰好在这个门槛两侧抖动，一次共处归零 9 天的社交崩塌报不出类型，
+            # 而这个配置当年"通过"过端到端验证。见 VALIDATION 缺陷⑥。
+            #
+            # 代码默认值与配置漂开的实际风险：classify_risk_type 允许调用方传任意
+            # config，凡是传了裁剪配置的调用方（验证脚本、补算工具、测试）都会
+            # 静默拿到已知损坏的 1.2，而且没有任何告警。
+            #
+            # 门槛能低到 1.0 的理由是结构性的：三个必选维 AND + 7 取 5 滚动窗
+            # 已经提供了安全性，不需要再靠单维门槛——三个必选维的变异系数
+            # 差一个量级，单一门槛对它们本来就不等价。
+            threshold_ratio=social_cfg.get("threshold_ratio", 1.0),
             consecutive_days=social_cfg.get("rolling_required", 5),
             rolling_window=social_cfg.get("rolling_window", 7),
             rolling_required=social_cfg.get("rolling_required", 5),
@@ -337,19 +349,39 @@ def _counts_toward_consecutive(day_result: dict, tracks: frozenset[str] = frozen
     持续性计数，那会把双轨的故障隔离在判定层又粘回去。只看**该规则必需的那些轨**，
     全部 valid 才计入。
 
-    三级回退（顺序即优先级）：
-        1. day_result[track]["data_quality"]  ← 现行格式
-        2. day_result["data_quality"]         ← 单测桩与早期日志的单一顶层值
-        3. 都没有 → True                       ← 历史日志无该字段，保守当作有效
+    四级回退（顺序即优先级）：
+        1. day_result[track]["data_quality"]       ← 该轨跑了推理，结果里带质量档
+        2. day_result["track_quality"][track]      ← 该轨没跑推理（不可用），
+                                                      质量档只在顶层镜像里
+        3. day_result["data_quality"]              ← 单测桩与早期日志的单一顶层值
+        4. 都没有 → True                            ← 历史日志无该字段，保守当作有效
+
+    ★ 第 2 级是补上的，它对应一个真实缺陷：
+
+      daily_job 只把 is_usable_for_inference 的轨传给 daily_inference，所以
+      insufficient / offline 的那一轨**没有 result[track] 子字典**。原实现只有
+      1/3/4 三级，于是这种日子一路落到第 4 级 `return True`，被当成"质量正常
+      但不达标"，直接**打断**连续段——而设计要求是"跳过"（既不累加也不打断）。
+
+      后果：小贝壳掉线一天，本该只让睡眠轨那天不计数，实际却把攒了几天的偏离段
+      清零，`sleep_stability` 的连续 3 天门槛永远凑不满，预警丢失。坏掉的正是
+      双轨架构"故障隔离"这条存在理由本身。
+
+      现在 daily_inference 会对全部 TRACKS 落 track_quality，第 2 级就能读到
+      真实档位（insufficient/offline），从而正确跳过。
     """
-    per_track = [
-        day_result[t].get("data_quality")
-        for t in tracks
-        if isinstance(day_result.get(t), dict)
-        and day_result[t].get("data_quality") is not None
-    ]
-    if per_track:
-        return all(q == "valid" for q in per_track)
+    qualities: list[str | None] = []
+    track_quality_map = day_result.get("track_quality")
+
+    for t in tracks:
+        track_result = day_result.get(t)
+        if isinstance(track_result, dict) and track_result.get("data_quality") is not None:
+            qualities.append(track_result["data_quality"])
+        elif isinstance(track_quality_map, dict) and t in track_quality_map:
+            qualities.append(track_quality_map[t])
+
+    if qualities:
+        return all(q == "valid" for q in qualities)
 
     quality = day_result.get("data_quality")
     if quality is None:
@@ -414,28 +446,16 @@ def _walk_back(
       也不打断，与 validator 的四态设计一致。但不能无上限地跨过去——连续跳过
       超过 max_skip 天就打断，否则一次长时间离线又会把两段无关的偏离粘起来。
       max_skip 默认 3：超过三天没有可信数据，就不该再假装这是同一段状态。
+
+    走法本身抽到了 utils/continuity.py，与 judge 的等级判定共用同一份实现——
+    两侧曾经不一致，degraded 日在判型时被跳过、判级时却被计入，导致同一段数据
+    "不激活风险类型却报 L3"。
     """
-    from datetime import datetime, timedelta
-
-    try:
-        cursor = datetime.strptime(today_key, "%Y-%m-%d")
-    except (TypeError, ValueError):
-        return
-
-    skipped_in_a_row = 0
-    for _ in range(max_steps):
-        cursor -= timedelta(days=1)
-        key = cursor.strftime("%Y-%m-%d")
-        day_result = index.get(key)
-
-        if day_result is None or not _counts_toward_consecutive(day_result, tracks):
-            skipped_in_a_row += 1
-            if skipped_in_a_row > max_skip:
-                return          # 连续跳过太久，不再认为是同一段状态
-            continue
-
-        skipped_in_a_row = 0
-        yield day_result
+    yield from walk_back_days(
+        index, today_key, max_steps, max_skip,
+        counts_fn=lambda d: _counts_toward_consecutive(d, tracks),
+        include_today=False,   # 今天的达标信号用现算值，见 _history_before_today
+    )
 
 
 def _count_consecutive_qualifies(

@@ -106,7 +106,14 @@ class CumulativeEWMABaseline:
 
         Returns:
             动态阈值
+
+        n=0（一个样本都没喂过）时 mean 是 None，直接相加会抛 TypeError。
+        生产路径被 `pool_n >= min_samples`（≥8）挡住，但 get_percentile 与
+        测试/排查代码会踩到。返回 inf 而不是 0：阈值的语义是"超过它才算偏离"，
+        没有基线时应当**永不触发**，返回 0 会让任何分数都判偏离。
         """
+        if self.mean is None:
+            return float("inf")
         return self.mean + sigma_multiplier * self.std
 
     def get_percentile(self, percentile: float) -> float:
@@ -146,10 +153,8 @@ class CumulativeEWMABaseline:
 
     def save(self, filepath: str | Path) -> None:
         """保存EWMA到文件（pickle格式）"""
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "wb") as f:
-            pickle.dump(self.to_dict(), f)
+        from src.utils.io import atomic_write_bytes
+        atomic_write_bytes(filepath, pickle.dumps(self.to_dict()))
 
     @classmethod
     def load(cls, filepath: str | Path) -> "CumulativeEWMABaseline":
@@ -162,9 +167,10 @@ class CumulativeEWMABaseline:
         return cls.from_dict(data)
 
     def __repr__(self) -> str:
+        mean_text = "None" if self.mean is None else f"{self.mean:.4f}"
         return (
             f"CumulativeEWMABaseline(alpha={self.alpha}, n={self.n}, "
-            f"mean={self.mean:.4f}, std={self.std:.4f})"
+            f"mean={mean_text}, std={self.std:.4f})"
         )
 
     def reset(self) -> None:
@@ -282,6 +288,28 @@ class TrackEWMAPools:
             self.last_day_key = day_key
         return True
 
+    def already_fed(self, day_key: str | None) -> bool:
+        """该自然日是否已经被喂过（即本次是补算/重跑）。
+
+        ★ 为什么调用方需要在 update **之前**知道这件事
+
+          update 的去重只挡住了"再喂一次"，但阈值是在 update **之前**从池里读的。
+          首跑时读到的是"不含今天"的池，落盘后池里就有今天了；重跑时读到的池
+          已经包含这一天自己的分，于是拿"含被判对象的基线"去判这个对象。
+
+          实测影响：某非偏离日 score=1.28、阈值 1.30 → 不偏离，池被更新
+          （mean 上移 alpha·(1.28−mean)，m2 也跟着变）。重跑同一天时
+          mean + 2.5·std 已经移动，落在新旧阈值之间的分数会**翻转 is_deviation**，
+          而这个字段驱动 consecutive、risk_type_qualifies、微调排除集、周报统计。
+
+          README 明写"补算与重跑是安全的"，那就必须真的幂等。
+        """
+        return (
+            day_key is not None
+            and self.last_day_key is not None
+            and day_key <= self.last_day_key
+        )
+
     def get_threshold(self, sigma_multiplier: float, is_weekend: bool = False) -> float:
         """对应池的动态阈值"""
         return self.pool_for(is_weekend).get_threshold(sigma_multiplier)
@@ -347,15 +375,15 @@ class TrackEWMAPools:
 
         # 容器级状态（冻结计数）单独落一个小文件：池文件的格式不动，
         # 老基线目录缺这个文件时按 0 起算，向后兼容。
-        with open(dirpath / self._state_filename(), "wb") as f:
-            pickle.dump(
-                {
-                    "freeze_streak": self.freeze_streak,
-                    "max_freeze_days": self.max_freeze_days,
-                    "last_day_key": self.last_day_key,
-                },
-                f,
-            )
+        from src.utils.io import atomic_write_bytes
+        atomic_write_bytes(
+            dirpath / self._state_filename(),
+            pickle.dumps({
+                "freeze_streak": self.freeze_streak,
+                "max_freeze_days": self.max_freeze_days,
+                "last_day_key": self.last_day_key,
+            }),
+        )
 
     def _pool_filename(self, pool_name: str) -> str:
         if pool_name == POOL_DEFAULT:

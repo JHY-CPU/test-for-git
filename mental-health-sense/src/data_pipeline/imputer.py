@@ -62,9 +62,31 @@ def impute_missing(
                 filled[i] = prev_day_vec[i]
                 missing_mask[i] = False
 
-    # 仍填不上的填 0。归一化空间里 0 ≈ 训练均值，是"信息中性"的占位，
-    # 不会伪造出一个偏离；同时这些特征已计入 final_missing_count，由上层据此降级数据质量。
-    filled[missing_mask] = 0.0
+    # ★ 仍填不上的**保持 NaN**，绝不填 0。
+    #
+    # 旧实现这里是 `filled[missing_mask] = 0.0`，注释写的是"归一化空间里 0 ≈ 训练
+    # 均值，是信息中性的占位"。但 filled 是**原始量纲**向量，会被原样写进
+    # features_{track}.csv，归一化要等到推理层用冻结的 scaler 才发生。
+    # 于是"信息中性"的论证在错误的空间里成立，实际效果是伪造出极端偏离。
+    # 用本仓 E001 自己的数据实测：
+    #
+    #     night_hr_mean    原始 0 → z = −15.2
+    #     sleep_efficiency 原始 0 → z = −11.8
+    #     rar_amplitude    原始 0 → z = −5.6
+    #     copresence_min   原始 0 → z = −1.44   （足以让 _exceeds(z,"down",1.0) 为真）
+    #
+    # 两个具体后果：
+    #   1. copresence_min 是 social_decline 权重最高的**必选维**，设计上"缺了它
+    #      规则就永远不触发"（validator 的 CRITICAL_FEATURES 也是这个意思），
+    #      现在反而被免费送上一个满足方向的 z。"测不到"变成了"确实没人来"。
+    #   2. 缺 1 维时数据质量仍判 valid（DEGRADED_THRESHOLD=2），于是这一行
+    #      −15σ 的点会进 StandardScaler.fit 与 GRU 训练集，把归一化基准带偏，
+    #      之后所有 signed_z 的分母都是错的。
+    #
+    # NaN 才是诚实的表示，而且是本仓已有的词汇：cold_start_fallback 用
+    # np.isnan 判"这维今天测不到"，产出 valid_features / skipped_features。
+    # 推理层据此把该维排除出打分（见 inference.infer_track）。
+    filled[missing_mask] = np.nan
 
     # 统计最终无法填充的特征
     final_missing_list = []

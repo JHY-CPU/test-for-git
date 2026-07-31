@@ -45,9 +45,17 @@ class TestImputeSleepTrack:
         assert filled[1] == 2.0
 
     def test_single_missing_without_prev(self):
+        """★ 填不上的维保持 NaN，绝不填 0。
+
+        filled 是**原始量纲**向量，会原样写进 features_{track}.csv。
+        在这里填 0 意味着"老人的 WASO 是 0 分钟"，而实际是"没测到"。
+        实测 E001：night_hr_mean 原始 0 → z = −15.2，sleep_efficiency → z = −11.8，
+        这种假偏离会进 StandardScaler.fit 并永久带偏归一化基准。
+        NaN 才是诚实的表示，推理层据此把该维排除出打分。
+        """
         current = sleep_vec([1.0, np.nan] + [1.0] * 6)
         filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP)
-        assert filled[1] == 0.0
+        assert np.isnan(filled[1])
         assert missing_count == 1
         assert missing_names == ["waso_min"]
 
@@ -57,7 +65,7 @@ class TestImputeSleepTrack:
         filled, missing_count, missing_names = impute_missing(current, TRACK_SLEEP, prev)
         assert filled[0] == 2.0
         assert filled[2] == 3.0
-        assert filled[3] == 0.0
+        assert np.isnan(filled[3])   # 昨天也缺 → 填不上 → 保持 NaN
         assert missing_count == 1
         assert missing_names == ["bed_exit_count"]
 
@@ -87,7 +95,10 @@ class TestImputeSocialTrack:
 
         filled, missing_count, missing_names = impute_missing(current, TRACK_SOCIAL, prev)
 
-        assert filled[idx] == 0.0, "不得用昨日的 120 分钟填充"
+        # NaN 而不是 0：0 的语义是"确实一个人都没来"，而摄像头掉线时我们
+        # 根本不知道。copresence_min 是 social_decline 的必选维，填 0 会产生
+        # 一个满足 down 方向的假 z，把"测不到"变成"确实没人来"。
+        assert np.isnan(filled[idx]), "不得用昨日的 120 分钟填充，也不得填 0"
         assert missing_count == 1
         assert "copresence_min" in missing_names
 

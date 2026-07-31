@@ -38,7 +38,12 @@ from src.data_pipeline.validator import (
 )
 from src.utils.io import DAY_KEY_COL, load_features_csv, save_daily_features
 from src.utils.logger import get_logger
-from src.utils.status import STATUS_COLD_START, STATUS_COLD_START_FALLBACK, is_evaluable
+from src.utils.status import (
+    STATUS_COLD_START,
+    STATUS_COLD_START_FALLBACK,
+    STATUS_SUCCESS,
+    is_evaluable,
+)
 
 logger = get_logger(__name__)
 
@@ -100,6 +105,7 @@ def run_daily_pipeline(
     # 5. 双轨推理（至少一轨可用才跑）
     inference_result = None
     risk_result = None
+    failure: str | None = None
     usable_tracks = tuple(t for t in TRACKS if is_usable_for_inference(track_quality[t]))
 
     if usable_tracks:
@@ -116,7 +122,7 @@ def run_daily_pipeline(
                 track_quality=track_quality,
             )
 
-            if inference_result.get("status") in ("success", STATUS_COLD_START_FALLBACK):
+            if is_evaluable(inference_result.get("status")):
                 # 6. 风险判定
                 from src.risk.judge import quick_judge
                 risk_result = quick_judge(elder_id, day_key, config)
@@ -137,6 +143,16 @@ def run_daily_pipeline(
                 _emit_mpdd_evidence(elder_id, day_key, inference_result, risk_result)
 
         except Exception as e:
+            # ★ 失败必须反映到 status 上。
+            #
+            # 旧写法把异常吞掉后仍返回 status="success"（那个值只由数据质量决定，
+            # 完全不反映推理/判定是否真的跑过）。实测后果：hidden_dim 改过但没重训
+            # → load_state_dict 抛 RuntimeError → 整块被吞 → daily_inference 还没
+            # 走到 save_daily_result，**当天日志根本不存在** → 脚本照样打印
+            # "管道状态: success" 并 exit 0 → cron 与监控全绿。老人当天零监测，
+            # 而且这个缺日还会持续侵蚀后面几天的持续性窗口（max_skip_days 一到
+            # 就把偏离段切开）。
+            failure = f"{type(e).__name__}: {e}"
             logger.error(f"  └─ 推理/判定失败: {e}", exc_info=True)
     else:
         logger.warning("  └─ 两轨均不可用，跳过推理")
@@ -151,8 +167,15 @@ def run_daily_pipeline(
                 f"需运维介入并向家属明示『当前数据不足』"
             )
 
-    status = "success" if usable_tracks else "skipped_inference"
-    logger.info(f"=== 每日管道完成: {elder_id}, status={status} ===")
+    if failure is not None:
+        status = "inference_failed"
+    elif not usable_tracks:
+        status = "skipped_inference"
+    else:
+        status = "success"
+
+    log = logger.error if failure else logger.info
+    log(f"=== 每日管道完成: {elder_id}, status={status} ===")
 
     return {
         "elder_id": elder_id,
@@ -161,6 +184,7 @@ def run_daily_pipeline(
         "inference_result": inference_result,
         "risk_result": risk_result,
         "status": status,
+        "error": failure,
     }
 
 
@@ -215,9 +239,14 @@ def _process_track(
         feature_vec = aggregate_track_features(track, feature_values)
     except DataInsufficientError as e:
         logger.warning(f"  └─ [{track}] 数据不足: {e}")
+        # 写 NaN 而不是 0：这一行的意思是"这天该轨没测到"，不是"各项指标都是 0"。
+        # 旧写法 np.nan_to_num(placeholder, nan=0.0) 会把一整行 0 落进特征表，
+        # 而 0 在原始量纲下是极端离群值（实测 night_hr_mean=0 → z=−15.2）。
+        # 虽然这行被标了 insufficient、不进训练也不进推理，但它仍然是一条
+        # 事实错误的记录，排查时会误导人。
         placeholder = np.full(len(names), np.nan, dtype=np.float64)
         save_daily_features(
-            elder_id, day_key, np.nan_to_num(placeholder, nan=0.0), track,
+            elder_id, day_key, placeholder, track,
             missing_count=e.missing_count, data_quality=QUALITY_INSUFFICIENT,
         )
         return QUALITY_INSUFFICIENT
@@ -231,7 +260,8 @@ def _process_track(
     if missing_names:
         logger.info(f"  └─ [{track}] 无法填充的特征: {missing_names}")
 
-    recent_quality = _get_recent_quality(elder_id, track)
+    # 排除今天自己：重跑时 CSV 里已有首跑写下的今天，算进去会让离线判据翻档
+    recent_quality = _get_recent_quality(elder_id, track, before_day_key=day_key)
     quality = validate_daily_data(
         filled_vec, missing_count, track, recent_quality,
         missing_features=missing_names,
@@ -274,12 +304,26 @@ def _get_prev_valid_vector(elder_id: str, track: str, day_key: str) -> np.ndarra
     return prev[names].to_numpy(dtype=np.float64).flatten()
 
 
-def _get_recent_quality(elder_id: str, track: str, n_days: int = 5) -> list[str]:
-    """获取某轨最近N天的数据质量列表（按 day_key 升序）"""
+def _get_recent_quality(
+    elder_id: str, track: str, n_days: int = 5, before_day_key: str | None = None
+) -> list[str]:
+    """获取某轨最近N天的数据质量列表（按 day_key 升序）。
+
+    ★ before_day_key 用于把**今天自己**排除在外。
+
+      不排除的话，同一天重跑会得到不同的持久化质量档：
+        首跑：CSV 里还没有今天这行 → recent = [D-3, D-2, D-1] → 判 insufficient
+        重跑：CSV 已有首跑写下的今天 → recent = [D-2, D-1, D] → 三天全 insufficient
+              → validator 判 **offline**
+      同一份输入因为跑了几次而落到不同的质量档，`check_prolonged_degradation`
+      的运维告警也跟着变。补算与重跑必须是幂等的（README 明写这一点）。
+    """
     try:
         df = load_features_csv(elder_id, track)
     except FileNotFoundError:
         return []
+    if before_day_key is not None:
+        df = df[df[DAY_KEY_COL] < before_day_key]
     recent = df.sort_values(DAY_KEY_COL, ascending=False).head(n_days)
     return recent.sort_values(DAY_KEY_COL)["data_quality"].tolist()
 
@@ -323,7 +367,7 @@ def _apply_cold_start_fallbacks(
     }
     inference_result["track_statuses"] = statuses
     if any(is_evaluable(s) for s in statuses.values()):
-        inference_result["status"] = "success"
+        inference_result["status"] = STATUS_SUCCESS
 
     inference_result["is_deviation"] = any(
         isinstance(inference_result.get(t), dict)
@@ -426,7 +470,7 @@ def _cold_start_fallback_track(
         "valid_features": fb["valid_features"],
         "skipped_features": fb["skipped_features"],
         "in_observation_period": True,
-        "status": "cold_start_fallback",
+        "status": STATUS_COLD_START_FALLBACK,
         "method": fb["method"],
     }
 

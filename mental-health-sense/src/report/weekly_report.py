@@ -97,7 +97,21 @@ def generate_weekly_report(
     trends = _compute_weekly_trends(week_results)
 
     # 3. 风险判定
-    risk_result = judge_risk_level(elder_id, week_results)
+    #
+    # ★ 用**完整判定窗**而不是本周这 7 条。
+    #
+    #   传 week_results 会让 _walk_back 一旦回溯到 week_start 之前就按缺日跳过、
+    #   连跳 max_skip 天后 return，计数上限被硬压在本周长度。后果是周报与预警
+    #   自相矛盾：circadian 降级模式需要连续 7 天达标，日轨用 25 天窗算出
+    #   consecutive=8 发了「作息节律紊乱」提醒，同一周的周报只有 7 条日志、
+    #   其中任一天 degraded 就只数到 6 → 周报写"本周风险类型：无"。
+    #   家属唯一会读的产物与他们收到的提醒对不上。这与 VALIDATION §8.6 记录的
+    #   是同一个缺陷，只是换了个入口。
+    #
+    #   判定基准日固定为 week_end：补生成历史周报时不能拿"最新那天"当今天。
+    risk_result = judge_risk_level(
+        elder_id, daily_results=None, config=config, today_key=week_end_str
+    )
 
     # 4. 风险类型名称
     risk_type_names = [
@@ -444,11 +458,9 @@ def _generate_with_llm(
 
 def _save_report(elder_id: str, week_start: str, report: str) -> None:
     """保存周报到文件"""
-    log_dir = get_log_dir("weekly_reports")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    filepath = log_dir / f"{elder_id}_{week_start}.md"
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(report)
+    from src.utils.io import atomic_write_text
+    filepath = get_log_dir("weekly_reports") / f"{elder_id}_{week_start}.md"
+    atomic_write_text(filepath, report)
 
 
 def _empty_report(elder_id: str, week_start: str, week_end: str) -> str:

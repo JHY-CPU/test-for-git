@@ -130,6 +130,33 @@ def atomic_write_text(filepath: str | Path, text: str, encoding: str = "utf-8") 
         raise
 
 
+def atomic_write_bytes(filepath: str | Path, data: bytes) -> None:
+    """原子写二进制（EWMA 池等 pickle 文件）。
+
+    EWMA 池写坏的后果是基线状态丢失：阈值退回 static_threshold，
+    偏离日冻结计数归零，"持续性异常不被自己的历史掩盖"这条防线跟着失效。
+    """
+    import os
+    import tempfile
+
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(filepath.parent), prefix=f".{filepath.name}.", suffix=".tmp"
+    )
+    try:
+        os.chmod(tmp_path, 0o666 & ~_current_umask())
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
 def atomic_write_json(filepath: str | Path, payload: Any, indent: int = 2) -> None:
     """原子写 JSON（含 numpy 类型转换）。"""
     text = json.dumps(
@@ -200,6 +227,11 @@ def save_daily_features(
     cols = get_feature_columns(track)
     df_row = pd.DataFrame([row])[cols]
 
+    # ★ 整表重写必须原子。这是全仓风险最高的一处写入：同日重算走的是
+    #   "读整表 → 去掉旧行 → 重写整表"，写到一半被 OOM kill / 断电，
+    #   features_{track}.csv 就只剩前半段——**整个建档期历史不可恢复**，
+    #   train_initial_baseline / weekly_retrain / 冷启动兜底全部失去数据源。
+    #   追加模式（mode="a"）本身是单次小写入，风险低得多，保持原样。
     if filepath.exists():
         existing = pd.read_csv(filepath)
         if DAY_KEY_COL in existing.columns and day_key in set(existing[DAY_KEY_COL]):
@@ -207,11 +239,11 @@ def save_daily_features(
             existing = existing[existing[DAY_KEY_COL] != day_key]
             combined = pd.concat([existing, df_row], ignore_index=True)
             combined = combined.sort_values(DAY_KEY_COL)[cols]
-            combined.to_csv(filepath, index=False)
+            atomic_write_text(filepath, combined.to_csv(index=False))
         else:
             df_row.to_csv(filepath, mode="a", header=False, index=False)
     else:
-        df_row.to_csv(filepath, index=False)
+        atomic_write_text(filepath, df_row.to_csv(index=False))
 
 
 def load_features_csv(elder_id: str, track: str) -> pd.DataFrame:
@@ -369,41 +401,69 @@ def save_daily_result(elder_id: str, day_key: str, result: dict) -> None:
 
     双轨结果写在同一个文件里：{"sleep": {...}, "social": {...}, ...}
     """
-    log_dir = get_log_dir("daily_inference")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    filepath = log_dir / f"{elder_id}_{day_key}.json"
-
-    # 处理numpy类型
-    def convert(obj):
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        elif isinstance(obj, (np.floating,)):
-            return float(obj)
-        elif isinstance(obj, (np.bool_,)):
-            return bool(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: convert(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert(v) for v in obj]
-        return obj
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(convert(result), f, ensure_ascii=False, indent=2)
+    # 原子写：一个被截断的日志会让 load_daily_results 抛 JSONDecodeError，
+    # judge / 周报 / 微调全部崩溃直到有人手工删掉它。numpy 类型转换由
+    # atomic_write_json 内部的 _to_jsonable 统一处理。
+    filepath = get_log_dir("daily_inference") / f"{elder_id}_{day_key}.json"
+    atomic_write_json(filepath, result)
 
 
-def load_daily_results(elder_id: str, n_days: int = 7) -> list[dict]:
-    """加载最近N天的推理结果，按 day_key 升序返回"""
+def day_key_from_log_path(elder_id: str, path: Path) -> str | None:
+    """从日志文件名 `{elder_id}_{day_key}.json` 里取 day_key。
+
+    不读文件内容：本函数用于**筛选**要不要读，读了再判就白读了。
+    """
+    stem = path.stem
+    prefix = f"{elder_id}_"
+    if not stem.startswith(prefix):
+        return None
+    return stem[len(prefix):] or None
+
+
+def load_daily_results(
+    elder_id: str,
+    n_days: int = 7,
+    end_day_key: str | None = None,
+) -> list[dict]:
+    """加载截至 `end_day_key`（含）的最近 N 天推理结果，按 day_key 升序返回。
+
+    ★ `end_day_key` 不是可选的便利参数，是正确性所必需的。
+
+      本函数原本只取"最近 N 个**文件**"，与被处理的那一天毫无关系。于是补算历史日
+      （README 与 CLAUDE.md 都把 `--date 2026-08-15` 写成常规用法）时，判定层
+      拿到的是**最新那天**的窗口：`judge_risk_level` 把 `daily_results[-1]` 当成
+      "今天"，实测日志覆盖 07-01~08-29 时补算 08-15，判的是 08-29 的等级、
+      按它发预警、还把它写进 08-15 的 MPDD 契约；而 `quick_judge` 的写回守卫
+      `log_day == day_key` 不成立，08-15 永远拿不到 `risk_type_qualifies`，
+      持续性链条上留下一个永久空洞。
+
+    单个文件损坏时跳过并记 ERROR，不抛：一个被截断的 JSON 曾能让 judge、周报、
+    微调**全部永久崩溃**，直到有人手工把它删掉。旁路的坏数据不该瘫掉整条链路。
+    """
     log_dir = get_log_dir("daily_inference")
     if not log_dir.exists():
         return []
 
     files = sorted(log_dir.glob(f"{elder_id}_*.json"), reverse=True)
+
+    if end_day_key is not None:
+        files = [
+            fp for fp in files
+            if (dk := day_key_from_log_path(elder_id, fp)) is not None
+            and dk <= end_day_key
+        ]
+
     results = []
     for fp in files[:n_days]:
-        with open(fp, "r", encoding="utf-8") as f:
-            results.append(json.load(f))
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                results.append(json.load(f))
+        except (json.JSONDecodeError, OSError) as e:
+            from src.utils.logger import get_logger
+            get_logger(__name__).error(
+                f"推理日志损坏，已跳过: {fp.name} ({e})。"
+                f"该日将按缺日参与持续性统计。"
+            )
     return list(reversed(results))  # 按日期升序返回
 
 

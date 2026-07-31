@@ -37,9 +37,18 @@ def run_weekly_pipeline(
             "risk_label": str,
         }
     """
+    # ★ 窗口终点是**昨天**，与日轨的 day_key 语义对齐。
+    #
+    # 旧写法用 today 作 week_end，而日轨 03:00 处理的是 today−1，周轨 04:00 跑时
+    # 最新日志只到昨天。于是每周固定漏掉一天：
+    #     周日 08-02 跑 → 窗口 07-27~08-02，最新日志 08-01
+    #     上周日 07-26 跑 → 窗口 07-20~07-26，最新日志 07-25
+    #     → 2026-07-26 不在任何一个窗口里，永远不会出现在任何周报中
+    # 而且每份周报标题声称的区间都比背后的数据宽一天。
     today = datetime.now()
-    week_end = today.strftime("%Y-%m-%d")
-    week_start = (today - timedelta(days=6)).strftime("%Y-%m-%d")
+    week_end_dt = today - timedelta(days=1)
+    week_end = week_end_dt.strftime("%Y-%m-%d")
+    week_start = (week_end_dt - timedelta(days=6)).strftime("%Y-%m-%d")
 
     logger.info(f"=== 每周管道启动: {elder_id} ({week_start} ~ {week_end}) ===")
 

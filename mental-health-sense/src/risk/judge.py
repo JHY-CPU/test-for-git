@@ -18,6 +18,7 @@ import numpy as np
 
 from src.baseline.scaler_utils import TRACKS, TRACK_SLEEP, TRACK_SOCIAL
 from src.risk.rules import classify_risk_type, required_history_days
+from src.utils.continuity import walk_back_days
 from src.utils.io import load_daily_results
 from src.utils.logger import get_logger
 from src.utils.status import COLD_START_STATUSES, STATUS_COLD_START, is_evaluable
@@ -25,6 +26,19 @@ from src.utils.status import COLD_START_STATUSES, STATUS_COLD_START, is_evaluabl
 logger = get_logger(__name__)
 
 RISK_LABELS = {0: "正常", 1: "关注", 2: "提醒", 3: "严重"}
+
+# 全链路的 day_key 由 naive `datetime.now()` 推出，所以标称时区必须是**本机时区**，
+# 不能写死 Asia/Shanghai——否则容器跑在 UTC 时，契约会用错误的时区标签描述
+# 一个 UTC 日期，下游按标签换算就偏一天。
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+
+
+def _local_timezone() -> str:
+    """本机时区名；取不到时回落到部署地默认值。"""
+    from datetime import datetime
+
+    tz = datetime.now().astimezone().tzinfo
+    return str(tz) if tz is not None else DEFAULT_TIMEZONE
 
 # 等级判定只看最近 7 个自然日。与风险类型的持续性统计分开：
 # 后者要按各自门槛回溯更远（circadian 降级模式要 7 天达标），
@@ -195,6 +209,9 @@ def _judge_single_track(
     """
     consecutive_cfg = risk_cfg.get("consecutive", {})
     thresholds_cfg = risk_cfg.get("anomaly_score_thresholds", {})
+    # 与 rules 层共用同一个 max_skip_days：一次长时间离线不该把两段无关的偏离
+    # 粘成一段，判级与判型对这件事必须给出同样的答案。
+    max_skip_days = risk_cfg.get("continuity", {}).get("max_skip_days", 3)
 
     attn_threshold = consecutive_cfg.get("attention", 1)
     warn_threshold = consecutive_cfg.get("warning", 3)
@@ -206,12 +223,37 @@ def _judge_single_track(
     # 不能只取"最近 7 条 usable 记录"：判定层现在会加载远多于 7 天的日志
     # （见 rules.required_history_days），按条数取会把窗口悄悄拉宽到几周，
     # "连续 5 天"就可能由散落在两三周里的偏离日凑成。
-    usable = [
-        d for d in _within_recent_days(track_history, LEVEL_WINDOW_DAYS, today_key)
-        if is_evaluable(d.get("status"))
-    ]
+    #
+    # ★ 计入判据必须与 rules 层一致：既要 status 可评估，也要 data_quality 正常。
+    #   只看 status 的旧写法漏掉了后者——degraded 日的 status 是 "success"
+    #   （is_usable_for_inference 放行 valid+degraded），于是它**既累加也能打断**
+    #   consecutive，而 consecutive 正是驱动 L2/L3 的量。见 utils/continuity.py
+    #   开头记录的那组误报/漏报场景。
+    def _counts(day: dict) -> bool:
+        if not is_evaluable(day.get("status")):
+            return False
+        quality = day.get("data_quality")
+        return quality is None or quality == "valid"
 
-    if not usable:
+    index = {d["day_key"]: d for d in track_history if d.get("day_key")}
+
+    if today_key and index:
+        # 按自然日回溯，与风险类型统计同一套走法（含 max_skip_days 打断）
+        recent_desc = list(walk_back_days(
+            index, today_key,
+            max_steps=LEVEL_WINDOW_DAYS - 1, max_skip=max_skip_days,
+            counts_fn=_counts, include_today=True,
+        ))
+        recent = list(reversed(recent_desc))
+    else:
+        # 拿不到日期时退回按条数取尾部——历史日志与单测桩可能没有 day_key，
+        # 这时保持旧行为，不因为缺一个字段就把整段历史丢掉。
+        recent = [
+            d for d in _within_recent_days(track_history, LEVEL_WINDOW_DAYS, today_key)
+            if _counts(d)
+        ][-LEVEL_WINDOW_DAYS:]
+
+    if not recent:
         return {
             "risk_level": 0,
             "consecutive": 0,
@@ -219,12 +261,12 @@ def _judge_single_track(
             "max_anomaly": 0.0,
             "avg_severity": 0.0,
             "max_severity": 0.0,
+            "adverse_direction": True,
             "evaluable": False,
         }
 
-    recent = usable[-7:]
-
     # 连续超标天数：从最近往前数，遇到第一个"未偏离"即停
+    # （不计入统计的日子已在上面被剔除，所以这里数的是"计入的连续日"）
     consecutive = 0
     for day in reversed(recent):
         if day.get("is_deviation", False):
@@ -292,6 +334,7 @@ def judge_risk_level(
     elder_id: str,
     daily_results: list[dict] | None = None,
     config: dict | None = None,
+    today_key: str | None = None,
 ) -> dict:
     """
     判定当前风险等级（双轨各自判级后取较高者）。
@@ -300,6 +343,12 @@ def judge_risk_level(
         elder_id: 老人ID
         daily_results: 近7天双轨推理结果（可选，不提供则自动加载）
         config: 全局配置
+        today_key: 判定基准日。**补算历史日时必须显式给出**——
+            不给就退回按 `daily_results[-1]` 推断，而那是"最新的一条"，
+            不是"要判的那一天"。日志覆盖 07-01~08-29 时补算 08-15，
+            会拿 08-29 的窗口判 08-15 的等级、按它发预警、写进 08-15 的契约。
+            这与 `_judge_single_track` 的 today_key 必须由调用方给出是同一个理由
+            （该轨今天恰好不可用时，末条是更早的一天，窗口会跟着往前漂）。
 
     Returns:
         {
@@ -323,8 +372,11 @@ def judge_risk_level(
         # 加载天数由规则门槛推导，不写死 7——circadian 降级模式要求连续 7 天达标，
         # "今天 + 6 天历史"恰好只有 7 条，历史里有任何一个 degraded 日被跳过，
         # 计数上限就掉到 6，规则在数学上永远不可能激活。详见 required_history_days。
+        #
+        # end_day_key 截到基准日为止：否则补算历史日时会把该日之后的日志也捞进来，
+        # 窗口整体漂到最新那几天。
         daily_results = load_daily_results(
-            elder_id, n_days=required_history_days(config)
+            elder_id, n_days=required_history_days(config), end_day_key=today_key
         )
 
     if not daily_results:
@@ -340,7 +392,10 @@ def judge_risk_level(
         }
 
     # 1. 每轨独立判级（不跨轨比较绝对分）
-    today_key = daily_results[-1].get("day_key") or daily_results[-1].get("date")
+    # 基准日优先用调用方给的；没给才退回末条（历史日志与单测桩没有 day_key 时
+    # 也走这条路，保持旧行为）。
+    if today_key is None:
+        today_key = daily_results[-1].get("day_key") or daily_results[-1].get("date")
     per_track = {}
     for track in TRACKS:
         per_track[track] = _judge_single_track(
@@ -355,10 +410,18 @@ def judge_risk_level(
     )
 
     # 2. 分类风险类型（跨轨规则在 rules.py 内部处理）
+    #
+    # 用基准日那条而不是末条：两者在正常流程下相同，但补算/日志缺失时会分叉，
+    # 那时该判的是基准日，不是"手头最新的一条"。
+    latest = next(
+        (r for r in reversed(daily_results)
+         if (r.get("day_key") or r.get("date")) == today_key),
+        daily_results[-1],
+    )
+
     active_risk_types: list[dict] = []
     risk_type_qualifies: dict[str, bool] = {}
     try:
-        latest = daily_results[-1]
         risk_type_results = classify_risk_type(
             track_results=latest,
             daily_results=daily_results,
@@ -368,8 +431,21 @@ def judge_risk_level(
         risk_type_qualifies = {
             r["risk_key"]: bool(r.get("qualifies", False)) for r in risk_type_results
         }
+    except (ValueError, KeyError) as e:
+        # ★ 配置/契约类错误必须炸出来，不能吞。
+        #
+        # 曾经这里是 `except Exception`，后果是：有人把 feature_weights.json 里某个
+        # direction 误写成 "decrease" → get_feature_directions 抛 ValueError →
+        # 每天被一行 WARNING 吞掉 → 三条规则永远报"无风险类型"，而且因为下方的
+        # 写回也跟着不执行，次日所有历史日的 _day_qualifies 都是 False，
+        # 持续性计数被永久钉在 1，**任何风险类型在数学上都不可能激活**。
+        # 唯一征兆是每天一行 WARNING，而 run_daily_pipeline 照样打印
+        # "管道状态: success"。这类静默失效正是本仓反复踩的坑。
+        raise
     except Exception as e:
-        logger.warning(f"  └─ 风险类型分类跳过: {e}")
+        # 其余异常（例如某条历史日志结构异常）仍然兜住：单日数据问题不该让
+        # 整条判定链停摆，但要记 ERROR 而不是 WARNING——它不是正常降级。
+        logger.error(f"  └─ 风险类型分类失败（非配置错误，已跳过）: {e}", exc_info=True)
 
     # 3. 生成建议
     recommendation = _generate_recommendation(
@@ -481,7 +557,10 @@ def build_mpdd_evidence(
         "schema_version": "2.1.0",
         "elder_id": elder_id,
         "day_key": day_key,
-        "timezone": "Asia/Shanghai",
+        # 时区取自配置而非写死：全链路的 day_key 用的是 naive datetime.now()，
+        # 容器跑在 UTC 时 day_key 是 UTC 日期却被标成 Asia/Shanghai，
+        # 下游按标称时区解读就会错一天。
+        "timezone": _local_timezone(),
         "sleep_evidence": {
             "anomaly_score": sleep.get("anomaly_score", 0.0),
             "is_deviation": bool(sleep.get("is_deviation", False)),
@@ -520,19 +599,32 @@ def quick_judge(elder_id: str, day_key: str, config: dict | None = None) -> dict
     if config is None:
         config = load_config()
 
+    # end_day_key + today_key 都钉在 day_key 上：补算历史日时，判定窗口与基准日
+    # 必须是被补算的那一天，而不是磁盘上最新的那一天。
     daily_results = load_daily_results(
-        elder_id, n_days=required_history_days(config)
+        elder_id, n_days=required_history_days(config), end_day_key=day_key
     )
-    result = judge_risk_level(elder_id, daily_results, config)
+    result = judge_risk_level(elder_id, daily_results, config, today_key=day_key)
 
-    # 把今天的 qualifies 写回今天的推理日志（保留 inference 已写入的全部字段）
-    qualifies = result.get("risk_type_qualifies")
-    if qualifies and daily_results:
-        today_log = daily_results[-1]
-        log_day = today_log.get("day_key") or today_log.get("date")
-        if log_day == day_key:
-            today_log["risk_type_qualifies"] = qualifies
-            today_log["risk_level"] = result.get("risk_level", 0)
-            save_daily_result(elder_id, day_key, today_log)
+    # 把今天的 qualifies 写回今天的推理日志（保留 inference 已写入的全部字段）。
+    #
+    # 写回条件只看"这条日志是不是今天的"，**不再看 qualifies 是否非空**：
+    # 分类结果全 False 也是有效结论（今天三条规则都不达标），它同样需要落盘，
+    # 否则次日的持续性统计读不到今天、只能按"无该字段"处理。旧写法把
+    # "分类失败"和"分类出全 False"混为一谈，两者都不写回。
+    today_log = next(
+        (r for r in reversed(daily_results)
+         if (r.get("day_key") or r.get("date")) == day_key),
+        None,
+    )
+    if today_log is not None:
+        today_log["risk_type_qualifies"] = result.get("risk_type_qualifies") or {}
+        today_log["risk_level"] = result.get("risk_level", 0)
+        save_daily_result(elder_id, day_key, today_log)
+    else:
+        logger.warning(
+            f"  └─ {day_key} 的推理日志不存在，qualifies 无处写回；"
+            f"次日的持续性统计将把这天当作缺日"
+        )
 
     return result

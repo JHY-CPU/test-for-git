@@ -51,6 +51,13 @@ from src.utils.io import (
     save_daily_result,
 )
 from src.utils.logger import get_logger
+from src.utils.status import (
+    STATUS_COLD_START,
+    STATUS_DATA_INSUFFICIENT,
+    STATUS_OBSERVATION,
+    STATUS_SUCCESS,
+    is_evaluable,
+)
 
 logger = get_logger(__name__)
 
@@ -88,6 +95,33 @@ def _normalize_stats(residual_stats: dict, dim: int) -> dict:
         }
 
     raise ValueError(f"Unrecognized residual_stats structure: {list(residual_stats)}")
+
+
+def _load_prior_thresholds(elder_id: str, day_key: str, track: str) -> dict | None:
+    """取该日首跑落盘的三个阈值（重跑时复用，保证判定幂等）。
+
+    读不到就返回 None，由调用方退回按当前池计算——旧日志没有这些字段时
+    不该因此报错，那只是回到修复前的行为，不会更糟。
+    """
+    import json
+
+    from src.utils.io import get_log_dir
+
+    path = get_log_dir("daily_inference") / f"{elder_id}_{day_key}.json"
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            prior_track = (json.load(f) or {}).get(track)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    if not isinstance(prior_track, dict):
+        return None
+    keys = ("static_threshold", "ewma_threshold", "dynamic_threshold")
+    if not all(isinstance(prior_track.get(k), (int, float)) for k in keys):
+        return None
+    return {k: float(prior_track[k]) for k in keys}
 
 
 def infer_track(
@@ -177,7 +211,7 @@ def infer_track(
         residual_stats = _normalize_stats(load_residual_stats(elder_id, track), dim)
     except FileNotFoundError as e:
         logger.info(f"  └─ [{track}] 基线文件缺失，处于冷启动阶段: {e}")
-        return {**base, "status": "cold_start"}
+        return {**base, "status": STATUS_COLD_START}
 
     ewma = TrackEWMAPools.load(
         get_baseline_dir(elder_id), track,
@@ -201,17 +235,35 @@ def infer_track(
         )
     except (FileNotFoundError, ValueError) as e:
         logger.warning(f"  └─ [{track}] 特征数据获取失败: {e}")
-        return {**base, "status": "data_insufficient", "error": str(e)}
+        return {**base, "status": STATUS_DATA_INSUFFICIENT, "error": str(e)}
 
     if len(past) < window:
         logger.warning(f"  └─ [{track}] 历史数据不足（{len(past)}/{window}天）")
-        return {**base, "status": "data_insufficient"}
+        return {**base, "status": STATUS_DATA_INSUFFICIENT}
 
     past = past[-window:]
 
+    # ★ 缺测维的处理：填不上的维在 imputer 里保持 NaN（绝不填 0——原始量纲的 0
+    #   会变成 −15σ 的假偏离，见 imputer 里的实测数据）。到这里必须做两件事：
+    #
+    #   1. GRU 输入不能带 NaN（会污染整个前向传播），用**冻结 scaler 的训练均值**
+    #      补上。归一化后恰好是 0，也就是原注释想要的"信息中性占位"——只不过
+    #      这一次是在正确的空间里做的。
+    #   2. 该维**排除出打分**：权重置零后重新归一化。用均值补进去只是让模型能跑，
+    #      不代表我们测到了它；把它的残差算进 anomaly_score 等于拿"预测与均值的
+    #      差"冒充"观测与预测的差"。
+    #
+    #   valid_features / skipped_features 是本仓已有的词汇（cold_start_fallback
+    #   产出同名字段），判定层与排查都认它。
+    missing_mask = np.isnan(today_vec)
+    scaler_mean = np.asarray(scaler.mean_, dtype=np.float64)
+
+    today_filled = np.where(missing_mask, scaler_mean, today_vec)
+    past_filled = np.where(np.isnan(past), scaler_mean, past)
+
     # 3. 归一化
-    past_norm = transform_data(scaler, past, track)
-    today_norm = transform_data(scaler, today_vec, track)
+    past_norm = transform_data(scaler, past_filled, track)
+    today_norm = transform_data(scaler, today_filled, track)
 
     # 4. GRU预测
     input_tensor = torch.tensor(
@@ -224,14 +276,26 @@ def infer_track(
     # 5. 双残差
     signed_residual = today_norm - pred_norm       # observed − predicted
     abs_residual = np.abs(signed_residual)
+
     weights = get_feature_weight_array(track)
-    anomaly_score = float(np.dot(abs_residual, weights) / np.sum(weights))
+    effective_weights = np.where(missing_mask, 0.0, weights)
+    weight_sum = float(np.sum(effective_weights))
+    if weight_sum <= 0:
+        # 全维缺失：不可能给出有意义的分。这种情况上游的 aggregator 早该判
+        # DataInsufficientError，走到这里说明契约被破坏了，不要静默返回 0 分
+        # （0 分会被当成"非常正常的一天"喂进 EWMA 并计入连续统计）。
+        logger.warning(f"  └─ [{track}] 全部特征缺测，无法打分")
+        return {**base, "status": STATUS_DATA_INSUFFICIENT}
+
+    anomaly_score = float(np.dot(abs_residual, effective_weights) / weight_sum)
 
     # 6. 阈值：用 abs 统计（与 anomaly_score 同量纲）
+    # 权重必须与 anomaly_score 用的**同一套**（含缺测维置零），否则分子分母
+    # 不是同一个加权空间，缺一维时分数与阈值会朝不同方向偏。
     abs_mean = np.asarray(residual_stats["abs"]["mean"], dtype=np.float64)
     abs_std = np.asarray(residual_stats["abs"]["std"], dtype=np.float64)
-    base_threshold = float(np.dot(abs_mean, weights) / np.sum(weights))
-    std_threshold = float(np.dot(abs_std, weights) / np.sum(weights))
+    base_threshold = float(np.dot(abs_mean, effective_weights) / weight_sum)
+    std_threshold = float(np.dot(abs_std, effective_weights) / weight_sum)
     static_threshold = base_threshold + sigma * std_threshold
 
     # 动态EWMA阈值：取 min 保持敏感度，防止老人自然衰退后系统变得不敏感。
@@ -244,6 +308,24 @@ def infer_track(
     else:
         ewma_threshold = static_threshold
         dynamic_threshold = static_threshold
+
+    # ★ 重跑同一天时复用首跑落盘的阈值。
+    #
+    # 池里已经含有这一天自己的分（首跑喂进去的、且无法撤回），此刻读到的阈值是
+    # "含被判对象的基线"。不复用的话，擦线分数会在重跑时翻转 is_deviation，
+    # 而该字段驱动 consecutive / risk_type_qualifies / 微调排除集 / 周报统计。
+    # 见 TrackEWMAPools.already_fed 的说明。
+    is_rerun = ewma.already_fed(day_key)
+    if is_rerun:
+        prior = _load_prior_thresholds(elder_id, day_key, track)
+        if prior is not None:
+            ewma_threshold = prior["ewma_threshold"]
+            dynamic_threshold = prior["dynamic_threshold"]
+            static_threshold = prior["static_threshold"]
+            logger.info(
+                f"  └─ [{track}] 重跑该日，复用首跑阈值 "
+                f"(dynamic={dynamic_threshold:.4f})，保证判定幂等"
+            )
 
     is_deviation = bool(anomaly_score > dynamic_threshold)
 
@@ -263,30 +345,42 @@ def infer_track(
     safe_std = np.where(signed_std < 1e-8, 1e-8, signed_std)
     signed_z = signed_residual / safe_std
 
-    signed_residuals = {n: round(float(signed_residual[i]), 4) for i, n in enumerate(names)}
-    abs_residuals = {n: round(float(abs_residual[i]), 4) for i, n in enumerate(names)}
-    signed_z_map = {n: round(float(signed_z[i]), 4) for i, n in enumerate(names)}
+    # 缺测维不进任何残差字典：它们的"残差"只是"训练均值与预测的差"，
+    # 不含今天的观测信息。留在字典里会被 rules 的方向判定当成真实证据读走
+    # （_exceeds 读 signed_z），那正是 copresence_min 缺失却满足 down 方向的老路。
+    valid_idx = [i for i in range(dim) if not missing_mask[i]]
+    signed_residuals = {names[i]: round(float(signed_residual[i]), 4) for i in valid_idx}
+    abs_residuals = {names[i]: round(float(abs_residual[i]), 4) for i in valid_idx}
+    signed_z_map = {names[i]: round(float(signed_z[i]), 4) for i in valid_idx}
 
     # 9. 观察期判定：训练后经过的推理次数（不能直接用样本数，训练已预热 EWMA）
     meta = get_track_meta(elder_id, track)
     n_at_train = meta.get("ewma_n_at_train", 0)
     inferences_since_train = ewma.total_samples() - n_at_train
     in_observation = inferences_since_train <= cold_start_days
-    status = "observation" if in_observation else "success"
+    status = STATUS_OBSERVATION if in_observation else STATUS_SUCCESS
 
     return {
         **base,
         "anomaly_score": round(anomaly_score, 4),
         "static_threshold": round(static_threshold, 4),
         "ewma_threshold": round(ewma_threshold, 4),
-        "ewma_frozen": not ewma_updated,   # 今天是否因偏离而冻结了基线更新
+        # 冻结与去重必须分开报：两者都让 update 返回 False，但含义完全不同。
+        # 旧写法 `not ewma_updated` 会让重跑一个正常日也标成 ewma_frozen=true，
+        # 而"冻结"在本系统里是有语义的（偏离日不喂基线），排查时会被误导。
+        "ewma_frozen": bool(not ewma_updated and not is_rerun),
+        "ewma_rerun": is_rerun,
         "dynamic_threshold": round(dynamic_threshold, 4),
         "is_deviation": is_deviation,
         "signed_residuals": signed_residuals,
         "abs_residuals": abs_residuals,
         "signed_z": signed_z_map,
         "signed_available": residual_stats["signed_available"],
-        "ewma_n": pool_n + 1,
+        "valid_features": [names[i] for i in valid_idx],
+        "skipped_features": [names[i] for i in range(dim) if missing_mask[i]],
+        # 只有真正喂进去了才 +1：冻结日与重跑日的池样本数不变，
+        # 旧写法无条件 +1 会让日志里的 ewma_n 与磁盘上的池对不上。
+        "ewma_n": pool_n + (1 if ewma_updated else 0),
         "ewma_min_samples": min_samples,
         "in_observation_period": in_observation,
         "status": status,
@@ -339,24 +433,36 @@ def daily_inference(
         )
 
     statuses = {t: result[t]["status"] for t in tracks}
-    if any(s in ("success", "observation") for s in statuses.values()):
-        overall = "success"
-    elif all(s == "cold_start" for s in statuses.values()):
-        overall = "cold_start"
+    if any(is_evaluable(s) for s in statuses.values()):
+        overall = STATUS_SUCCESS
+    elif all(s == STATUS_COLD_START for s in statuses.values()):
+        overall = STATUS_COLD_START
     else:
-        overall = "data_insufficient"
+        overall = STATUS_DATA_INSUFFICIENT
 
     result["status"] = overall
     result["track_statuses"] = statuses
+
+    # ★ track_quality 必须覆盖**全部** TRACKS，而不只是本次跑了推理的那几轨。
+    #
+    # daily_job 只把 is_usable_for_inference 的轨传进 tracks，于是 insufficient /
+    # offline 的那一轨既没有 result[track] 子字典、也不在 track_quality 里。
+    # 而 rules._counts_toward_consecutive 的三级回退全都落空后会 `return True`，
+    # 把这天当成"质量正常但不达标"→ **打断**连续段。
+    #
+    # 设计要求是"跳过"（既不累加也不打断）。坏掉的正是双轨架构"故障隔离"这条
+    # 存在理由本身：小贝壳掉线一天，本该只让睡眠轨那天不计数，实际却把攒了
+    # 几天的偏离段清零，规则永远凑不满门槛。
     if quality_map:
-        result["track_quality"] = {t: quality_map.get(t) for t in tracks}
+        result["track_quality"] = {t: quality_map.get(t) for t in TRACKS}
 
     # 连续偏离天数：任一轨偏离即算当日偏离（各轨自己的连续天数由 rules.py 分别统计）
     result["is_deviation"] = any(
-        result[t].get("is_deviation", False) for t in tracks
+        result[t].get("is_deviation", False)
+        for t in tracks if isinstance(result.get(t), dict)
     )
 
-    recent = load_daily_results(elder_id, n_days=7)
+    recent = load_daily_results(elder_id, n_days=7, end_day_key=day_key)
     consecutive = 0
     for day_result in reversed(recent):
         if day_result.get("day_key") == day_key:
