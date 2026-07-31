@@ -3,81 +3,83 @@
   "day_key": "2026-08-07",
   "sleep": {
     "track": "sleep",
-    "anomaly_score": 0.7506,
-    "static_threshold": 2.2883,
-    "ewma_threshold": 1.3507,
-    "dynamic_threshold": 1.3507,
+    "anomaly_score": 0.6975,
+    "static_threshold": 2.2964,
+    "ewma_threshold": 1.5208,
+    "dynamic_threshold": 1.5208,
     "is_deviation": false,
     "signed_residuals": {
-      "sleep_efficiency": 0.2184,
-      "waso_min": 0.6486,
-      "sol_min": -1.4184,
-      "bed_exit_count": 0.7609,
-      "deep_sleep_ratio": -0.176,
-      "sleep_onset_clock": 1.4624,
-      "night_hr_mean": -0.5193,
-      "daytime_nap_min": -0.8913
+      "sleep_efficiency": -0.0717,
+      "waso_min": 0.2375,
+      "sol_min": -1.176,
+      "bed_exit_count": 1.0879,
+      "deep_sleep_ratio": -0.462,
+      "sleep_onset_clock": 1.4903,
+      "night_hr_mean": -0.2444,
+      "daytime_nap_min": -1.0606
     },
     "abs_residuals": {
-      "sleep_efficiency": 0.2184,
-      "waso_min": 0.6486,
-      "sol_min": 1.4184,
-      "bed_exit_count": 0.7609,
-      "deep_sleep_ratio": 0.176,
-      "sleep_onset_clock": 1.4624,
-      "night_hr_mean": 0.5193,
-      "daytime_nap_min": 0.8913
+      "sleep_efficiency": 0.0717,
+      "waso_min": 0.2375,
+      "sol_min": 1.176,
+      "bed_exit_count": 1.0879,
+      "deep_sleep_ratio": 0.462,
+      "sleep_onset_clock": 1.4903,
+      "night_hr_mean": 0.2444,
+      "daytime_nap_min": 1.0606
     },
     "signed_z": {
-      "sleep_efficiency": 0.2695,
-      "waso_min": 0.5145,
-      "sol_min": -1.1151,
-      "bed_exit_count": 0.8156,
-      "deep_sleep_ratio": -0.2999,
-      "sleep_onset_clock": 1.6295,
-      "night_hr_mean": -0.4903,
-      "daytime_nap_min": -1.4009
+      "sleep_efficiency": -0.092,
+      "waso_min": 0.2023,
+      "sol_min": -0.9506,
+      "bed_exit_count": 1.2591,
+      "deep_sleep_ratio": -0.8019,
+      "sleep_onset_clock": 1.5309,
+      "night_hr_mean": -0.2233,
+      "daytime_nap_min": -1.91
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 57,
+    "ewma_n": 31,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
   },
   "social": {
     "track": "social",
-    "anomaly_score": 0.6449,
-    "static_threshold": 2.2834,
-    "ewma_threshold": 1.394,
-    "dynamic_threshold": 1.394,
+    "anomaly_score": 0.6947,
+    "static_threshold": 2.3164,
+    "ewma_threshold": 1.2405,
+    "dynamic_threshold": 1.2405,
     "is_deviation": false,
     "signed_residuals": {
-      "copresence_min": -1.4793,
-      "out_of_home_min": 0.9289,
-      "rar_amplitude": -0.2732,
-      "rar_iv": 0.032,
-      "activity_counts": -0.4188
+      "copresence_min": -1.526,
+      "out_of_home_min": 1.1307,
+      "rar_amplitude": -0.2373,
+      "rar_iv": 0.1759,
+      "activity_counts": -0.3286
     },
     "abs_residuals": {
-      "copresence_min": 1.4793,
-      "out_of_home_min": 0.9289,
-      "rar_amplitude": 0.2732,
-      "rar_iv": 0.032,
-      "activity_counts": 0.4188
+      "copresence_min": 1.526,
+      "out_of_home_min": 1.1307,
+      "rar_amplitude": 0.2373,
+      "rar_iv": 0.1759,
+      "activity_counts": 0.3286
     },
     "signed_z": {
-      "copresence_min": -1.7398,
-      "out_of_home_min": 1.1698,
-      "rar_amplitude": -0.1917,
-      "rar_iv": 0.0248,
-      "activity_counts": -0.4034
+      "copresence_min": -1.8106,
+      "out_of_home_min": 1.4531,
+      "rar_amplitude": -0.1709,
+      "rar_iv": 0.1514,
+      "activity_counts": -0.3364
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 43,
+    "ewma_n": 23,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
@@ -86,6 +88,10 @@
   "track_statuses": {
     "sleep": "success",
     "social": "success"
+  },
+  "track_quality": {
+    "sleep": "valid",
+    "social": "valid"
   },
   "is_deviation": false,
   "consecutive_deviation_days": 0,

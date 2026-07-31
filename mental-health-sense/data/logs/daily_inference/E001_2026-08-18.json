@@ -3,81 +3,83 @@
   "day_key": "2026-08-18",
   "sleep": {
     "track": "sleep",
-    "anomaly_score": 0.9433,
-    "static_threshold": 2.2883,
-    "ewma_threshold": 1.3222,
-    "dynamic_threshold": 1.3222,
+    "anomaly_score": 0.7523,
+    "static_threshold": 2.2964,
+    "ewma_threshold": 1.495,
+    "dynamic_threshold": 1.495,
     "is_deviation": false,
     "signed_residuals": {
-      "sleep_efficiency": 1.9563,
-      "waso_min": -0.4123,
-      "sol_min": 1.2588,
-      "bed_exit_count": 0.4881,
-      "deep_sleep_ratio": 0.4314,
-      "sleep_onset_clock": -0.422,
-      "night_hr_mean": -1.0281,
-      "daytime_nap_min": -1.4676
+      "sleep_efficiency": 1.5008,
+      "waso_min": -0.1681,
+      "sol_min": 1.0906,
+      "bed_exit_count": 0.4036,
+      "deep_sleep_ratio": 0.0591,
+      "sleep_onset_clock": -0.3468,
+      "night_hr_mean": -1.8022,
+      "daytime_nap_min": -1.0874
     },
     "abs_residuals": {
-      "sleep_efficiency": 1.9563,
-      "waso_min": 0.4123,
-      "sol_min": 1.2588,
-      "bed_exit_count": 0.4881,
-      "deep_sleep_ratio": 0.4314,
-      "sleep_onset_clock": 0.422,
-      "night_hr_mean": 1.0281,
-      "daytime_nap_min": 1.4676
+      "sleep_efficiency": 1.5008,
+      "waso_min": 0.1681,
+      "sol_min": 1.0906,
+      "bed_exit_count": 0.4036,
+      "deep_sleep_ratio": 0.0591,
+      "sleep_onset_clock": 0.3468,
+      "night_hr_mean": 1.8022,
+      "daytime_nap_min": 1.0874
     },
     "signed_z": {
-      "sleep_efficiency": 2.4141,
-      "waso_min": -0.327,
-      "sol_min": 0.9896,
-      "bed_exit_count": 0.5232,
-      "deep_sleep_ratio": 0.7352,
-      "sleep_onset_clock": -0.4702,
-      "night_hr_mean": -0.9708,
-      "daytime_nap_min": -2.3066
+      "sleep_efficiency": 1.9271,
+      "waso_min": -0.1432,
+      "sol_min": 0.8815,
+      "bed_exit_count": 0.4671,
+      "deep_sleep_ratio": 0.1026,
+      "sleep_onset_clock": -0.3563,
+      "night_hr_mean": -1.6465,
+      "daytime_nap_min": -1.9582
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 61,
+    "ewma_n": 35,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
   },
   "social": {
     "track": "social",
-    "anomaly_score": 0.6217,
-    "static_threshold": 2.2834,
-    "ewma_threshold": 1.3281,
-    "dynamic_threshold": 1.3281,
+    "anomaly_score": 0.5529,
+    "static_threshold": 2.3164,
+    "ewma_threshold": 1.2629,
+    "dynamic_threshold": 1.2629,
     "is_deviation": false,
     "signed_residuals": {
-      "copresence_min": -0.6775,
-      "out_of_home_min": 0.2879,
-      "rar_amplitude": 0.8907,
-      "rar_iv": -0.8444,
-      "activity_counts": 0.3429
+      "copresence_min": -0.7884,
+      "out_of_home_min": 0.1002,
+      "rar_amplitude": 0.8338,
+      "rar_iv": -0.8283,
+      "activity_counts": 0.1106
     },
     "abs_residuals": {
-      "copresence_min": 0.6775,
-      "out_of_home_min": 0.2879,
-      "rar_amplitude": 0.8907,
-      "rar_iv": 0.8444,
-      "activity_counts": 0.3429
+      "copresence_min": 0.7884,
+      "out_of_home_min": 0.1002,
+      "rar_amplitude": 0.8338,
+      "rar_iv": 0.8283,
+      "activity_counts": 0.1106
     },
     "signed_z": {
-      "copresence_min": -0.7969,
-      "out_of_home_min": 0.3625,
-      "rar_amplitude": 0.6248,
-      "rar_iv": -0.6542,
-      "activity_counts": 0.3303
+      "copresence_min": -0.9354,
+      "out_of_home_min": 0.1288,
+      "rar_amplitude": 0.6006,
+      "rar_iv": -0.7131,
+      "activity_counts": 0.1132
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 50,
+    "ewma_n": 30,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
@@ -86,6 +88,10 @@
   "track_statuses": {
     "sleep": "success",
     "social": "success"
+  },
+  "track_quality": {
+    "sleep": "valid",
+    "social": "valid"
   },
   "is_deviation": false,
   "consecutive_deviation_days": 0,

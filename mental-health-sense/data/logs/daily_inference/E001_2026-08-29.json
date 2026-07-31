@@ -3,81 +3,83 @@
   "day_key": "2026-08-29",
   "sleep": {
     "track": "sleep",
-    "anomaly_score": 0.9857,
-    "static_threshold": 2.2883,
-    "ewma_threshold": 1.4019,
-    "dynamic_threshold": 1.4019,
+    "anomaly_score": 0.9726,
+    "static_threshold": 2.2964,
+    "ewma_threshold": 1.4666,
+    "dynamic_threshold": 1.4666,
     "is_deviation": false,
     "signed_residuals": {
-      "sleep_efficiency": 0.1717,
-      "waso_min": -0.7605,
-      "sol_min": 1.9471,
-      "bed_exit_count": -1.9516,
-      "deep_sleep_ratio": -0.6412,
-      "sleep_onset_clock": 1.3228,
-      "night_hr_mean": 0.8711,
-      "daytime_nap_min": -0.1439
+      "sleep_efficiency": 0.1129,
+      "waso_min": -0.78,
+      "sol_min": 2.0999,
+      "bed_exit_count": -1.8324,
+      "deep_sleep_ratio": -0.7433,
+      "sleep_onset_clock": 1.2743,
+      "night_hr_mean": 0.9237,
+      "daytime_nap_min": 0.0008
     },
     "abs_residuals": {
-      "sleep_efficiency": 0.1717,
-      "waso_min": 0.7605,
-      "sol_min": 1.9471,
-      "bed_exit_count": 1.9516,
-      "deep_sleep_ratio": 0.6412,
-      "sleep_onset_clock": 1.3228,
-      "night_hr_mean": 0.8711,
-      "daytime_nap_min": 0.1439
+      "sleep_efficiency": 0.1129,
+      "waso_min": 0.78,
+      "sol_min": 2.0999,
+      "bed_exit_count": 1.8324,
+      "deep_sleep_ratio": 0.7433,
+      "sleep_onset_clock": 1.2743,
+      "night_hr_mean": 0.9237,
+      "daytime_nap_min": 0.0008
     },
     "signed_z": {
-      "sleep_efficiency": 0.2119,
-      "waso_min": -0.6032,
-      "sol_min": 1.5307,
-      "bed_exit_count": -2.0919,
-      "deep_sleep_ratio": -1.0927,
-      "sleep_onset_clock": 1.4739,
-      "night_hr_mean": 0.8225,
-      "daytime_nap_min": -0.2262
+      "sleep_efficiency": 0.145,
+      "waso_min": -0.6644,
+      "sol_min": 1.6974,
+      "bed_exit_count": -2.1207,
+      "deep_sleep_ratio": -1.2901,
+      "sleep_onset_clock": 1.309,
+      "night_hr_mean": 0.8439,
+      "daytime_nap_min": 0.0014
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 72,
+    "ewma_n": 46,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
   },
   "social": {
     "track": "social",
-    "anomaly_score": 0.9012,
-    "static_threshold": 2.2834,
-    "ewma_threshold": 1.6173,
-    "dynamic_threshold": 1.6173,
+    "anomaly_score": 0.8195,
+    "static_threshold": 2.3164,
+    "ewma_threshold": 1.3037,
+    "dynamic_threshold": 1.3037,
     "is_deviation": false,
     "signed_residuals": {
-      "copresence_min": 1.9344,
-      "out_of_home_min": 0.6667,
-      "rar_amplitude": 0.3835,
-      "rar_iv": -1.2316,
-      "activity_counts": 0.187
+      "copresence_min": 1.9412,
+      "out_of_home_min": 0.4812,
+      "rar_amplitude": 0.0977,
+      "rar_iv": -1.3844,
+      "activity_counts": 0.113
     },
     "abs_residuals": {
-      "copresence_min": 1.9344,
-      "out_of_home_min": 0.6667,
-      "rar_amplitude": 0.3835,
-      "rar_iv": 1.2316,
-      "activity_counts": 0.187
+      "copresence_min": 1.9412,
+      "out_of_home_min": 0.4812,
+      "rar_amplitude": 0.0977,
+      "rar_iv": 1.3844,
+      "activity_counts": 0.113
     },
     "signed_z": {
-      "copresence_min": 2.2751,
-      "out_of_home_min": 0.8397,
-      "rar_amplitude": 0.269,
-      "rar_iv": -0.9541,
-      "activity_counts": 0.1801
+      "copresence_min": 2.3033,
+      "out_of_home_min": 0.6183,
+      "rar_amplitude": 0.0704,
+      "rar_iv": -1.1918,
+      "activity_counts": 0.1157
     },
     "signed_available": true,
     "ewma_pool": "weekend",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 20,
+    "ewma_n": 11,
     "ewma_min_samples": 8,
     "in_observation_period": false,
     "status": "success"
@@ -86,6 +88,10 @@
   "track_statuses": {
     "sleep": "success",
     "social": "success"
+  },
+  "track_quality": {
+    "sleep": "valid",
+    "social": "valid"
   },
   "is_deviation": false,
   "consecutive_deviation_days": 0,

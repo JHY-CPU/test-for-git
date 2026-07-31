@@ -1,0 +1,43 @@
+{
+  "schema_version": "2.1.0",
+  "elder_id": "D_TP_circadian",
+  "day_key": "2026-02-23",
+  "timezone": "Asia/Shanghai",
+  "sleep_evidence": {
+    "anomaly_score": 0.8756,
+    "is_deviation": false,
+    "consecutive_days": 0,
+    "signed_z": {
+      "sleep_efficiency": -0.3486,
+      "waso_min": 0.0892,
+      "sol_min": 6.0556,
+      "bed_exit_count": 0.4027,
+      "deep_sleep_ratio": -0.7433,
+      "sleep_onset_clock": -1.2881,
+      "night_hr_mean": 0.7933,
+      "daytime_nap_min": 2.3367
+    },
+    "quality": "valid"
+  },
+  "circadian_evidence": {
+    "signed_z": {
+      "rar_amplitude": 1.3733,
+      "rar_iv": 0.438
+    },
+    "is_disrupted": false,
+    "quality": "valid"
+  },
+  "social_evidence": {
+    "anomaly_score": 1.007,
+    "is_deviation": false,
+    "consecutive_days": 0,
+    "signed_z": {
+      "copresence_min": -0.6726,
+      "out_of_home_min": -2.6678,
+      "activity_counts": 0.5872
+    },
+    "quality": "valid"
+  },
+  "risk_level": 0,
+  "note": "单向契约：GRU → MPDD-AVP。本系统不消费 MPDD-AVP 输出。"
+}

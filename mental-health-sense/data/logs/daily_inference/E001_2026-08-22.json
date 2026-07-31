@@ -3,81 +3,83 @@
   "day_key": "2026-08-22",
   "sleep": {
     "track": "sleep",
-    "anomaly_score": 0.7707,
-    "static_threshold": 2.2883,
-    "ewma_threshold": 1.4136,
-    "dynamic_threshold": 1.4136,
+    "anomaly_score": 0.7982,
+    "static_threshold": 2.2964,
+    "ewma_threshold": 1.5105,
+    "dynamic_threshold": 1.5105,
     "is_deviation": false,
     "signed_residuals": {
-      "sleep_efficiency": -0.6231,
-      "waso_min": 1.3654,
-      "sol_min": -0.17,
-      "bed_exit_count": 0.697,
-      "deep_sleep_ratio": 0.9978,
-      "sleep_onset_clock": 0.6666,
-      "night_hr_mean": -0.5198,
-      "daytime_nap_min": 0.8794
+      "sleep_efficiency": -0.5731,
+      "waso_min": 1.5854,
+      "sol_min": -0.3928,
+      "bed_exit_count": 0.8175,
+      "deep_sleep_ratio": 0.6262,
+      "sleep_onset_clock": 0.4351,
+      "night_hr_mean": -0.6818,
+      "daytime_nap_min": 0.916
     },
     "abs_residuals": {
-      "sleep_efficiency": 0.6231,
-      "waso_min": 1.3654,
-      "sol_min": 0.17,
-      "bed_exit_count": 0.697,
-      "deep_sleep_ratio": 0.9978,
-      "sleep_onset_clock": 0.6666,
-      "night_hr_mean": 0.5198,
-      "daytime_nap_min": 0.8794
+      "sleep_efficiency": 0.5731,
+      "waso_min": 1.5854,
+      "sol_min": 0.3928,
+      "bed_exit_count": 0.8175,
+      "deep_sleep_ratio": 0.6262,
+      "sleep_onset_clock": 0.4351,
+      "night_hr_mean": 0.6818,
+      "daytime_nap_min": 0.916
     },
     "signed_z": {
-      "sleep_efficiency": -0.7689,
-      "waso_min": 1.083,
-      "sol_min": -0.1336,
-      "bed_exit_count": 0.7471,
-      "deep_sleep_ratio": 1.7004,
-      "sleep_onset_clock": 0.7428,
-      "night_hr_mean": -0.4908,
-      "daytime_nap_min": 1.3821
+      "sleep_efficiency": -0.7359,
+      "waso_min": 1.3504,
+      "sol_min": -0.3175,
+      "bed_exit_count": 0.9462,
+      "deep_sleep_ratio": 1.0868,
+      "sleep_onset_clock": 0.4469,
+      "night_hr_mean": -0.6229,
+      "daytime_nap_min": 1.6494
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 65,
+    "ewma_n": 39,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
   },
   "social": {
     "track": "social",
-    "anomaly_score": 19.4794,
-    "static_threshold": 2.2834,
-    "ewma_threshold": 1.6173,
-    "dynamic_threshold": 1.6173,
+    "anomaly_score": 19.9843,
+    "static_threshold": 2.3164,
+    "ewma_threshold": 1.3037,
+    "dynamic_threshold": 1.3037,
     "is_deviation": true,
     "signed_residuals": {
-      "copresence_min": -1.2031,
-      "out_of_home_min": -2.871,
-      "rar_amplitude": -14.2517,
-      "rar_iv": 80.5535,
-      "activity_counts": -3.2187
+      "copresence_min": -2.0948,
+      "out_of_home_min": -2.8223,
+      "rar_amplitude": -14.9987,
+      "rar_iv": 80.765,
+      "activity_counts": -3.8156
     },
     "abs_residuals": {
-      "copresence_min": 1.2031,
-      "out_of_home_min": 2.871,
-      "rar_amplitude": 14.2517,
-      "rar_iv": 80.5535,
-      "activity_counts": 3.2187
+      "copresence_min": 2.0948,
+      "out_of_home_min": 2.8223,
+      "rar_amplitude": 14.9987,
+      "rar_iv": 80.765,
+      "activity_counts": 3.8156
     },
     "signed_z": {
-      "copresence_min": -1.415,
-      "out_of_home_min": -3.6156,
-      "rar_amplitude": -9.9977,
-      "rar_iv": 62.4047,
-      "activity_counts": -3.1001
+      "copresence_min": -2.4855,
+      "out_of_home_min": -3.6269,
+      "rar_amplitude": -10.8034,
+      "rar_iv": 69.5274,
+      "activity_counts": -3.907
     },
     "signed_available": true,
     "ewma_pool": "weekend",
+    "data_quality": "valid",
     "ewma_frozen": true,
-    "ewma_n": 20,
+    "ewma_n": 11,
     "ewma_min_samples": 8,
     "in_observation_period": false,
     "status": "success"
@@ -86,6 +88,10 @@
   "track_statuses": {
     "sleep": "success",
     "social": "success"
+  },
+  "track_quality": {
+    "sleep": "valid",
+    "social": "valid"
   },
   "is_deviation": true,
   "consecutive_deviation_days": 4,

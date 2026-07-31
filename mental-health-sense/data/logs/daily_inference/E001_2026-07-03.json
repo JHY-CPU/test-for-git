@@ -13,6 +13,7 @@
     "signed_z": {},
     "signed_available": false,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "status": "data_insufficient"
   },
   "social": {
@@ -27,12 +28,17 @@
     "signed_z": {},
     "signed_available": false,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "status": "data_insufficient"
   },
   "status": "data_insufficient",
   "track_statuses": {
     "sleep": "data_insufficient",
     "social": "data_insufficient"
+  },
+  "track_quality": {
+    "sleep": "valid",
+    "social": "valid"
   },
   "is_deviation": false,
   "consecutive_deviation_days": 0

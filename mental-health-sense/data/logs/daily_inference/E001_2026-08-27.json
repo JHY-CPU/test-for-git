@@ -3,81 +3,83 @@
   "day_key": "2026-08-27",
   "sleep": {
     "track": "sleep",
-    "anomaly_score": 0.6518,
-    "static_threshold": 2.2883,
-    "ewma_threshold": 1.3863,
-    "dynamic_threshold": 1.3863,
+    "anomaly_score": 0.6017,
+    "static_threshold": 2.2964,
+    "ewma_threshold": 1.4683,
+    "dynamic_threshold": 1.4683,
     "is_deviation": false,
     "signed_residuals": {
-      "sleep_efficiency": -0.1787,
-      "waso_min": -0.484,
-      "sol_min": -0.3646,
-      "bed_exit_count": 0.8444,
-      "deep_sleep_ratio": 1.0086,
-      "sleep_onset_clock": 0.0925,
-      "night_hr_mean": -1.7871,
-      "daytime_nap_min": -1.6276
+      "sleep_efficiency": -0.1317,
+      "waso_min": -0.2995,
+      "sol_min": -0.3283,
+      "bed_exit_count": 0.9257,
+      "deep_sleep_ratio": 0.7097,
+      "sleep_onset_clock": -0.2439,
+      "night_hr_mean": -1.2883,
+      "daytime_nap_min": -1.8817
     },
     "abs_residuals": {
-      "sleep_efficiency": 0.1787,
-      "waso_min": 0.484,
-      "sol_min": 0.3646,
-      "bed_exit_count": 0.8444,
-      "deep_sleep_ratio": 1.0086,
-      "sleep_onset_clock": 0.0925,
-      "night_hr_mean": 1.7871,
-      "daytime_nap_min": 1.6276
+      "sleep_efficiency": 0.1317,
+      "waso_min": 0.2995,
+      "sol_min": 0.3283,
+      "bed_exit_count": 0.9257,
+      "deep_sleep_ratio": 0.7097,
+      "sleep_onset_clock": 0.2439,
+      "night_hr_mean": 1.2883,
+      "daytime_nap_min": 1.8817
     },
     "signed_z": {
-      "sleep_efficiency": -0.2205,
-      "waso_min": -0.3839,
-      "sol_min": -0.2866,
-      "bed_exit_count": 0.9051,
-      "deep_sleep_ratio": 1.7188,
-      "sleep_onset_clock": 0.1031,
-      "night_hr_mean": -1.6874,
-      "daytime_nap_min": -2.558
+      "sleep_efficiency": -0.1691,
+      "waso_min": -0.2551,
+      "sol_min": -0.2654,
+      "bed_exit_count": 1.0714,
+      "deep_sleep_ratio": 1.2316,
+      "sleep_onset_clock": -0.2505,
+      "night_hr_mean": -1.177,
+      "daytime_nap_min": -3.3884
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": false,
-    "ewma_n": 70,
+    "ewma_n": 44,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
   },
   "social": {
     "track": "social",
-    "anomaly_score": 17.9413,
-    "static_threshold": 2.2834,
-    "ewma_threshold": 1.3137,
-    "dynamic_threshold": 1.3137,
+    "anomaly_score": 18.3314,
+    "static_threshold": 2.3164,
+    "ewma_threshold": 1.2574,
+    "dynamic_threshold": 1.2574,
     "is_deviation": true,
     "signed_residuals": {
-      "copresence_min": -1.2622,
-      "out_of_home_min": -2.9479,
-      "rar_amplitude": -11.0109,
-      "rar_iv": 76.041,
-      "activity_counts": -3.1662
+      "copresence_min": -2.0729,
+      "out_of_home_min": -2.9744,
+      "rar_amplitude": -11.5598,
+      "rar_iv": 76.2023,
+      "activity_counts": -3.4535
     },
     "abs_residuals": {
-      "copresence_min": 1.2622,
-      "out_of_home_min": 2.9479,
-      "rar_amplitude": 11.0109,
-      "rar_iv": 76.041,
-      "activity_counts": 3.1662
+      "copresence_min": 2.0729,
+      "out_of_home_min": 2.9744,
+      "rar_amplitude": 11.5598,
+      "rar_iv": 76.2023,
+      "activity_counts": 3.4535
     },
     "signed_z": {
-      "copresence_min": -1.4846,
-      "out_of_home_min": -3.7125,
-      "rar_amplitude": -7.7242,
-      "rar_iv": 58.9089,
-      "activity_counts": -3.0495
+      "copresence_min": -2.4595,
+      "out_of_home_min": -3.8222,
+      "rar_amplitude": -8.3264,
+      "rar_iv": 65.5995,
+      "activity_counts": -3.5362
     },
     "signed_available": true,
     "ewma_pool": "default",
+    "data_quality": "valid",
     "ewma_frozen": true,
-    "ewma_n": 51,
+    "ewma_n": 31,
     "ewma_min_samples": 20,
     "in_observation_period": false,
     "status": "success"
@@ -86,6 +88,10 @@
   "track_statuses": {
     "sleep": "success",
     "social": "success"
+  },
+  "track_quality": {
+    "sleep": "valid",
+    "social": "valid"
   },
   "is_deviation": true,
   "consecutive_deviation_days": 8,
