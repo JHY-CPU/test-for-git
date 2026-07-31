@@ -128,6 +128,7 @@ def run_daily_pipeline(
                         elder_id=elder_id,
                         risk_level=risk_result["risk_level"],
                         risk_types=risk_result.get("risk_types", []),
+                        config=config,
                     )
 
         except Exception as e:

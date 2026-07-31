@@ -361,7 +361,10 @@ def train_initial_baseline(
 
     # 7. 初始化EWMA累积基线（社交轨按 is_weekend 分池）
     weights = get_feature_weight_array(track)
-    ewma = TrackEWMAPools(track=track, alpha=ewma_alpha)
+    ewma = TrackEWMAPools(
+        track=track, alpha=ewma_alpha,
+        max_freeze_days=ewma_cfg.get("max_freeze_days", 14),
+    )
 
     all_X, all_y, all_idx = _build_windows(data_norm, window, window, n)
     with torch.no_grad():
@@ -370,7 +373,13 @@ def train_initial_baseline(
 
     for row, target_idx in enumerate(all_idx):
         anomaly_score = float(np.dot(all_abs[row], weights) / np.sum(weights))
-        ewma.update(anomaly_score, is_weekend=_is_weekend(day_keys[target_idx]))
+        # 传 day_key：建档期样本按日期严格递增，去重不会误跳；同时把 last_day_key
+        # 推进到建档末日，避免建档后紧接着重跑这几天又喂一遍。
+        ewma.update(
+            anomaly_score,
+            is_weekend=_is_weekend(day_keys[target_idx]),
+            day_key=day_keys[target_idx],
+        )
 
     logger.info(f"  └─ EWMA初始化: {ewma}")
 

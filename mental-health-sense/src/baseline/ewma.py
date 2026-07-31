@@ -217,6 +217,8 @@ class TrackEWMAPools:
         # 冻结上限：连续偏离超过这么多天后恢复更新，避免"永久报警"
         self.max_freeze_days = max_freeze_days
         self.freeze_streak = 0
+        # 已喂入的最后一个自然日。用于拒绝重复喂入，见 update()。
+        self.last_day_key: str | None = None
 
     def pool_for(self, is_weekend: bool = False) -> CumulativeEWMABaseline:
         """取该天对应的池"""
@@ -227,9 +229,22 @@ class TrackEWMAPools:
         value: float,
         is_weekend: bool = False,
         is_deviation: bool = False,
+        day_key: str | None = None,
     ) -> bool:
         """
         把今天的异常分喂给对应的池。
+
+        ★ 同一自然日只喂一次（day_key 去重）
+
+        infer_track 每次调用都无条件 update + 立即落盘，而"补算/重跑某一天"是
+        被明确预期的用法：save_daily_features 做了同日幂等覆盖，daily_inference
+        的连续天数统计也专门跳过"今天自己的旧记录"。只有 EWMA 漏了这条——
+        重跑一次 run_daily_pipeline --date X，那天的分就被喂进基线两次，
+        freeze_streak 也跟着多加一次。
+
+        用 `day_key <= last_day_key` 而不是等值比较：这样既挡住重跑，也挡住
+        乱序补算历史日（往回补一天会把早已过去的分当成最新观测喂进指数加权，
+        权重完全错位）。
 
         ★ 偏离日**不更新**（冻结）。理由：EWMA 是"正常波动"的基线，
         若把异常日也喂进去，基线会在两三天内学会这次异常，阈值随分数一起抬高，
@@ -246,15 +261,25 @@ class TrackEWMAPools:
         重新基线化是为了让系统对**下一次**变化仍然敏感。
 
         Returns:
-            True 表示本次实际更新了池，False 表示被冻结跳过。
+            True 表示本次实际更新了池，False 表示被冻结或被去重跳过。
         """
+        if day_key is not None and self.last_day_key is not None:
+            if day_key <= self.last_day_key:
+                return False
+
         if is_deviation and self.freeze_streak < self.max_freeze_days:
             self.freeze_streak += 1
+            if day_key is not None:
+                # 冻结日也要推进游标：否则重跑冻结日会让 freeze_streak 反复自增，
+                # 14 天上限提前触发、基线过早重新学习这次异常。
+                self.last_day_key = day_key
             return False
 
         if not is_deviation:
             self.freeze_streak = 0
         self.pool_for(is_weekend).update(value)
+        if day_key is not None:
+            self.last_day_key = day_key
         return True
 
     def get_threshold(self, sigma_multiplier: float, is_weekend: bool = False) -> float:
@@ -288,6 +313,7 @@ class TrackEWMAPools:
             "alpha": self.alpha,
             "max_freeze_days": self.max_freeze_days,
             "freeze_streak": self.freeze_streak,
+            "last_day_key": self.last_day_key,
             "pools": {name: pool.to_dict() for name, pool in self.pools.items()},
         }
 
@@ -301,6 +327,7 @@ class TrackEWMAPools:
         # freeze_streak 必须持久化：它跨天累积，每天是独立进程，
         # 不落盘的话每天都从 0 开始，冻结上限永远触发不到。
         obj.freeze_streak = data.get("freeze_streak", 0)
+        obj.last_day_key = data.get("last_day_key")
         for name, pool_data in data.get("pools", {}).items():
             if name in obj.pools:
                 obj.pools[name] = CumulativeEWMABaseline.from_dict(pool_data)
@@ -325,6 +352,7 @@ class TrackEWMAPools:
                 {
                     "freeze_streak": self.freeze_streak,
                     "max_freeze_days": self.max_freeze_days,
+                    "last_day_key": self.last_day_key,
                 },
                 f,
             )
@@ -338,13 +366,22 @@ class TrackEWMAPools:
         return f"ewma_{self.track}_state.pkl"
 
     @classmethod
-    def load(cls, dirpath: str | Path, track: str, alpha: float = 0.05) -> "TrackEWMAPools":
+    def load(
+        cls,
+        dirpath: str | Path,
+        track: str,
+        alpha: float = 0.05,
+        max_freeze_days: int = 14,
+    ) -> "TrackEWMAPools":
         """
         从目录加载。缺失的池以全新实例补位（不抛异常）——某个池还没攒到数据
         是正常状态（比如建档期恰好没跨过周末）。
+
+        max_freeze_days 由调用方从配置传入；状态文件里存的值优先（见下方），
+        这样改配置对新建档生效，已有基线保持自己建档时的口径直到重新建档。
         """
         dirpath = Path(dirpath)
-        obj = cls(track=track, alpha=alpha)
+        obj = cls(track=track, alpha=alpha, max_freeze_days=max_freeze_days)
         for name in list(obj.pools):
             filepath = dirpath / obj._pool_filename(name)
             if filepath.exists():
@@ -359,10 +396,12 @@ class TrackEWMAPools:
                 obj.max_freeze_days = int(
                     state.get("max_freeze_days", obj.max_freeze_days)
                 )
+                obj.last_day_key = state.get("last_day_key")
             except Exception:
                 # 状态文件坏了不该让整轨加载失败：冻结计数丢失只是让阈值
                 # 早一天恢复更新，比拿不到基线严重得多。
                 obj.freeze_streak = 0
+                obj.last_day_key = None
         return obj
 
     def __repr__(self) -> str:

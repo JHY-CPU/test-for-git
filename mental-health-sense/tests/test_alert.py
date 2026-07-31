@@ -79,6 +79,53 @@ class TestTriggerAlert:
         assert result["level"] == "NORMAL"
 
 
+class TestAlertConfigWiring:
+    """★ 回归：settings.yaml 的 alert 段必须真的被读到。
+
+    历史缺陷：trigger_alert 收了 config 形参却从未在函数体里用过，动作表
+    完全硬编码在 ALERT_ACTIONS。改配置不生效，两边还漂了——配置里
+    level_1.notify 是布尔 false，代码里是列表 []。
+    """
+
+    def test_config_overrides_recipients(self):
+        config = {"alert": {"level_2": {
+            "action": "push_notification",
+            "notify": ["children", "family_doctor"],
+        }}}
+        result = trigger_alert("E001", 2, config=config)
+        assert "push_to_family_doctor" in result["actions"]
+
+    def test_config_can_downgrade_action(self):
+        """配置把二级改成只记日志 → 不该再推送"""
+        config = {"alert": {"level_2": {"action": "log_only", "notify": []}}}
+        result = trigger_alert("E001", 2, config=config)
+        assert result["actions"] == ["log_alert"]
+
+    def test_boolean_notify_normalized(self):
+        """YAML 里 `notify: false` 不能让 `for r in False` 炸掉"""
+        config = {"alert": {"level_2": {
+            "action": "push_notification", "notify": False,
+        }}}
+        result = trigger_alert("E001", 2, config=config)
+        assert not any(a.startswith("push_to_") for a in result["actions"])
+
+    def test_missing_section_falls_back_to_defaults(self):
+        """alert 段缺失时按内置默认继续发预警，而不是让每日管道中断"""
+        result = trigger_alert("E001", 3, config={"risk": {}})
+        assert "push_to_community_worker" in result["actions"]
+        assert "force_ring" in result["actions"]
+
+    def test_shipped_config_is_readable(self):
+        """仓库里那份 settings.yaml 本身要能被正确消费"""
+        from src.utils.io import load_config
+
+        config = load_config()
+        assert config.get("alert"), "settings.yaml 应有 alert 段"
+        result = trigger_alert("E001", 3, config=config)
+        assert result["alerted"]
+        assert "push_to_children" in result["actions"]
+
+
 class TestAlertMessages:
     """测试预警消息生成"""
 

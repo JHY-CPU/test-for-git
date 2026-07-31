@@ -31,6 +31,7 @@ def generate_weekly_report(
     week_start: str | None = None,
     week_end: str | None = None,
     use_llm: bool = True,
+    config: dict | None = None,
 ) -> str:
     """
     生成每周心理健康周报。
@@ -40,6 +41,7 @@ def generate_weekly_report(
         week_start: 周起始日期 "YYYY-MM-DD"，默认计算最近7天
         week_end: 周结束日期 "YYYY-MM-DD"
         use_llm: 是否使用LLM生成（False时使用规则模板）
+        config: 全局配置（report.model / report.max_tokens）
 
     Returns:
         Markdown格式的周报文本
@@ -99,6 +101,7 @@ def generate_weekly_report(
             trends=trends,
             risk_result=risk_result,
             risk_types_str=risk_types_str,
+            config=config,
         )
     else:
         report_body = generate_rule_based_report(
@@ -136,9 +139,7 @@ def generate_weekly_report(
 
 ## 统计指标
 
-- 本周异常天数：{sum(1 for r in week_results if r.get('is_deviation', False))}/7
-- 平均异常分：{np.mean([r.get('anomaly_score', 0) for r in week_results]):.2f}
-- 最高异常分：{np.max([r.get('anomaly_score', 0) for r in week_results]):.2f}
+{_format_track_stats(week_results)}
 
 ## 处置建议
 
@@ -150,6 +151,47 @@ def generate_weekly_report(
     logger.info(f"  └─ 周报已保存: {elder_id}_{week_start_str}")
 
     return report
+
+
+_TRACK_LABELS = {"sleep": "睡眠轨", "social": "社会连接轨"}
+
+
+def _format_track_stats(week_results: list[dict]) -> str:
+    """
+    按轨汇总本周的偏离天数与异常分。
+
+    ★ 必须按轨，且两轨的分**绝不能平均或并列比大小**——睡眠轨 8 维、社交轨 5 维，
+    权重和不同，残差尺度不可比。这与 judge.judge_risk_level"每轨各自算等级、
+    取较高者"是同一条不变量。
+
+    历史缺陷：旧实现取 `r.get('anomaly_score', 0)` —— 双轨改造后顶层根本没有
+    这个键（实测 60/60 个日志都没有），于是"平均异常分/最高异常分"两行
+    **恒为 0.00**，而真实分数是 0.63~1.13。周报把"一切正常"当成事实报了出去。
+    """
+    lines = [
+        f"- 本周异常天数（任一轨）：{sum(1 for r in week_results if r.get('is_deviation', False))}"
+        f"/{len(week_results)}"
+    ]
+
+    for track, label in _TRACK_LABELS.items():
+        scores = [
+            float(r[track]["anomaly_score"])
+            for r in week_results
+            if isinstance(r.get(track), dict) and r[track].get("anomaly_score") is not None
+        ]
+        dev_days = sum(
+            1 for r in week_results
+            if isinstance(r.get(track), dict) and r[track].get("is_deviation")
+        )
+        if not scores:
+            lines.append(f"- {label}：本周无有效数据")
+            continue
+        lines.append(
+            f"- {label}：偏离 {dev_days}/{len(scores)} 天，"
+            f"平均异常分 {np.mean(scores):.2f}，最高 {np.max(scores):.2f}"
+        )
+
+    return "\n".join(lines)
 
 
 # 三条趋势线各自的代表特征：(轨, 特征名)
@@ -227,6 +269,7 @@ def _generate_with_llm(
     trends: dict,
     risk_result: dict,
     risk_types_str: str,
+    config: dict | None = None,
 ) -> str:
     """
     调用LLM生成周报正文。
@@ -236,11 +279,23 @@ def _generate_with_llm(
         trends: 趋势数据字典
         risk_result: 风险判定结果
         risk_types_str: 风险类型字符串
+        config: 全局配置；report.model / report.max_tokens 从这里取
+            （此前两项写死在函数体里，settings.yaml 的 report 段无人读取）
 
     Returns:
         周报正文
     """
     deviation_days = risk_result.get("consecutive_deviation", 0)
+
+    if config is None:
+        from src.utils.io import load_config
+        try:
+            config = load_config()
+        except Exception:
+            config = {}
+    report_cfg = config.get("report", {}) or {}
+    model = report_cfg.get("model", "claude-sonnet-5")
+    max_tokens = report_cfg.get("max_tokens", 400)
 
     prompt = fill_prompt(
         WEEKLY_REPORT_USER_TEMPLATE,
@@ -260,8 +315,8 @@ def _generate_with_llm(
         client = anthropic.Anthropic()
 
         response = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=400,
+            model=model,
+            max_tokens=max_tokens,
             system=WEEKLY_REPORT_SYSTEM_PROMPT,
             messages=[
                 {"role": "user", "content": prompt},

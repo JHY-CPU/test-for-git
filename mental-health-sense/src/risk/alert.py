@@ -22,7 +22,12 @@ class AlertLevel(IntEnum):
     SEVERE = 3      # 严重
 
 
-# 预警动作配置
+# 预警动作的**默认值**。运行时以 config/settings.yaml 的 alert 段为准，
+# 本表只在配置缺失或某一级没配时兜底（见 _actions_for）。
+#
+# 此前 settings.yaml 的整个 alert 段无人读取：trigger_alert 收了 config 形参
+# 却从未在函数体里用过，动作表完全硬编码在这里。改配置不生效，且两边还漂了——
+# 配置里 level_1.notify 写的是 false（布尔），代码里是 []（列表）。
 ALERT_ACTIONS = {
     AlertLevel.NORMAL: {
         "action": "none",
@@ -52,6 +57,46 @@ ALERT_ACTIONS = {
 }
 
 
+def _normalize_notify(value) -> list[str]:
+    """
+    把配置里的 notify 归一成收件人列表。
+
+    YAML 里写 `notify: false` 表示"不通知"（settings.yaml 的 level_1 就是这么写的），
+    但代码一路当列表用。不归一的话 `for r in False` 会直接抛异常。
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value]
+
+
+def _actions_for(level: AlertLevel, config: dict | None) -> dict:
+    """
+    取该等级的动作配置：以 settings.yaml 的 alert 段为准，缺项回落到 ALERT_ACTIONS。
+
+    回落而非报错：alert 段是可选的运营配置，缺了应当按内置默认继续发预警，
+    而不是让整条每日管道因为一段配置没写就中断。
+    """
+    defaults = ALERT_ACTIONS.get(level, ALERT_ACTIONS[AlertLevel.NORMAL])
+    if not config:
+        return defaults
+
+    section = (config.get("alert") or {}).get(f"level_{int(level)}")
+    if not isinstance(section, dict):
+        return defaults
+
+    merged = dict(defaults)
+    if "action" in section:
+        merged["action"] = section["action"]
+    if "notify" in section:
+        merged["notify"] = _normalize_notify(section["notify"])
+    for key in ("log", "include_in_report", "highlight_in_report"):
+        if key in section:
+            merged[key] = section[key]
+    return merged
+
+
 def trigger_alert(
     elder_id: str,
     risk_level: int,
@@ -65,7 +110,7 @@ def trigger_alert(
         elder_id: 老人ID
         risk_level: 风险等级 (0/1/2/3)
         risk_types: 风险类型列表
-        config: 全局配置
+        config: 全局配置。给了就以其 alert 段为准，不给则用内置默认。
 
     Returns:
         {"alerted": bool, "level": str, "actions": [...], "message": str}
@@ -79,7 +124,7 @@ def trigger_alert(
         logger.error(f"无效的风险等级: {risk_level}")
         level_enum = AlertLevel.NORMAL
 
-    actions_config = ALERT_ACTIONS.get(level_enum, ALERT_ACTIONS[AlertLevel.NORMAL])
+    actions_config = _actions_for(level_enum, config)
 
     log_entry = {
         "elder_id": elder_id,
@@ -171,7 +216,7 @@ def _execute_alert_actions(
 
     # App推送（模拟）
     if action in ("push_notification", "force_notification"):
-        notify_list = actions_config.get("notify", [])
+        notify_list = _normalize_notify(actions_config.get("notify", []))
         for recipient in notify_list:
             executed.append(f"push_to_{recipient}")
         logger.info(

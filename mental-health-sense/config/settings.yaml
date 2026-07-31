@@ -80,6 +80,14 @@ ewma:
   # ⚠️ 诚实说明：这意味着社交轨的周末动态阈值到第 8 周才真正上线，
   # 在此之前周末只有静态阈值。这是周末样本稀疏的算术后果，调参消不掉。
   min_samples_for_dynamic_weekend: 8
+  # 偏离日冻结的上限：连续冻结这么多天后强制恢复喂入，让基线重新学习。
+  # 此前写死在 TrackEWMAPools.__init__，配置里根本没这个键——而它是
+  # docs/TODO.md 里排第一的"永久性变化无限期每日报警"唯一能调的旋钮
+  # （实测 PERM_step 连续 91 天每天 L3：冻结按 14 天正常释放、阈值 1.18→1.91，
+  #   但 score 4.5 远超其上，重新基线化追不上）。调小能让阈值更快追上，
+  # 代价是持续性异常更早被自己的历史掩盖——两头都是坏的，
+  # 真正的解法在预警策略层（冷却/去重），不在这里。
+  max_freeze_days: 14
 
 # ===== 风险判定阈值 =====
 risk:
@@ -176,10 +184,16 @@ scheduler:
   weekly_time: "04:00"       # 跟着日任务后移，避免与 03:00 的日任务重叠
 
 # ===== 预警推送 =====
+# 由 alert.trigger_alert 读取，缺项回落到 alert.py 的 ALERT_ACTIONS 内置默认。
+# notify 统一写列表：level_1 原先写的是 `false`，而代码一路当列表用
+# （`for r in False` 会直接抛异常）——这段配置此前根本没人读，才没暴露。
+#
+# ⚠️ 仍未实现：冷却/去重/抑制。永久性变化会无限期每日重复报同一等级
+# （PERM_step 实测连续 91 天每天 L3），见 docs/TODO.md 与 VALIDATION.md §7.3。
 alert:
   level_1:
     action: "log_only"
-    notify: false
+    notify: []
   level_2:
     action: "push_notification"
     notify: ["children"]

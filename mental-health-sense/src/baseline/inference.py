@@ -180,7 +180,9 @@ def infer_track(
         return {**base, "status": "cold_start"}
 
     ewma = TrackEWMAPools.load(
-        get_baseline_dir(elder_id), track, alpha=ewma_cfg.get("alpha", 0.05)
+        get_baseline_dir(elder_id), track,
+        alpha=ewma_cfg.get("alpha", 0.05),
+        max_freeze_days=ewma_cfg.get("max_freeze_days", 14),
     )
 
     # 2. 获取今日特征与过去 window 天特征
@@ -249,7 +251,8 @@ def infer_track(
     # 偏离日冻结（不喂给 EWMA）：否则基线两三天就学会这次异常、阈值追平分数，
     # 持续性异常被自己的历史掩盖，"连续 N 天"永远凑不满。详见 ewma.update 的说明。
     ewma_updated = ewma.update(
-        anomaly_score, is_weekend=is_weekend, is_deviation=is_deviation
+        anomaly_score, is_weekend=is_weekend, is_deviation=is_deviation,
+        day_key=day_key,
     )
     ewma.save(get_baseline_dir(elder_id))
 

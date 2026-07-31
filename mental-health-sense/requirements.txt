@@ -9,14 +9,11 @@ torch>=2.0.0  # CPU-only is sufficient
 # Persistence
 joblib>=1.3.0
 
-# Scheduling
-APScheduler>=3.10.0
-
 # Configuration
 PyYAML>=6.0
 
-# LLM API (for weekly report)
-anthropic>=0.30.0  # Claude API
+# LLM API (周报正文；未安装时 weekly_report 自动回落到规则模板)
+anthropic>=0.30.0
 
 # Logging & Monitoring
 loguru>=0.7.0
@@ -25,15 +22,16 @@ loguru>=0.7.0
 pytest>=7.0.0
 pytest-cov>=4.0.0
 
-# 实时监测模块依赖
-# Audio processing
-funasr>=1.0.0  # SenseVoice模型
-modelscope>=1.9.0  # 模型下载
-pyaudio>=0.2.13  # 麦克风采集 (Windows需要: pip install pipwin && pipwin install pyaudio)
-scipy>=1.11.0  # 音频处理
-
-# Video/RTSP (optional)
-opencv-python>=4.8.0  # RTSP流处理
-
-# Optional: MQTT for message queue (future use)
-# paho-mqtt>=1.6.0
+# ---------------------------------------------------------------------------
+# 已移除（2026-07-31）：funasr / modelscope / pyaudio / scipy /
+#   opencv-python / APScheduler
+#
+# 六项全部零代码引用——音频链路与实时运行时已在双轨重构中删除，调度改由
+# cron/systemd 触发脚本。留着不只是冗余：pyaudio 需要 portaudio 头文件，
+# 干净的 Linux 机器上 `pip install -r requirements.txt`（README 快速开始
+# 与 CLAUDE.md 都这么写）会直接失败：
+#     src/pyaudio/device_api.c:9:10: fatal error: portaudio.h: No such file or directory
+#     ERROR: Could not build wheels for pyaudio
+# 而 pip 是整体中止的，于是 torch 等核心依赖一个都装不上——照文档走的新克隆
+# 根本跑不起来。
+# ---------------------------------------------------------------------------
