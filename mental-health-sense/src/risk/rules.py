@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.baseline.scaler_utils import TRACK_SLEEP, TRACK_SOCIAL
+from src.utils.status import is_evaluable
 
 
 @dataclass
@@ -156,7 +157,7 @@ def _collect_signed_z(track_results: dict) -> tuple[dict, set[str]]:
         tr = track_results.get(track)
         if not isinstance(tr, dict):
             continue
-        if tr.get("status") not in ("success", "observation"):
+        if not is_evaluable(tr.get("status")):
             continue
         if not tr.get("signed_available", False):
             continue

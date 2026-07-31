@@ -179,6 +179,29 @@ def verify(rows):
           if r["day"] < BUILD_DAYS and r["sleep"]["status"] == "cold_start_fallback"]
     check(len(fb) > 20, "冷启动兜底", f"建档期 {len(fb)} 天走稳健兜底（消除监测盲区）")
 
+    # 4b. ★ 兜底不能只是"跑了"，它得真的能出等级，否则建档期仍是预警盲区。
+    # 历史缺陷：judge/rules 的状态白名单漏了 cold_start_fallback，兜底判出的
+    # 偏离全被丢掉，risk_level 恒 0。上面那条断言只数 status，测不到这个缺口。
+    fb_days = [r for r in rows if r["day"] < BUILD_DAYS
+               and r["sleep"]["status"] == "cold_start_fallback"]
+    fb_dev = [r for r in fb_days if r["sleep"]["deviation"]]
+    fb_leveled = [r for r in fb_dev if (r["risk_level"] or 0) >= 1]
+    if fb_dev:
+        check(
+            len(fb_leveled) == len(fb_dev),
+            "兜底能出等级",
+            f"建档期 {len(fb_dev)} 个兜底偏离日全部出了等级"
+            if len(fb_leveled) == len(fb_dev)
+            else f"{len(fb_dev) - len(fb_leveled)}/{len(fb_dev)} 个兜底偏离日 risk_level=0（预警盲区）",
+        )
+    else:
+        # 本场景建档期本就正常，没有偏离日可断言 —— 那就反过来守"正常天不误报"：
+        # 兜底的分是稳健 z（阈值 = fallback_sigma=3.0，正常天可达 1.77），
+        # 幅度门槛若用绝对常数会让建档期天天误报 L1。
+        noisy = [r["day"] for r in fb_days if (r["risk_level"] or 0) >= 1]
+        check(not noisy, "兜底不误报", f"建档期 {len(fb_days)} 天无一误报"
+              if not noisy else f"误报 {len(noisy)} 天: day{noisy[:5]}")
+
     # 5. 字段完整性
     bad = [
         r["day"] for r in rows for t in TRACKS

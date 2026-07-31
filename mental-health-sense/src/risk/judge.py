@@ -20,6 +20,7 @@ from src.baseline.scaler_utils import TRACKS, TRACK_SLEEP, TRACK_SOCIAL
 from src.risk.rules import classify_risk_type
 from src.utils.io import load_daily_results
 from src.utils.logger import get_logger
+from src.utils.status import COLD_START_STATUSES, STATUS_COLD_START, is_evaluable
 
 logger = get_logger(__name__)
 
@@ -112,6 +113,25 @@ def _has_adverse_movement(
     return adverse_days * 2 >= considered
 
 
+def _severity(day: dict) -> float:
+    """
+    该日分数相对**它自己那天的动态阈值**的倍数。按定义 severity > 1 ⟺ is_deviation。
+
+    为什么幅度门槛必须用倍数而不是绝对分：两类轨的 anomaly_score 量纲根本不同。
+    GRU 轨是加权归一化残差（正常 0.5~1.0，阈值 1.3~1.6）；冷启动兜底轨是稳健
+    加权 |z|（阈值就是 fallback_sigma=3.0，正常天能跑到 1.77）。同一个绝对常数
+    对两者不是同一件事——1.5 对 GRU 轨是"高峰"，对兜底轨是"再正常不过的一天"。
+
+    倍数是可比的：不管用哪套尺度，"越过自己的阈值多少倍"都表达同一件事。
+
+    无阈值时退回绝对分：历史日志与单测桩不带 dynamic_threshold，退回绝对分
+    可保持它们原有的语义，不必为此改造既有数据。
+    """
+    score = float(day.get("anomaly_score", 0.0))
+    threshold = float(day.get("dynamic_threshold") or 0.0)
+    return score / threshold if threshold > 0 else score
+
+
 def _judge_single_track(
     track_history: list[dict],
     risk_cfg: dict,
@@ -121,7 +141,8 @@ def _judge_single_track(
     对某一轨独立判等级。
 
     Returns:
-        {"risk_level": int, "consecutive": int, "avg_anomaly": float, "max_anomaly": float}
+        {"risk_level": int, "consecutive": int, "avg_anomaly": float,
+         "max_anomaly": float, "avg_severity": float, "max_severity": float}
     """
     consecutive_cfg = risk_cfg.get("consecutive", {})
     thresholds_cfg = risk_cfg.get("anomaly_score_thresholds", {})
@@ -129,13 +150,10 @@ def _judge_single_track(
     attn_threshold = consecutive_cfg.get("attention", 1)
     warn_threshold = consecutive_cfg.get("warning", 3)
     severe_threshold = consecutive_cfg.get("severe", 5)
-    sustained_avg_threshold = thresholds_cfg.get("sustained_avg", 1.0)
-    high_spike_threshold = thresholds_cfg.get("high_spike", 1.5)
+    sustained_severity_threshold = thresholds_cfg.get("sustained_severity", 1.15)
+    high_spike_severity_threshold = thresholds_cfg.get("high_spike_severity", 1.5)
 
-    usable = [
-        d for d in track_history
-        if d.get("status") in ("success", "observation")
-    ]
+    usable = [d for d in track_history if is_evaluable(d.get("status"))]
 
     if not usable:
         return {
@@ -143,6 +161,8 @@ def _judge_single_track(
             "consecutive": 0,
             "avg_anomaly": 0.0,
             "max_anomaly": 0.0,
+            "avg_severity": 0.0,
+            "max_severity": 0.0,
             "evaluable": False,
         }
 
@@ -156,19 +176,33 @@ def _judge_single_track(
         else:
             break
 
+    # ★ 幅度门槛算在**驱动本次升级的那段连续偏离**上，不是整个 7 天窗。
+    # 旧实现用整窗均值，被窗口里的正常天稀释：实测 3 天各 1.45（都实打实越过了
+    # 各自的阈值）被前面 4 个正常天拉到 0.907 < 1.0，只报 L1。而方向闸门
+    # （下方 _has_adverse_movement）早已改成只看 streak，两个门槛看的不是同一段数据。
+    streak = recent[-consecutive:] if consecutive else []
+    severities = [_severity(d) for d in recent]
+    streak_severities = [_severity(d) for d in streak]
+
     scores = [float(d.get("anomaly_score", 0.0)) for d in recent]
-    avg_anomaly = float(np.mean(scores))
+    streak_scores = [float(d.get("anomaly_score", 0.0)) for d in streak]
+    avg_anomaly = float(np.mean(streak_scores)) if streak_scores else 0.0
     max_anomaly = float(np.max(scores))
+    avg_severity = float(np.mean(streak_severities)) if streak_severities else 0.0
+    max_severity = float(np.max(severities))
 
     # 严重级会触发社区网格员介入 + 强提醒，代价高，必须比"提醒"级更严格，
-    # 至少要满足同样的幅度门槛（avg_anomaly > sustained_avg）。否则长达数天、
-    # 但每天仅"擦线"越过动态阈值的低幅度偏离，会仅凭连续天数直接升到最高级。
-    sustained = avg_anomaly > sustained_avg_threshold
+    # 至少要满足同样的幅度门槛。否则长达数天、但每天仅"擦线"越过动态阈值的
+    # 低幅度偏离，会仅凭连续天数直接升到最高级。
+    #
+    # 门槛必须 > 1：偏离日按定义 severity > 1，门槛取 1.0 等于恒真，这条防线
+    # 会静默失效。1.15 = "整段偏离平均要高出自己阈值 15%，不能只是擦线"。
+    sustained = avg_severity > sustained_severity_threshold
     if consecutive >= severe_threshold and sustained:
         level = 3
     elif consecutive >= warn_threshold and sustained:
         level = 2
-    elif consecutive >= attn_threshold or max_anomaly > high_spike_threshold:
+    elif consecutive >= attn_threshold or max_severity > high_spike_severity_threshold:
         level = 1
     else:
         level = 0
@@ -191,6 +225,8 @@ def _judge_single_track(
         "consecutive": consecutive,
         "avg_anomaly": round(avg_anomaly, 4),
         "max_anomaly": round(max_anomaly, 4),
+        "avg_severity": round(avg_severity, 4),
+        "max_severity": round(max_severity, 4),
         "adverse_direction": adverse,
         "evaluable": True,
     }
@@ -357,10 +393,15 @@ def build_mpdd_evidence(
     per_track = risk_result.get("per_track", {})
 
     def _quality(track_result: dict) -> str:
+        """
+        对外呈现的证据强度。cold_start_fallback 走稳健滑动基线而非 GRU，
+        证据比 valid 弱但绝不是 missing——报成 missing 会让下游以为"没测到"，
+        而实际上那天是有方向、有偏离判定的。
+        """
         status = track_result.get("status")
-        if status in ("success", "observation"):
+        if is_evaluable(status) and status not in COLD_START_STATUSES:
             return "valid"
-        if status == "cold_start":
+        if status in COLD_START_STATUSES or status == STATUS_COLD_START:
             return "cold_start"
         return "missing"
 

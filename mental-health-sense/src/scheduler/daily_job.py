@@ -38,6 +38,7 @@ from src.data_pipeline.validator import (
 )
 from src.utils.io import DAY_KEY_COL, load_features_csv, save_daily_features
 from src.utils.logger import get_logger
+from src.utils.status import STATUS_COLD_START, STATUS_COLD_START_FALLBACK, is_evaluable
 
 logger = get_logger(__name__)
 
@@ -115,7 +116,7 @@ def run_daily_pipeline(
                 track_quality=track_quality,
             )
 
-            if inference_result.get("status") in ("success", "cold_start_fallback"):
+            if inference_result.get("status") in ("success", STATUS_COLD_START_FALLBACK):
                 # 6. 风险判定
                 from src.risk.judge import quick_judge
                 risk_result = quick_judge(elder_id, day_key, config)
@@ -254,7 +255,7 @@ def _apply_cold_start_fallbacks(
         track_result = inference_result.get(track)
         if not isinstance(track_result, dict):
             continue
-        if track_result.get("status") != "cold_start":
+        if track_result.get("status") != STATUS_COLD_START:
             continue
 
         fb = _cold_start_fallback_track(
@@ -273,7 +274,7 @@ def _apply_cold_start_fallbacks(
         for t in tracks if isinstance(inference_result.get(t), dict)
     }
     inference_result["track_statuses"] = statuses
-    if any(s in ("success", "observation", "cold_start_fallback") for s in statuses.values()):
+    if any(is_evaluable(s) for s in statuses.values()):
         inference_result["status"] = "success"
 
     inference_result["is_deviation"] = any(

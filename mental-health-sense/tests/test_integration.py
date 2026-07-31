@@ -376,6 +376,59 @@ class TestDegradedOperation:
         statuses = {t: (inf.get(t) or {}).get("status") for t in (TRACK_SLEEP, TRACK_SOCIAL)}
         assert all(s == "cold_start_fallback" for s in statuses.values()), statuses
 
+    def test_cold_start_fallback_actually_alerts(self, simulated_data):
+        """★ 回归：建档期出现严重异常时必须真的出等级，而不是只写日志。
+
+        历史缺陷：兜底算出 is_deviation=True、给了带方向的 signed_z，但
+        judge._judge_single_track 与 rules._collect_signed_z 的状态白名单只收
+        ("success","observation")，把 cold_start_fallback 整个丢掉。实测连续 6 天
+        anomaly_score 166→58（阈值 3.0）、偏离 6/6，risk_level 全是 0——
+        整个 35 天建档期一条预警都发不出，而 cold_start_fallback.py 的存在
+        理由正是"消除建档期监测盲区"。盲区在检测层补上了，预警层原封不动。
+
+        上一个用例只断言 status 流转，从没断言过能出等级——这就是缺口能存活的原因。
+        """
+        from src.scheduler.daily_job import run_daily_pipeline
+
+        bad_sleep = {
+            "sleep_efficiency": 0.52, "waso_min": 140.0, "sol_min": 85.0,
+            "bed_exit_count": 6.0, "deep_sleep_ratio": 0.05,
+            "sleep_onset_clock": 300.0, "night_hr_mean": 78.0, "daytime_nap_min": 150.0,
+        }
+
+        levels = []
+        for d in range(15, 20):          # 建档期内（< build_days=35），连续 5 天
+            result = run_daily_pipeline(
+                ELDER, day_key_of(d),
+                raw_data={"sleep": bad_sleep, "activity": _activity_payload(),
+                          "camera": {"copresence_min": 75.0}},
+            )
+            sleep = (result.get("inference_result") or {}).get(TRACK_SLEEP) or {}
+            assert sleep.get("status") == "cold_start_fallback", sleep.get("status")
+            assert sleep.get("is_deviation"), "严重异常在兜底层就该判偏离"
+            levels.append((result.get("risk_result") or {}).get("risk_level", 0))
+
+        assert levels[0] >= 1, f"建档期首个严重异常日应至少出关注级，实际 {levels}"
+        assert max(levels) >= 2, f"连续 5 天严重异常应升到提醒级以上，实际 {levels}"
+
+    def test_cold_start_fallback_normal_days_stay_quiet(self, simulated_data):
+        """★ 兜底轨的正常天不得误报——两套尺度混用会在这里翻车。
+
+        兜底的 anomaly_score 是稳健加权 |z|（阈值 = fallback_sigma = 3.0），
+        正常天实测能到 1.77；而幅度门槛若沿用照 GRU 残差尺度定的绝对常数
+        （high_spike=1.5），建档期会天天误报 L1。这正是幅度门槛必须改成
+        severity（分数/自身阈值）的原因。
+        """
+        from src.scheduler.daily_job import run_daily_pipeline
+
+        for d in range(15, 19):
+            result = run_daily_pipeline(ELDER, day_key_of(d))
+            sleep = (result.get("inference_result") or {}).get(TRACK_SLEEP) or {}
+            assert sleep.get("status") == "cold_start_fallback"
+            assert not sleep.get("is_deviation"), f"day{d} 正常天不该判偏离"
+            level = (result.get("risk_result") or {}).get("risk_level", 0)
+            assert level == 0, f"day{d} 兜底期正常天不该出等级，实际 L{level}"
+
 
 def _sleep_payload() -> dict:
     return {
