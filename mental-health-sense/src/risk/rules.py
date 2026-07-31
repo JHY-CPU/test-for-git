@@ -207,6 +207,8 @@ def classify_risk_type(
 
     rules = build_risk_rules(config)
     z_map, available_tracks = _collect_signed_z(track_results)
+    max_skip = _max_skip_days(config)
+    history_days = required_history_days(config)
 
     results = []
 
@@ -282,12 +284,13 @@ def classify_risk_type(
         if rule.uses_rolling():
             cons_days = _count_rolling_qualifies(
                 key, daily_results, qualifies_today, rule.rolling_window,
-                tracks=quality_tracks,
+                tracks=quality_tracks, max_skip=max_skip,
             )
             required_days = rule.rolling_required
         else:
             cons_days = _count_consecutive_qualifies(
-                key, daily_results, qualifies_today, tracks=quality_tracks
+                key, daily_results, qualifies_today, tracks=quality_tracks,
+                max_steps=history_days, max_skip=max_skip,
             )
 
         is_active = bool(qualifies_today and cons_days >= required_days)
@@ -366,25 +369,99 @@ def _history_before_today(daily_results: list[dict] | None) -> list[dict]:
     return daily_results[:-1]
 
 
+def _day_key_of(day_result: dict) -> str | None:
+    return day_result.get("day_key") or day_result.get("date")
+
+
+def _index_by_day(daily_results: list[dict] | None) -> tuple[dict[str, dict], str | None]:
+    """
+    把历史日志按 day_key 建索引，并返回"今天"的 day_key。
+
+    今天 = daily_results 的最后一条（调用方保证按日期升序）。拿不到日期的日志
+    （极早期格式）不进索引，由回溯逻辑当作"缺日"处理。
+    """
+    if not daily_results:
+        return {}, None
+    today_key = _day_key_of(daily_results[-1])
+    index = {}
+    for day_result in _history_before_today(daily_results):
+        key = _day_key_of(day_result)
+        if key:
+            index[key] = day_result
+    return index, today_key
+
+
+def _walk_back(
+    index: dict[str, dict],
+    today_key: str,
+    max_steps: int,
+    max_skip: int,
+    tracks: frozenset[str],
+):
+    """
+    从今天往前**逐个自然日**回溯，yield 计入统计的历史日（跳过不计入的）。
+
+    ★ 为什么必须按自然日而不是按记录序号
+
+      load_daily_results 取的是最近 N 个**文件**，不是最近 N 个**自然日**；
+      而两轨全不可用那天 daily_job 直接跳过推理、连日志都不生成。两者叠加的
+      结果是：设备离线一段时间后，断裂两端的偏离日会被当成连续日拼起来。
+      实测 5 条日志跨越 22 个日历日（中间断 17 天）仍数出 consecutive=5 → L3。
+
+    ★ 缺日与降级日走同一条路径
+
+      两者都是"这天我们不知道"：缺日是压根没测，降级是测得不可信。既不累加
+      也不打断，与 validator 的四态设计一致。但不能无上限地跨过去——连续跳过
+      超过 max_skip 天就打断，否则一次长时间离线又会把两段无关的偏离粘起来。
+      max_skip 默认 3，与 imputer.impute_sequence 的 max_forward_days 同源：
+      超过三天没有可信数据，就不该再假装这是同一段状态。
+    """
+    from datetime import datetime, timedelta
+
+    try:
+        cursor = datetime.strptime(today_key, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return
+
+    skipped_in_a_row = 0
+    for _ in range(max_steps):
+        cursor -= timedelta(days=1)
+        key = cursor.strftime("%Y-%m-%d")
+        day_result = index.get(key)
+
+        if day_result is None or not _counts_toward_consecutive(day_result, tracks):
+            skipped_in_a_row += 1
+            if skipped_in_a_row > max_skip:
+                return          # 连续跳过太久，不再认为是同一段状态
+            continue
+
+        skipped_in_a_row = 0
+        yield day_result
+
+
 def _count_consecutive_qualifies(
     risk_key: str,
     daily_results: list[dict] | None,
     today_qualifies: bool,
     tracks: frozenset[str] = frozenset(),
+    max_steps: int = 30,
+    max_skip: int = 3,
 ) -> int:
     """
-    统计截至今天的连续达标天数。
+    统计截至今天的连续达标天数（按自然日回溯）。
 
-    规则：今天不达标直接返回 0；往前数时跳过质量不佳的日子，
+    规则：今天不达标直接返回 0；往前逐日回溯，跳过质量不佳的日子与缺日，
     遇到第一个"质量正常但不达标"的日子即停。
     """
     if not today_qualifies:
         return 0
 
+    index, today_key = _index_by_day(daily_results)
+    if not today_key:
+        return 1
+
     count = 1
-    for day_result in reversed(_history_before_today(daily_results)):
-        if not _counts_toward_consecutive(day_result, tracks):
-            continue  # 跳过降级日，不累加也不打断
+    for day_result in _walk_back(index, today_key, max_steps, max_skip, tracks):
         if _day_qualifies(day_result, risk_key):
             count += 1
         else:
@@ -398,22 +475,58 @@ def _count_rolling_qualifies(
     today_qualifies: bool,
     window: int,
     tracks: frozenset[str] = frozenset(),
+    max_skip: int = 3,
 ) -> int:
     """
-    统计 window 天滚动窗内的达标天数（含今天）。
+    统计 window 个**自然日**滚动窗内的达标天数（含今天）。
 
-    分母只数质量正常的日子；窗口按自然日取最近 window 条记录。
+    窗口按日历定长，不随记录条数伸缩：旧实现取"最近 window-1 条历史记录"，
+    日志有空洞时窗口会悄悄拉长到几周。
     """
     count = 1 if today_qualifies else 0
 
-    history = _history_before_today(daily_results)
-    # 只看最近 window-1 条历史（今天占 1 条）
-    for day_result in reversed(history[-(window - 1):] if window > 1 else []):
-        if not _counts_toward_consecutive(day_result, tracks):
-            continue
+    index, today_key = _index_by_day(daily_results)
+    if not today_key or window <= 1:
+        return count
+
+    # 今天占 1 天，往前再看 window-1 个自然日
+    for day_result in _walk_back(index, today_key, window - 1, max_skip, tracks):
         if _day_qualifies(day_result, risk_key):
             count += 1
     return count
+
+
+def required_history_days(config: dict | None = None) -> int:
+    """
+    判定层需要加载多少天推理日志。
+
+    不能写死 7：circadian 降级模式要求连续 7 天达标，而"今天 + 6 天历史"恰好
+    只有 7 条——历史里只要有一个 degraded 日被跳过，计数上限就掉到 6，规则在
+    数学上永远无法激活。而降级模式**正是因为睡眠轨不可用才进入的**，恰恰是
+    最容易伴随数据质量问题的场景。
+
+    最坏情况 = 最长门槛 + 每两个达标日之间都插满 max_skip 天跳过。
+    留 30 天上限：再长也没有统计意义，且日志读取是每天一个小 JSON，成本可忽略。
+    """
+    rules = build_risk_rules(config)
+    max_skip = _max_skip_days(config)
+
+    longest = 1
+    for rule in rules.values():
+        need = rule.rolling_window if rule.uses_rolling() else max(
+            rule.consecutive_days, rule.consecutive_days_degraded or 0
+        )
+        longest = max(longest, need)
+
+    return min(longest + (longest - 1) * max_skip, 30)
+
+
+def _max_skip_days(config: dict | None = None) -> int:
+    """连续跳过多少天后打断持续性统计。"""
+    if config is None:
+        from src.utils.io import load_config
+        config = load_config()
+    return config.get("risk", {}).get("continuity", {}).get("max_skip_days", 3)
 
 
 def get_risk_feature_importance(risk_key: str, config: dict | None = None) -> dict[str, float]:

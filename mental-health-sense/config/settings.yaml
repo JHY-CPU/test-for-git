@@ -112,6 +112,17 @@ risk:
     attention: 1
     warning: 3
     severe: 5
+
+  # 持续性统计的日历语义。
+  # "连续 N 天"必须按自然日数，不能按日志记录条数：load_daily_results 取的是最近
+  # N 个文件，而两轨全不可用那天根本不生成日志。两者叠加会让设备离线前后的两段
+  # 偏离被拼成一段——实测 5 条日志跨越 22 个日历日仍数出 consecutive=5 → L3。
+  #
+  # 缺日与 degraded 日同样处理："既不累加也不打断"，但连续跳过超过 max_skip_days
+  # 就打断。超过三天没有可信数据，不该再假装这是同一段状态。
+  # 取 3 与 imputer.impute_sequence 的 max_forward_days 同源。
+  continuity:
+    max_skip_days: 3
   # 冷启动观察期（已取消：建档期延长到 35 天，EWMA 初始 =28 样本，动态阈值直接稳定）
   cold_start_observation_days: 0
 

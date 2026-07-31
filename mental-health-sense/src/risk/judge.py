@@ -17,7 +17,7 @@
 import numpy as np
 
 from src.baseline.scaler_utils import TRACKS, TRACK_SLEEP, TRACK_SOCIAL
-from src.risk.rules import classify_risk_type
+from src.risk.rules import classify_risk_type, required_history_days
 from src.utils.io import load_daily_results
 from src.utils.logger import get_logger
 from src.utils.status import COLD_START_STATUSES, STATUS_COLD_START, is_evaluable
@@ -25,6 +25,11 @@ from src.utils.status import COLD_START_STATUSES, STATUS_COLD_START, is_evaluabl
 logger = get_logger(__name__)
 
 RISK_LABELS = {0: "正常", 1: "关注", 2: "提醒", 3: "严重"}
+
+# 等级判定只看最近 7 个自然日。与风险类型的持续性统计分开：
+# 后者要按各自门槛回溯更远（circadian 降级模式要 7 天达标），
+# 但"最近状况有多严重"这个问题只该看最近一周。
+LEVEL_WINDOW_DAYS = 7
 
 
 def _track_history(daily_results: list[dict], track: str) -> list[dict]:
@@ -34,6 +39,45 @@ def _track_history(daily_results: list[dict], track: str) -> list[dict]:
         tr = day.get(track)
         if isinstance(tr, dict):
             out.append({**tr, "day_key": day.get("day_key") or day.get("date")})
+    return out
+
+
+def _within_recent_days(
+    track_history: list[dict],
+    days: int,
+    today_key: str | None = None,
+) -> list[dict]:
+    """
+    截到最近 `days` 个自然日（含基准日当天）。
+
+    拿不到日期时退回按条数取尾部——历史日志与单测桩可能没有 day_key，
+    这时保持旧行为，不因为缺一个字段就把整段历史丢掉。
+    """
+    from datetime import datetime, timedelta
+
+    if not track_history:
+        return []
+
+    if not today_key:
+        today_key = track_history[-1].get("day_key")
+    if not today_key:
+        return track_history[-days:]
+
+    try:
+        cutoff = datetime.strptime(today_key, "%Y-%m-%d") - timedelta(days=days - 1)
+    except ValueError:
+        return track_history[-days:]
+
+    out = []
+    for day in track_history:
+        key = day.get("day_key")
+        if not key:
+            continue
+        try:
+            if datetime.strptime(key, "%Y-%m-%d") >= cutoff:
+                out.append(day)
+        except ValueError:
+            continue
     return out
 
 
@@ -136,9 +180,14 @@ def _judge_single_track(
     track_history: list[dict],
     risk_cfg: dict,
     track: str | None = None,
+    today_key: str | None = None,
 ) -> dict:
     """
     对某一轨独立判等级。
+
+    Args:
+        today_key: 判定基准日。必须由调用方给出而不是取 track_history 的末条——
+            该轨今天恰好不可用时，末条是更早的一天，窗口会跟着往前漂。
 
     Returns:
         {"risk_level": int, "consecutive": int, "avg_anomaly": float,
@@ -153,7 +202,14 @@ def _judge_single_track(
     sustained_severity_threshold = thresholds_cfg.get("sustained_severity", 1.15)
     high_spike_severity_threshold = thresholds_cfg.get("high_spike_severity", 1.5)
 
-    usable = [d for d in track_history if is_evaluable(d.get("status"))]
+    # 等级判定窗口固定为最近 7 个**自然日**。
+    # 不能只取"最近 7 条 usable 记录"：判定层现在会加载远多于 7 天的日志
+    # （见 rules.required_history_days），按条数取会把窗口悄悄拉宽到几周，
+    # "连续 5 天"就可能由散落在两三周里的偏离日凑成。
+    usable = [
+        d for d in _within_recent_days(track_history, LEVEL_WINDOW_DAYS, today_key)
+        if is_evaluable(d.get("status"))
+    ]
 
     if not usable:
         return {
@@ -264,7 +320,12 @@ def judge_risk_level(
     risk_cfg = config.get("risk", {})
 
     if daily_results is None:
-        daily_results = load_daily_results(elder_id, n_days=7)
+        # 加载天数由规则门槛推导，不写死 7——circadian 降级模式要求连续 7 天达标，
+        # "今天 + 6 天历史"恰好只有 7 条，历史里有任何一个 degraded 日被跳过，
+        # 计数上限就掉到 6，规则在数学上永远不可能激活。详见 required_history_days。
+        daily_results = load_daily_results(
+            elder_id, n_days=required_history_days(config)
+        )
 
     if not daily_results:
         return {
@@ -279,10 +340,12 @@ def judge_risk_level(
         }
 
     # 1. 每轨独立判级（不跨轨比较绝对分）
+    today_key = daily_results[-1].get("day_key") or daily_results[-1].get("date")
     per_track = {}
     for track in TRACKS:
         per_track[track] = _judge_single_track(
-            _track_history(daily_results, track), risk_cfg, track=track
+            _track_history(daily_results, track), risk_cfg,
+            track=track, today_key=today_key,
         )
 
     evaluable = [t for t in TRACKS if per_track[t]["evaluable"]]
@@ -452,9 +515,14 @@ def quick_judge(elder_id: str, day_key: str, config: dict | None = None) -> dict
     判定后把"今天各风险类型是否达标（qualifies）"写回今天的推理日志，
     使次日的持续性统计能读到今天——这是风险类型能连续累积、最终激活的关键。
     """
-    from src.utils.io import save_daily_result
+    from src.utils.io import load_config, save_daily_result
 
-    daily_results = load_daily_results(elder_id, n_days=7)
+    if config is None:
+        config = load_config()
+
+    daily_results = load_daily_results(
+        elder_id, n_days=required_history_days(config)
+    )
     result = judge_risk_level(elder_id, daily_results, config)
 
     # 把今天的 qualifies 写回今天的推理日志（保留 inference 已写入的全部字段）
