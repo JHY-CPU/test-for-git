@@ -12,10 +12,9 @@ from src.baseline.scaler_utils import (
     get_feature_dim,
 )
 from src.data_pipeline.imputer import (
-    check_offline_status,
     impute_missing,
-    impute_sequence,
 )
+from src.data_pipeline.validator import check_prolonged_degradation
 
 
 def sleep_vec(values) -> np.ndarray:
@@ -110,39 +109,6 @@ class TestImputeSocialTrack:
         assert missing_names == []
 
 
-class TestImputeSequence:
-    def test_short_gap_forward_filled(self):
-        seq = np.array([
-            [1.0, 2.0, 3.0, 4.0, 5.0],
-            [np.nan] * 5,
-            [1.5, 2.5, 3.5, 4.5, 5.5],
-        ], dtype=np.float64)
-        filled, degraded = impute_sequence(seq, TRACK_SOCIAL, max_forward_days=3)
-        assert not np.any(np.isnan(filled))
-        np.testing.assert_array_almost_equal(filled[1], seq[0])
-
-    def test_long_gap_interpolated(self):
-        n = 8
-        seq = np.full((n, 5), np.nan, dtype=np.float64)
-        seq[0] = 0.0
-        seq[-1] = 7.0
-        filled, degraded = impute_sequence(seq, TRACK_SOCIAL, max_forward_days=2)
-        assert not np.any(np.isnan(filled))
-        # 线性插值：中间值应递增
-        assert filled[1, 0] < filled[3, 0] < filled[5, 0]
-        assert degraded["copresence_min"] > 0
-
-    def test_leading_gap_zero_filled(self):
-        seq = np.full((4, 8), 1.0, dtype=np.float64)
-        seq[0] = np.nan
-        filled, degraded = impute_sequence(seq, TRACK_SLEEP)
-        assert np.all(filled[0] == 0.0)
-
-    def test_wrong_dim_raises(self):
-        with pytest.raises(ValueError, match="expects"):
-            impute_sequence(np.zeros((5, 5)), TRACK_SLEEP)
-
-
 class TestTrackDims:
     def test_dims_are_eight_and_five(self):
         assert get_feature_dim(TRACK_SLEEP) == 8
@@ -150,22 +116,34 @@ class TestTrackDims:
 
 
 class TestOfflineCheck:
+    """离线判据统一由 validator 提供。
+
+    imputer.check_offline_status 曾是同一逻辑的第二份实现（只有默认值 3 vs 5
+    不同）。两份会漂的"离线判据"比没有更危险：改了一处忘另一处，界面与告警
+    就会给出互相矛盾的结论。已删除，测试改指向唯一的那份。
+    """
+
     def test_no_offline(self):
         quality = ["valid", "valid", "insufficient", "valid", "valid"]
-        assert not check_offline_status(quality, threshold=3)
+        assert not check_prolonged_degradation(quality, threshold=3)
 
     def test_offline_detected(self):
         quality = ["valid", "insufficient", "insufficient", "insufficient"]
-        assert check_offline_status(quality, threshold=3)
+        assert check_prolonged_degradation(quality, threshold=3)
 
     def test_offline_with_offline_marker(self):
         quality = ["valid", "insufficient", "offline", "offline"]
-        assert check_offline_status(quality, threshold=3)
+        assert check_prolonged_degradation(quality, threshold=3)
 
     def test_not_enough_data(self):
         quality = ["insufficient", "insufficient"]
-        assert not check_offline_status(quality, threshold=3)
+        assert not check_prolonged_degradation(quality, threshold=3)
 
     def test_threshold_custom(self):
         quality = ["insufficient", "insufficient"]
-        assert check_offline_status(quality, threshold=2)
+        assert check_prolonged_degradation(quality, threshold=2)
+
+    def test_degraded_also_counts_as_prolonged(self):
+        """degraded 也算"非 valid"——连续降级同样意味着失去监测能力"""
+        quality = ["valid", "degraded", "degraded", "degraded"]
+        assert check_prolonged_degradation(quality, threshold=3)

@@ -84,20 +84,10 @@ def get_feature_dim(track: str) -> int:
     return len(_TRACK_FEATURES[validate_track(track)])
 
 
-def get_feature_index(track: str, feature_name: str) -> int:
-    """取某特征在该轨向量中的下标"""
-    names = _TRACK_FEATURES[validate_track(track)]
-    if feature_name not in names:
-        raise ValueError(f"Feature {feature_name!r} not in track {track!r}")
-    return names.index(feature_name)
-
-
-def find_track_of_feature(feature_name: str) -> str:
-    """反查某特征属于哪一轨。跨轨规则（作息节律紊乱）需要它。"""
-    for track, names in _TRACK_FEATURES.items():
-        if feature_name in names:
-            return track
-    raise ValueError(f"Feature {feature_name!r} belongs to no track")
+# 已删除（2026-07-31）：get_feature_index() / find_track_of_feature()。
+# 两者零调用方、零测试。find_track_of_feature 的 docstring 写着"跨轨规则
+# （作息节律紊乱）需要它"，但 rules.py 的规则定义里轨名是直接写在
+# (track, feature, direction) 三元组里的，从来没走过反查。
 
 
 # ========== Scaler ==========
@@ -189,21 +179,6 @@ def load_scaler(filepath: str | Path) -> StandardScaler:
     return joblib.load(filepath)
 
 
-def get_scaler_stats(scaler: StandardScaler) -> dict:
-    """
-    获取scaler的统计信息（用于调试和监控）。
-
-    Returns:
-        {"mean": [...], "scale": [...], "var": [...], "n_features": int}
-    """
-    return {
-        "mean": scaler.mean_.tolist() if hasattr(scaler, "mean_") else None,
-        "scale": scaler.scale_.tolist() if hasattr(scaler, "scale_") else None,
-        "var": scaler.var_.tolist() if hasattr(scaler, "var_") else None,
-        "n_features": scaler.n_features_in_ if hasattr(scaler, "n_features_in_") else None,
-    }
-
-
-def check_scaler_fitted(scaler: StandardScaler) -> bool:
-    """检查scaler是否已拟合"""
-    return hasattr(scaler, "mean_")
+# 已删除（2026-07-31）：get_scaler_stats() / check_scaler_fitted()。
+# 零调用方、零测试；调试时 sklearn 的 scaler 对象本身就带 mean_ / scale_，
+# 不需要包一层。

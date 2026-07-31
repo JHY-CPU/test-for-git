@@ -213,3 +213,76 @@ class TestDeviationFreeze:
 
         loaded = TrackEWMAPools.load(tmp_path, "sleep", alpha=0.3)
         assert loaded.freeze_streak == 0
+
+
+class TestDayKeyDeduplication:
+    """★ 回归：同一自然日只能喂一次。
+
+    历史缺陷：infer_track 每次调用都无条件 update + 立即落盘，而"补算/重跑
+    某一天"是被明确预期的用法——save_daily_features 做了同日幂等覆盖，
+    daily_inference 的连续天数统计也专门跳过"今天自己的旧记录"。只有 EWMA
+    漏了这条：重跑一次 run_daily_pipeline --date X，那天的分就被喂进基线两次，
+    freeze_streak 也跟着多加一次。
+    """
+
+    @staticmethod
+    def _pools():
+        from src.baseline.ewma import TrackEWMAPools
+        return TrackEWMAPools("sleep", alpha=0.3, max_freeze_days=5)
+
+    def test_rerun_same_day_is_ignored(self):
+        pools = self._pools()
+        assert pools.update(1.0, day_key="2026-08-01")
+        assert pools.update(1.2, day_key="2026-08-02")
+        n_before = pools.n_samples()
+        threshold_before = pools.get_threshold(2.5)
+
+        assert not pools.update(1.2, day_key="2026-08-02"), "重跑同一天应被拒绝"
+        assert pools.n_samples() == n_before
+        assert pools.get_threshold(2.5) == threshold_before
+
+    def test_backfilling_older_day_is_ignored(self):
+        """乱序补算历史日同样要挡住：把早已过去的分当成最新观测喂进指数加权，
+        权重完全错位。"""
+        pools = self._pools()
+        pools.update(1.0, day_key="2026-08-05")
+        n_before = pools.n_samples()
+
+        assert not pools.update(5.0, day_key="2026-08-01")
+        assert pools.n_samples() == n_before
+
+    def test_next_day_still_accepted(self):
+        pools = self._pools()
+        pools.update(1.0, day_key="2026-08-01")
+        assert pools.update(1.1, day_key="2026-08-02")
+        assert pools.n_samples() == 2
+
+    def test_rerun_deviation_day_does_not_double_count_freeze(self):
+        """重跑冻结日不得让 freeze_streak 反复自增——否则 14 天上限提前触发、
+        基线过早重新学习这次异常。"""
+        pools = self._pools()
+        pools.update(1.0, is_deviation=False, day_key="2026-08-01")
+        pools.update(9.0, is_deviation=True, day_key="2026-08-02")
+        assert pools.freeze_streak == 1
+
+        pools.update(9.0, is_deviation=True, day_key="2026-08-02")
+        assert pools.freeze_streak == 1, "重跑同一冻结日不该再加一次"
+
+    def test_last_day_key_persisted(self, tmp_path):
+        """去重游标必须落盘：每天是独立进程，不持久化则重跑永远拦不住"""
+        from src.baseline.ewma import TrackEWMAPools
+
+        pools = self._pools()
+        pools.update(1.0, day_key="2026-08-01")
+        pools.save(tmp_path)
+
+        loaded = TrackEWMAPools.load(tmp_path, "sleep", alpha=0.3)
+        assert loaded.last_day_key == "2026-08-01"
+        assert not loaded.update(1.0, day_key="2026-08-01")
+
+    def test_without_day_key_behaves_as_before(self):
+        """不传 day_key 时保持旧行为（建档预热等场景按序喂入）"""
+        pools = self._pools()
+        for _ in range(3):
+            assert pools.update(1.0)
+        assert pools.n_samples() == 3

@@ -3,10 +3,10 @@
 
 策略：
     - 单日单个特征缺失 → 前向填充（取昨日值）
-    - 连续缺失≤3天 → 前向填充
-    - 连续缺失>3天 → 线性插值（如有前后数据）或标记为质量降级
     - 某轨单日≥3个特征缺失 → 该轨标记"数据不足"
-    - 连续≥3天数据不足 → 触发"设备离线"告警
+
+数据质量四态与"设备离线"判据归 validator 管（validate_daily_data /
+check_prolonged_degradation），本模块只负责填充。
 
 例外：copresence_min 禁止前向填充。其它特征反映老人自身的行为习惯，
 昨天的值对今天有预测力；而"今天有没有人来"取决于子女的安排，
@@ -80,103 +80,14 @@ def impute_missing(
     return filled, len(final_missing_list), final_missing_list
 
 
-def impute_sequence(
-    feature_sequence: np.ndarray,
-    track: str,
-    max_forward_days: int = 3,
-) -> tuple[np.ndarray, dict[str, int]]:
-    """
-    对某轨特征序列进行智能填充（前向填充 + 线性插值）。
-
-    对于连续缺失超过max_forward_days的特征，如果前后都有数据，使用线性插值。
-
-    Args:
-        feature_sequence: (n_days, feature_dim) 特征序列
-        track: "sleep" / "social"
-        max_forward_days: 前向填充的最大天数，超过则尝试插值
-
-    Returns:
-        (filled_sequence, degraded_features)
-        - filled_sequence: 填充后的序列
-        - degraded_features: 各特征的质量降级天数统计
-    """
-    names = get_feature_names(track)
-    dim = get_feature_dim(track)
-
-    if feature_sequence.ndim != 2 or feature_sequence.shape[1] != dim:
-        raise ValueError(
-            f"Track {track!r} expects (n_days, {dim}), got {feature_sequence.shape}"
-        )
-
-    n_days = feature_sequence.shape[0]
-    filled = feature_sequence.copy()
-    degraded_features = {name: 0 for name in names}
-
-    for feat_idx in range(dim):
-        feature_col = filled[:, feat_idx]
-        missing_mask = np.isnan(feature_col)
-
-        if not missing_mask.any():
-            continue
-
-        # 找出连续缺失段
-        i = 0
-        while i < n_days:
-            if missing_mask[i]:
-                start = i
-                while i < n_days and missing_mask[i]:
-                    i += 1
-                end = i - 1
-                gap_length = end - start + 1
-
-                if start > 0 and not np.isnan(feature_col[start - 1]):
-                    fill_value = feature_col[start - 1]
-                    if gap_length <= max_forward_days:
-                        # 短缺失：前向填充
-                        feature_col[start:end + 1] = fill_value
-                    else:
-                        # 长缺失：尝试线性插值
-                        if end < n_days - 1 and not np.isnan(feature_col[end + 1]):
-                            next_value = feature_col[end + 1]
-                            interp_values = np.linspace(
-                                fill_value, next_value, gap_length + 2
-                            )[1:-1]
-                            feature_col[start:end + 1] = interp_values
-                            degraded_features[names[feat_idx]] += gap_length
-                        else:
-                            feature_col[start:end + 1] = fill_value
-                            degraded_features[names[feat_idx]] += gap_length
-                else:
-                    # 无前置数据，填充0
-                    feature_col[start:end + 1] = 0.0
-                    degraded_features[names[feat_idx]] += gap_length
-            else:
-                i += 1
-
-        filled[:, feat_idx] = feature_col
-
-    return filled, degraded_features
-
-
-def check_offline_status(
-    recent_quality: list[str],
-    threshold: int = 3,
-) -> bool:
-    """
-    检查是否应触发"设备离线"告警。
-
-    Args:
-        recent_quality: 最近N天的数据质量标记列表
-        threshold: 连续数据不足天数阈值，默认3天
-
-    Returns:
-        True表示应触发离线告警
-    """
-    if len(recent_quality) < threshold:
-        return False
-
-    for quality in recent_quality[-threshold:]:
-        if quality == "valid":
-            return False
-
-    return True
+# 已删除（2026-07-31）：
+#
+#   impute_sequence()      —— 序列级前向填充 + 线性插值。零调用方：每日链路走的是
+#       单日的 impute_missing，训练/推理都只读 data_quality=="valid" 的行，从来
+#       不需要对整段序列做填充。属推测性通用化，需要时从 git 历史取回。
+#
+#   check_offline_status() —— 与 validator.check_prolonged_degradation 是逐行
+#       等价的重复实现（同样是"末尾 threshold 条全部 != valid"），只有默认值
+#       不同（3 vs 5）。两份会漂的"离线判据"比没有更危险：改了一处忘另一处，
+#       界面与告警就会给出互相矛盾的结论。统一保留 validator 那份——
+#       四态数据质量的定义本来就归 validator 管。

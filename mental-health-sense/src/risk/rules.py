@@ -413,8 +413,7 @@ def _walk_back(
       两者都是"这天我们不知道"：缺日是压根没测，降级是测得不可信。既不累加
       也不打断，与 validator 的四态设计一致。但不能无上限地跨过去——连续跳过
       超过 max_skip 天就打断，否则一次长时间离线又会把两段无关的偏离粘起来。
-      max_skip 默认 3，与 imputer.impute_sequence 的 max_forward_days 同源：
-      超过三天没有可信数据，就不该再假装这是同一段状态。
+      max_skip 默认 3：超过三天没有可信数据，就不该再假装这是同一段状态。
     """
     from datetime import datetime, timedelta
 

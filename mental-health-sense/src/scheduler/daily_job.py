@@ -131,6 +131,11 @@ def run_daily_pipeline(
                         config=config,
                     )
 
+                # 8. 产出给 MPDD-AVP 的单向证据契约。
+                # 此前 build_mpdd_evidence 定义了、单测覆盖了，但没有任何链路
+                # 真正产出过它——契约文档描述的交付物在磁盘上并不存在。
+                _emit_mpdd_evidence(elder_id, day_key, inference_result, risk_result)
+
         except Exception as e:
             logger.error(f"  └─ 推理/判定失败: {e}", exc_info=True)
     else:
@@ -157,6 +162,38 @@ def run_daily_pipeline(
         "risk_result": risk_result,
         "status": status,
     }
+
+
+def _emit_mpdd_evidence(
+    elder_id: str,
+    day_key: str,
+    inference_result: dict,
+    risk_result: dict,
+) -> None:
+    """
+    把当日的双轨证据落到 data/logs/mpdd_evidence/{elder}_{day}.json。
+
+    单向契约：GRU → MPDD-AVP，本系统不消费对方任何输出（防止基线被抑郁判定
+    反向污染，与 weekly_retrain 只用正常天微调是同一条防污染原则）。
+
+    产出失败不得影响主链路：证据契约是给下游的旁路输出，写不出来只该记一条
+    错误日志，不能把已经算好的风险判定连累掉。
+    """
+    try:
+        import json
+
+        from src.risk.judge import build_mpdd_evidence
+        from src.utils.io import get_log_dir
+
+        evidence = build_mpdd_evidence(
+            elder_id, day_key, inference_result, risk_result
+        )
+        out_dir = get_log_dir("mpdd_evidence")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / f"{elder_id}_{day_key}.json", "w", encoding="utf-8") as f:
+            json.dump(evidence, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"  └─ MPDD 证据契约产出失败（不影响主链路）: {e}")
 
 
 def _process_track(
@@ -204,6 +241,16 @@ def _process_track(
     capability_note = describe_track_capability(track, missing_names)
     if capability_note:
         logger.warning(f"  └─ [{track}] {capability_note}")
+
+    # 社交轨的 5 维并非相互独立（RA/IV/activity_counts 同源于小时活动序列），
+    # 设备故障是成组失效而非随机掉维。缺维时给出成组诊断，运维才知道该去看哪台设备——
+    # 只报"缺了 2 维"没法定位是 C6c 离线还是 T1C 欠压。
+    if track == "social" and missing_names:
+        from src.data_pipeline.aggregator import diagnose_social_failure
+
+        diagnosis = diagnose_social_failure(feature_values)
+        for reason in diagnosis["reasons"]:
+            logger.warning(f"  └─ [social] 成组失效诊断: {reason}")
 
     save_daily_features(
         elder_id, day_key, filled_vec, track,

@@ -111,7 +111,10 @@ def generate_weekly_report(
             risk_label=risk_result.get("risk_label", "正常"),
             risk_types=risk_type_names,
             deviation_days=sum(1 for r in week_results if r.get("is_deviation", False)),
-            **{f"{k}_trend": v for k, v in trends.items()},
+            # trends 的键就是 generate_rule_based_report 的形参名
+            # （social_trend / sleep_trend / social_week_change ...），
+            # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
+            **trends,
         )
 
     # 6. 组装完整Markdown周报
@@ -334,7 +337,10 @@ def _generate_with_llm(
             risk_label=risk_result.get("risk_label", "正常"),
             risk_types=[risk_types_str] if risk_types_str != "无" else [],
             deviation_days=deviation_days,
-            **{f"{k}_trend": v for k, v in trends.items()},
+            # trends 的键就是 generate_rule_based_report 的形参名
+            # （social_trend / sleep_trend / social_week_change ...），
+            # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
+            **trends,
         )
     except Exception as e:
         logger.error(f"LLM调用失败: {e}，回退到规则模板")
@@ -345,7 +351,10 @@ def _generate_with_llm(
             risk_label=risk_result.get("risk_label", "正常"),
             risk_types=[risk_types_str] if risk_types_str != "无" else [],
             deviation_days=deviation_days,
-            **{f"{k}_trend": v for k, v in trends.items()},
+            # trends 的键就是 generate_rule_based_report 的形参名
+            # （social_trend / sleep_trend / social_week_change ...），
+            # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
+            **trends,
         )
 
 

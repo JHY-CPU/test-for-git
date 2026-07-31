@@ -128,7 +128,7 @@ risk:
   #
   # 缺日与 degraded 日同样处理："既不累加也不打断"，但连续跳过超过 max_skip_days
   # 就打断。超过三天没有可信数据，不该再假装这是同一段状态。
-  # 取 3 与 imputer.impute_sequence 的 max_forward_days 同源。
+  # 取 3：超过三天没有可信数据，就不该再假装这是同一段状态。
   continuity:
     max_skip_days: 3
   # 冷启动观察期（已取消：建档期延长到 35 天，EWMA 初始 =28 样本，动态阈值直接稳定）

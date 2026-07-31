@@ -183,13 +183,9 @@ def get_daily_vector(elder_id: str, day_key: str, track: str) -> np.ndarray:
     return vectors[0]
 
 
-def get_recent_vectors(elder_id: str, track: str, days: int = 30) -> np.ndarray:
-    """获取某轨最近 N 天的特征矩阵 (n, feature_dim)，按 day_key 升序"""
-    names = get_feature_names(track)
-    df = load_features_csv(elder_id, track)
-    df = df.sort_values(DAY_KEY_COL, ascending=False)
-    df_recent = df.head(days).sort_values(DAY_KEY_COL)
-    return df_recent[names].to_numpy(dtype=np.float64)
+# 已删除（2026-07-31）：get_recent_vectors()。零调用方、零测试；且它按"最近 N 条
+# 记录"取数而非按自然日，与本轮统一的日历语义相悖，留着容易被误用。
+# 需要按日期范围取特征用 get_feature_vectors(start_date, end_date, track)。
 
 
 # ========== 基线模型保存/加载 ==========

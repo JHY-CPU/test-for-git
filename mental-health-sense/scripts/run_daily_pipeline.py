@@ -16,8 +16,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.scheduler.daily_job import run_daily_pipeline
-from src.risk.judge import quick_judge
-from src.risk.alert import trigger_alert
 from src.utils.logger import setup_logger, get_logger
 
 logger = get_logger(__name__)
