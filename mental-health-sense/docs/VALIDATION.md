@@ -29,8 +29,8 @@
 ```
 证据强度  弱 ─────────────────────────────────────────────► 强
 
-层次 A  ┌─ 单元测试（已有 133 个）
-（代码）└─ 端到端链路冒烟测试（daily_job 单入口 + 统一系统生产链路）
+层次 A  ┌─ 单元测试（已有 475 个）
+（代码）└─ 端到端链路冒烟测试（daily_job 单入口）
 
 层次 B  ┌─ 非循环仿真（打破"按答案出题"）
 （设计）├─ 8 项消融实验
@@ -53,7 +53,7 @@
 
 当前 `tests/` 下 475 个用例覆盖聚合、填充、GRU、EWMA（含偏离日冻结）、健康门禁、
 风险规则与判定（含方向闸门）、
-指标计算、实时↔每日衔接（自然日聚合 / 墙上时钟窗口 / 缺失标记）、训练循环 early-stopping 等。运行：
+指标计算、训练循环 early-stopping 等。运行：
 
 ```bash
 pytest tests/ -v
@@ -72,16 +72,13 @@ EWMA 阈值 → 风险分类 → 预警"
 python scripts/generate_simulation_data.py   # 造数据
 python scripts/train_all_baselines.py         # 冷启动训练
 python scripts/run_daily_pipeline.py --date <注入异常期内某天>
-python scripts/health_check.py                # 完整性检查
 ```
 
 **验收标准**：注入异常期内能产出非零 anomaly_score 并逐级升级；正常期不误报；
-`daily_inference/*.json` 字段完整、status 流转符合预期（cold_start → observation → success）。
+`daily_inference/*.json` 字段完整、status 流转符合预期（建档期 `cold_start_fallback` → 建档后 `success`）。
 
-> **入口覆盖说明**：`run_daily_pipeline`（`daily_job`）是完整实现的每日入口，上面命令走的就是它。
-> `UnifiedScheduler`（统一系统生产链路）此前的每日推理是 TODO 桩，冒烟只覆盖 `daily_job` 单入口；
-> 现已打通——统一调度器真正调用同一个 `run_daily_pipeline`，三路传感器数据统一取自 `data/raw/`。
-> 因此层次 A 的冒烟结论现已覆盖"统一系统"这条生产链路（详见 `docs/TODO.md` P0）。
+> **入口说明**：`run_daily_pipeline`（`daily_job`）是完整实现的每日入口，上面命令走的就是它，
+> 三路传感器数据统一取自 `data/raw/`。
 
 > ⚠️ **重要认知**：层次 A 全过 **不代表系统有用**。它只证明"我设计的逻辑被正确执行了"，
 > 不证明"这个逻辑能识别真实的心理下滑"。不要把 A 的绿灯误读成 C 的结论。
@@ -97,7 +94,7 @@ python scripts/health_check.py                # 完整性检查
 ### 3.1 前提：先把仿真改成"非循环"的（关键）
 
 **当前仿真的致命问题**：`generate_simulation_data.py` 注入的异常方向
-（睡眠恶化：sleep_efficiency↓ + deep_sleep_ratio↓ + sfi↑ + hrv_rmssd↓）**与 `rules.py`
+（睡眠恶化：sleep_efficiency↓ + waso_min↑ + bed_exit_count↑）**与 `rules.py`
 要检测的方向完全一致**。等于"按检测器的标准答案出题，再拿去考检测器"，必然检出。
 这只能证明链路通（属层次 A），**证明不了判别能力**。
 
@@ -107,7 +104,7 @@ python scripts/health_check.py                # 完整性检查
    必须带真实噪声，"误报率"才是可测量的真数字，而非恒为 0 的摆设。
 2. **异常注入多样化**：除了当前的"典型全特征异常"，增加
    - 渐变型（特征缓慢漂移，考验提前预警能力）
-   - 部分型（只有 2/6 个特征异常，考验方向匹配的鲁棒性）
+   - 部分型（只有部分特征异常，考验方向匹配的鲁棒性）
    - 模糊型（幅度只在阈值附近擦线，考验幅度门槛）
 3. **加入混淆项（negative hard cases）**：
    - "周末所以话少" → 应 **不** 报社交孤独
