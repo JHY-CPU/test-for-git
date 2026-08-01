@@ -176,6 +176,33 @@ def _resolve_actions_for(config: dict | None, prev_level: int) -> dict:
     return merged
 
 
+def _event_gap_days(config: dict | None, channel: str) -> int:
+    """事件断段窗口（隔多久没观测就算两段无关的事件），**按 channel 取**。
+
+    ★ 两条流的观测节奏差一个数量级，不能共用一个窗口。
+
+      baseline 是每日批处理，复用 `risk.continuity.max_skip_days`——与
+      `continuity.walk_back_days` 同一套断段语义，"超过三天没有可信数据，
+      就不该再假装这是同一段状态"。
+
+      depression 是**稀疏事件驱动**：要"有正脸 + 有连续语音"的片段，独居老人
+      可能几周才有一次（见 run_depression_assessment.py 的模块 docstring）。
+      套用 3 天的话，任何两次相邻评估都 > 3+1 天 → 每次都判 TRANSITION_STARTED
+      → **去重完全失效**，而去重正是 alert_state 存在的理由。实测两次间隔 7 天
+      的"重度"评估各推送一次、notify_count 各自归 1。
+
+      改用评估有效期 `depression.assessment.valid_days`：评估还在有效期内，
+      就是"它仍代表当前状况"，那两次评估描述的就是同一段事件。语义自洽，
+      也不必再引入一个会与它漂开的第二个数字。
+    """
+    cfg = config or {}
+    if channel == alert_state.CHANNEL_DEPRESSION:
+        return int(
+            ((cfg.get("depression") or {}).get("assessment") or {}).get("valid_days", 30)
+        )
+    return int(((cfg.get("risk") or {}).get("continuity") or {}).get("max_skip_days", 3))
+
+
 def _risk_keys_of(risk_types: list[dict]) -> list[str]:
     """取稳定的机器键，不用中文展示名。
 
@@ -249,7 +276,7 @@ def trigger_alert(
     cfg = config or {}
     alert_cfg = cfg.get("alert") or {}
     events_cfg = alert_cfg.get("events") or {}
-    max_skip_days = (cfg.get("risk", {}).get("continuity", {}) or {}).get("max_skip_days", 3)
+    event_gap_days = _event_gap_days(cfg, channel)
     repeat_days = int(actions_config.get("repeat_days", 0) or 0)
 
     state = alert_state.load_state(elder_id)
@@ -262,7 +289,7 @@ def trigger_alert(
 
     transition, should_notify = alert_state.decide(
         channel_state, day_key, normalized_level, risk_keys,
-        events_cfg, repeat_days, max_skip_days,
+        events_cfg, repeat_days, event_gap_days,
     )
 
     # ★ 缓解走独立的动作表：它是**状态迁移**的通知，不是"L0 这个等级"的动作。

@@ -33,6 +33,7 @@ from src.data_pipeline.validator import (
     QUALITY_INSUFFICIENT,
     check_prolonged_degradation,
     describe_track_capability,
+    escalate_if_offline,
     is_usable_for_inference,
     validate_daily_data,
 )
@@ -281,12 +282,20 @@ def _process_track(
         # 而 0 在原始量纲下是极端离群值（实测 night_hr_mean=0 → z=−15.2）。
         # 虽然这行被标了 insufficient、不进训练也不进推理，但它仍然是一条
         # 事实错误的记录，排查时会误导人。
+        #
+        # ★ 离线升级必须在**这条**分支上也做一次。
+        #   聚合阶段抛异常时整个 validate_daily_data 都被跳过，而离线判据原本只
+        #   长在它里面——于是 QUALITY_OFFLINE 在生产链路里不可达（实测连跑 7 天
+        #   全缺仍只记 insufficient）。判据抽到 validator.escalate_if_offline，
+        #   两个产出点共用一份，绝不各写一份。
+        recent_quality = _get_recent_quality(elder_id, track, before_day_key=day_key)
+        quality = escalate_if_offline(QUALITY_INSUFFICIENT, recent_quality)
         placeholder = np.full(len(names), np.nan, dtype=np.float64)
         save_daily_features(
             elder_id, day_key, placeholder, track,
-            missing_count=e.missing_count, data_quality=QUALITY_INSUFFICIENT,
+            missing_count=e.missing_count, data_quality=quality,
         )
-        return QUALITY_INSUFFICIENT
+        return quality
 
     # 前向填充基准：该轨最近一条 valid 记录
     prev_vec = _get_prev_valid_vector(elder_id, track, day_key)
@@ -446,7 +455,11 @@ def _apply_cold_start_fallbacks(
     )
 
     from src.utils.io import load_daily_results, save_daily_result
-    recent = load_daily_results(elder_id, n_days=7)
+    # end_day_key 必须钉在被处理的那一天：不给会拿磁盘上**最新**几天的日志去数
+    # 连续偏离天数，补算历史日时窗口整体漂到最近几天（VALIDATION §9 缺陷①
+    # "补算历史日判成最新日"的残留入口）。与 inference.daily_inference 里的
+    # 同一段统计保持一致。
+    recent = load_daily_results(elder_id, n_days=7, end_day_key=day_key)
     consecutive = 0
     for day_result in reversed(recent):
         if day_result.get("day_key") == day_key:

@@ -142,6 +142,10 @@ def _maybe_alert(
       绝对分"：它们不是同一件事，不该共用一个计数器。一条线在冷却中，
       不该让另一条线的新事件被顺带静默。
 
+      "独立"也包括**事件断段窗口**：本通道是稀疏事件驱动（几周才有一次合格
+      片段），套用 baseline 的 max_skip_days=3 会让每次评估都判成新事件、
+      去重完全失效。窗口改按 channel 取，见 alert._event_gap_days。
+
     ⚠️ `depression.alert` 默认 false，理由**不是**冷却缺失（那条已经解决），
       而是当前 checkpoint 在其验证集上对全部 9 个样本预测同一类别
       （Macro-F1 0.286），且未在本机位 / 本人身上校准。线接好、开关不开：
@@ -156,13 +160,36 @@ def _maybe_alert(
     from src.depression.status import is_displayable
 
     if not is_displayable(payload.get("status")):
+        # 评估失败 / 无片段 / 已过期：我们不知道此刻的状况。
+        # 既不该开事件，也**不该关**已有的事件——"测不到"不等于"好转"，
+        # 同 judge._has_adverse_movement 拿不到方向元数据时不压等级。
         return
 
     level_name = (payload.get("result") or {}).get("level")
-    risk_level = _LEVEL_TO_RISK.get(level_name, 0)
-    if risk_level <= 0:
+
+    # ★ 认不出的等级名必须原地返回，不能落到 `.get(..., 0)` 的 0 上。
+    #
+    #   删掉"risk_level<=0 就 return"之后，0 的语义变成了"缓解"——于是一个
+    #   **不认识的**等级名会去关闭活跃事件并推一条「已回到个人常态范围」，
+    #   与上面 is_displayable 那条"测不到不等于好转"自相矛盾。
+    #   level 直接取自 checkpoint 的 probabilities 键名（aggregate._average_probabilities），
+    #   换一个类别命名不同的 checkpoint 就会踩到。
+    if level_name not in _LEVEL_TO_RISK:
+        logger.error(
+            f"  └─ 未知的抑郁等级 {level_name!r}（已知: {sorted(_LEVEL_TO_RISK)}），"
+            f"本次不触发预警。checkpoint 的类别命名可能变了，需同步 _LEVEL_TO_RISK。"
+        )
         return
 
+    risk_level = _LEVEL_TO_RISK[level_name]
+
+    # ★ risk_level == 0（评估判"正常"）也必须往下走，不能提前 return。
+    #
+    #   它是**缓解**：要靠 trigger_alert 把活跃事件关掉并发一条"过去了"。
+    #   提前返回的后果与 daily_job 修过的那条完全同型（见 daily_job.py 第 7 步
+    #   的注释："旧写法在 L0 那天直接跳过，事件永远停在最后一次 L2/L3 上"）——
+    #   实测抑郁事件在评估回到"正常"后仍 active=True，周报的「预警回执」
+    #   无限期显示"情绪状态评估 持续中，第 N 天"，家属也收不到缓解通知。
     try:
         from src.risk.alert import trigger_alert
         from src.risk.alert_state import CHANNEL_DEPRESSION
@@ -170,7 +197,12 @@ def _maybe_alert(
         trigger_alert(
             elder_id=elder_id,
             risk_level=risk_level,
-            risk_types=[{"risk_key": "depression", "risk_type": "情绪状态评估"}],
+            # 判"正常"时不带类型：此刻没有活跃的风险类型，与 daily_job 在 L0 那天
+            # 传 risk_result["risk_types"]（空表）保持一致。
+            risk_types=(
+                [{"risk_key": "depression", "risk_type": "情绪状态评估"}]
+                if risk_level > 0 else []
+            ),
             config=config,
             day_key=day_key,
             channel=CHANNEL_DEPRESSION,

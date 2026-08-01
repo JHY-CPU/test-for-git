@@ -29,20 +29,8 @@ START = "2026-07-01"
 N_DAYS = 60
 
 
-@pytest.fixture
-def sandbox(tmp_path, monkeypatch):
-    """把项目根目录重定向到 tmp_path，所有产物落在临时目录里"""
-    import src.utils.io as io_mod
-
-    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
-    real_root = Path(__file__).resolve().parent.parent
-    for name in ("settings.yaml", "feature_weights.json"):
-        (tmp_path / "config" / name).write_text(
-            (real_root / "config" / name).read_text(encoding="utf-8"), encoding="utf-8"
-        )
-
-    monkeypatch.setattr(io_mod, "get_project_root", lambda: tmp_path)
-    return tmp_path
+# sandbox fixture 已上移到 tests/conftest.py（多个测试文件都要用真实 data/ 布局，
+# 各写一份会漂）。这里直接按名字取用。
 
 
 @pytest.fixture

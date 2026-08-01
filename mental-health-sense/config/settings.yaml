@@ -220,9 +220,17 @@ alert:
     #   与"长期降级和长期正常必须可区分"是同一条原则。
     weekly_receipt: true
 
-  # 事件边界复用 risk.continuity.max_skip_days（默认 3）：
-  # 设备离线一段时间后，不该把两段无关的风险期粘成同一个事件——
-  # 与 continuity.walk_back_days 的断段语义保持一致。
+  # 事件边界（隔多久没观测就算两段无关的事件）**按 channel 取**，
+  # 由 alert._event_gap_days 决定，没有独立配置键：
+  #   baseline   → risk.continuity.max_skip_days（默认 3）。设备离线一段时间后，
+  #                不该把两段无关的风险期粘成同一个事件，与
+  #                continuity.walk_back_days 的断段语义保持一致。
+  #   depression → depression.assessment.valid_days（默认 30）。抑郁评估是稀疏
+  #                事件驱动的（要"有正脸 + 有连续语音"的片段，几周才有一次），
+  #                套用 3 天会让**每次评估都判成新事件**、去重完全失效。
+  #                评估还在有效期内 = 它仍代表当前状况 = 同一段事件。
+  #
+  # 不给 depression 单独配一个数字，是为了不让同一个 30 在两处漂开。
 
 # ===== LLM 周报 =====
 report:

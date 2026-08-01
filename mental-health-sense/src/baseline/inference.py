@@ -52,6 +52,7 @@ from src.utils.io import (
 )
 from src.utils.logger import get_logger
 from src.utils.status import (
+    COLD_START_STATUSES,
     STATUS_COLD_START,
     STATUS_DATA_INSUFFICIENT,
     STATUS_OBSERVATION,
@@ -118,6 +119,23 @@ def _load_prior_thresholds(elder_id: str, day_key: str, track: str) -> dict | No
 
     if not isinstance(prior_track, dict):
         return None
+
+    # ★ 只复用**同一条产出路径**写下的阈值，量纲不同的绝不能互相顶替。
+    #
+    #   建档期的日子走 cold_start_fallback，它落盘的三个阈值都等于
+    #   `cold_start.fallback_sigma`（稳健加权 |z| 的量纲，默认 3.0）；GRU 轨是
+    #   加权归一化残差（正常 0.5~1.0、阈值 1.3~1.6）。
+    #
+    #   建档完成后补算一个建档期内的日子会同时满足两个条件：基线文件已存在
+    #   （走 GRU 路径）、`day_key <= ewma.last_day_key`（已喂过 → 判为重跑），
+    #   于是把 3.0 当成 GRU 轨的 dynamic_threshold —— `is_deviation` 恒为 False，
+    #   而该字段驱动 consecutive / risk_type_qualifies / 微调排除集 / 周报统计。
+    #
+    #   与 judge._severity 的"同一个绝对常数对两者不是同一件事"是同一条
+    #   量纲不可比；幂等复用也不该跨尺度。
+    if prior_track.get("status") in COLD_START_STATUSES:
+        return None
+
     keys = ("static_threshold", "ewma_threshold", "dynamic_threshold")
     if not all(isinstance(prior_track.get(k), (int, float)) for k in keys):
         return None

@@ -40,6 +40,17 @@
   这是拿误报换漏报，比修复前更糟。`decide()` 里升级分支排在所有抑制判据
   **之前**，且无视 acknowledged。tests/test_alert_events.py 有专门的守门员用例。
 
+★ 第二条不变量：通道观测游标必须跨事件保留
+
+  `last_processed_day` 记的是"这条通道总共处理到哪一天"，与事件内的
+  `last_seen_day` 是两个东西：前者跨事件、只增不减，后者随事件一起结束。
+  `decide` 靠前者挡住乱序补算——**早于游标的历史日一律不动状态、不通知**。
+
+  两者合并过一次，代价是实测出来的：事件一 RESOLVED，`_empty_channel()` 把
+  游标一起清掉，通道失忆，此后补算任何一个历史高危日都会被判成"新事件"并
+  **真的推送给子女**——一条关于上个月的「提醒」，`started_day` 还锚在过去。
+  与 `ewma.update` 用 `day_key <= last_day_key` 拒收乱序补算是同一条原则。
+
 ★ 为什么状态必须落盘
 
   这是每日批处理，进程每天起一次就退，内存态活不过今天。与 EWMA 的
@@ -57,7 +68,9 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = "1.0.0"
+# 1.1.0：channel 增加 last_processed_day（通道级观测游标）。
+# 老文件（1.0.0，无该字段）由 load_state 用 last_seen_day 兜底，见那里的说明。
+SCHEMA_VERSION = "1.1.0"
 LOG_TYPE = "alert_state"
 DATE_FMT = "%Y-%m-%d"
 
@@ -104,12 +117,25 @@ def _empty_channel() -> dict:
         "level": 0,
         "risk_keys": [],
         "started_day": None,
+        # 事件内游标：当前这段风险期最后一次被观测是哪天。事件结束即失效。
         "last_seen_day": None,
         "last_notified_day": None,
         "last_notified_level": 0,
         "notify_count": 0,
         "acknowledged": False,
         "acknowledged_at": None,
+        # ★ 通道级游标：这条通道**总共**处理到哪一天，跨事件保留、只增不减。
+        #
+        #   与 last_seen_day 分开，因为两者回答的是不同问题：
+        #     last_seen_day      当前事件断没断（事件内，随事件一起结束）
+        #     last_processed_day 这次是不是往回补算（通道级，必须跨事件活着）
+        #   活跃事件内两者同值，所以拆开不改变任何既有行为。
+        #
+        #   合并成一个的后果是实测过的：事件一 RESOLVED，_empty_channel() 把
+        #   last_seen_day 一起清掉，通道就失忆了，此后补算任何一个历史高危日都会
+        #   走 decide 第 2 条判成"新事件"并**真的推送给子女**——一条关于上个月的
+        #   「提醒」，还把 started_day 锚在过去。见 decide 第 0 条。
+        "last_processed_day": None,
     }
 
 
@@ -152,6 +178,27 @@ def load_state(elder_id: str) -> dict:
                 # 向后兼容（同 ewma.from_dict 的 data.get(..., 默认) 写法）
                 merged = _empty_channel()
                 merged.update({k: v for k, v in ch.items() if k in merged})
+
+                # ★ last_processed_day 不能只按默认补 None。
+                #
+                #   2026-08-02 之前写下的状态文件没有这个字段，补成 None 会让
+                #   decide 第 0 条的守卫在这些文件上**完全失效**（_days_between
+                #   拿到 None 直接返回 None，判据被跳过）——而旧代码那版守卫读的是
+                #   last_seen_day，在同一批文件上恰恰是**挡得住**的。不兜底的话，
+                #   这次"修复"对所有存量老人反而是回归。
+                #
+                #   实测（仓库里真实的 data/logs/alert_state/E001.json：
+                #   active=true、last_seen_day=2026-08-29、acknowledged=true）：
+                #   照文档跑 `run_daily_pipeline.py --date 2026-08-15` 判 L3 →
+                #   旧代码 none/不通知；不兜底的新代码 **escalated + 强制响铃 +
+                #   惊动网格员**，还把 acknowledged 清掉、last_seen_day 拨回 8-15。
+                #
+                #   用 last_seen_day 兜底是安全的：活跃事件里两者本就同值；而新代码
+                #   保证事件关闭后 last_processed_day 非空，所以"本字段空、
+                #   last_seen_day 非空"只可能来自老文件。
+                if not merged.get("last_processed_day"):
+                    merged["last_processed_day"] = merged.get("last_seen_day")
+
                 state["channels"][name] = merged
             elif ch is not None:
                 logger.error(f"预警状态的 {name} 通道结构异常，已重置该通道")
@@ -176,6 +223,37 @@ def _days_between(later: str | None, earlier: str | None) -> int | None:
         return None
 
 
+def _is_day_key(value) -> bool:
+    """是不是一个可解析的 `YYYY-MM-DD`。"""
+    if not value:
+        return False
+    try:
+        datetime.strptime(value, DATE_FMT)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _max_day(a: str | None, b: str | None) -> str | None:
+    """两个 day_key 里较晚的那个（用于让通道游标只增不减）。
+
+    `YYYY-MM-DD` 的字典序即时间序，不必再解析一次来比大小——但要挡住两种输入：
+
+      - None：补算历史日时 b 更早，游标必须原地不动，否则第 0 条的守卫
+        会被自己拨回去。
+      - **不可解析的脏值**：它一旦写进游标，`_days_between` 此后恒返回 None，
+        该通道的乱序守卫就**永久静默失效**（而且没有任何报错线索）。
+        宁可丢弃这一次推进，也不要让游标变成毒药。
+    """
+    a = a if _is_day_key(a) else None
+    b = b if _is_day_key(b) else None
+    if not a:
+        return b
+    if not b:
+        return a
+    return a if a >= b else b
+
+
 def decide(
     channel_state: dict,
     day_key: str,
@@ -183,12 +261,18 @@ def decide(
     risk_keys: list[str],
     events_cfg: dict,
     repeat_days: int,
-    max_skip_days: int = 3,
+    event_gap_days: int = 3,
 ) -> tuple[str, bool]:
     """给定当前事件状态与今天的判定，决定发不发通知。
 
     ★ 纯函数：不读文件、不写文件、不看时钟。这样它能被穷举测试，
       而"要不要发通知"这件事的全部逻辑都集中在一处可审查的地方。
+
+    Args:
+        event_gap_days: 隔多久没有观测就算两段无关的事件。**按 channel 取**，
+            由 alert._event_gap_days 决定：baseline 是每日批处理，复用
+            risk.continuity.max_skip_days；depression 是稀疏事件驱动（几周才有
+            一次合格片段），用同一个 3 天会让每次评估都判成新事件、去重完全失效。
 
     Returns:
         (transition, notify)
@@ -228,7 +312,20 @@ def decide(
     #    gap == 0 成立（同一天的判定结果变了），gap < 0 是搭了便车。
     #    这与 ewma.update 用 `day_key <= last_day_key` 拒收乱序补算是同一条原则：
     #    "往回补一天会把早已过去的分当成最新观测"。
-    if active and gap is not None and gap < 0:
+    #
+    #    ★ 判据必须用**通道级**游标 last_processed_day，不能用事件内的
+    #      last_seen_day，也不能加 `active` 前提——这两条原来都错了，而且是同一个
+    #      错误的两面：事件一 RESOLVED，apply 的 _empty_channel() 就把 last_seen_day
+    #      清了，active 也变 False，于是守卫**整条失效**。实测：
+    #          2026-08-10 L2 → started  （推送）
+    #          2026-08-12 L0 → resolved （推送"缓解"，通道失忆）
+    #          补算 2026-07-20 L2 → started，**真的又推给了子女一次**，
+    #                                started_day 锚在 7 月
+    #          2026-08-13 L2 → started （再推一次）
+    #      一次"补算上个月漏跑的某天"换来两条错误推送。而 README 明写
+    #      "补算与重跑是安全的"。
+    processed_gap = _days_between(day_key, channel_state.get("last_processed_day"))
+    if processed_gap is not None and processed_gap < 0:
         return TRANSITION_NONE, False
 
     # 1. 回到正常：事件结束
@@ -239,10 +336,11 @@ def decide(
 
     # 2. 事件开始：没有活跃事件，或与上次可信观测断开太久
     #
-    #    断开判据复用 max_skip_days（与 continuity.walk_back_days 一致）：
-    #    设备离线一段时间后，不该把两段无关的风险期粘成同一个事件——
-    #    那正是"5 条日志跨 22 个日历日仍数出 consecutive=5"的同型错误。
-    if not active or gap is None or gap > max_skip_days + 1:
+    #    断开判据按 channel 取（见 event_gap_days 的说明）：baseline 复用
+    #    max_skip_days，与 continuity.walk_back_days 一致——设备离线一段时间后，
+    #    不该把两段无关的风险期粘成同一个事件，那正是"5 条日志跨 22 个日历日
+    #    仍数出 consecutive=5"的同型错误。
+    if not active or gap is None or gap > event_gap_days + 1:
         return TRANSITION_STARTED, True
 
     # 3. ★ 升级：穿透冷却、穿透 acknowledged、也穿透下面的同日幂等分支
@@ -300,18 +398,27 @@ def apply(
     """把本次判定的结果落到事件状态上，返回新的 channel 状态（不就地改）。"""
     new = dict(channel_state)
 
-    if transition == TRANSITION_NONE and not new.get("active"):
-        return new
-    if transition == TRANSITION_NONE and new.get("active"):
-        # 补算/重跑同一天：状态原样不动（幂等）
+    # ★ 通道游标只增不减，且必须带过**每一条**返回路径——包括事件关闭那条。
+    #   漏在任何一条上都会让 decide 第 0 条的守卫在那种情形下失效，
+    #   而失效的表现是"补算一天就多推一条通知"，不会有任何报错。
+    cursor = _max_day(new.get("last_processed_day"), day_key)
+
+    if transition == TRANSITION_NONE:
+        # 两种情形：无事件的正常日，或补算/重跑同一天。
+        # 事件状态原样不动（幂等），只推进通道游标。
+        new["last_processed_day"] = cursor
         return new
 
     if transition == TRANSITION_RESOLVED:
-        # 事件关闭。保留 acknowledged=False 以便下一次事件从干净状态开始。
-        return _empty_channel()
+        # 事件关闭。保留 acknowledged=False 以便下一次事件从干净状态开始，
+        # 但**游标要留下**——它描述的是通道而不是这个事件。
+        closed = _empty_channel()
+        closed["last_processed_day"] = cursor
+        return closed
 
     if transition == TRANSITION_STARTED:
         new = _empty_channel()
+        new["last_processed_day"] = cursor
         new["started_day"] = day_key
 
     new["active"] = True
@@ -321,6 +428,7 @@ def apply(
     # 反复被当成"新出现"。
     new["risk_keys"] = sorted(set(new.get("risk_keys") or []) | set(risk_keys or []))
     new["last_seen_day"] = day_key
+    new["last_processed_day"] = cursor
 
     if notified:
         new["last_notified_day"] = day_key

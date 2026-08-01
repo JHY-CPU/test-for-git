@@ -10,6 +10,31 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+@pytest.fixture
+def sandbox(tmp_path, monkeypatch):
+    """把项目根目录重定向到 tmp_path，所有产物落在临时目录里。
+
+    放在 conftest 而不是各测试文件里：需要真实 data/ 布局的用例不止一处
+    （test_integration 的全链路、test_regression_* 的按轨质量与阈值复用），
+    各写一份会漂——与 imputer 删掉 `check_offline_status`、
+    utils/status.py 收拢状态白名单是同一条理由。
+
+    配置文件按原样拷进去：`load_config` 走的是 get_project_root()/config，
+    不拷的话 tmp 里没有 settings.yaml，链路会在读配置时就炸。
+    """
+    import src.utils.io as io_mod
+
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    for name in ("settings.yaml", "feature_weights.json"):
+        (tmp_path / "config" / name).write_text(
+            (PROJECT_ROOT / "config" / name).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(io_mod, "get_project_root", lambda: tmp_path)
+    return tmp_path
+
+
 @pytest.fixture(autouse=True)
 def _isolate_alert_state(tmp_path, monkeypatch):
     """把预警事件状态重定向到 tmp，每个用例一份干净状态。

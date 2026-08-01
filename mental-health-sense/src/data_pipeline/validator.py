@@ -80,16 +80,11 @@ def validate_daily_data(
 
     # 检查数据不足
     if missing_count >= MISSING_THRESHOLD:
-        # 检查是否连续离线
-        if recent_quality is not None and len(recent_quality) >= 3:
-            last_3 = recent_quality[-3:]
-            if all(q in (QUALITY_INSUFFICIENT, QUALITY_OFFLINE) for q in last_3):
-                return QUALITY_OFFLINE
-        return QUALITY_INSUFFICIENT
+        return escalate_if_offline(QUALITY_INSUFFICIENT, recent_quality)
 
     # 检查极端异常值（传感器故障特征）
     if np.any(feature_vector < -100):
-        return QUALITY_INSUFFICIENT
+        return escalate_if_offline(QUALITY_INSUFFICIENT, recent_quality)
 
     # ★ 关键特征缺失 → 至少降级（不看缺失个数，见 CRITICAL_FEATURES 的说明）
     if missing_features and missing_critical_features(track, missing_features):
@@ -100,6 +95,61 @@ def validate_daily_data(
         return QUALITY_DEGRADED
 
     return QUALITY_VALID
+
+
+def escalate_if_offline(quality: str, recent_quality: list[str] | None) -> str:
+    """连续 ≥3 天数据不足 → 升级为 offline（设备离线告警）。
+
+    ★ 为什么这条判据必须抽出来共用
+
+      `insufficient` 有**两个**产出点，而离线升级原本只长在其中一个里：
+
+        1. `daily_job._process_track` 的 `except DataInsufficientError` 分支
+           —— 聚合阶段就发现缺 ≥3 维，直接落盘返回，**根本走不到**
+              `validate_daily_data`
+        2. `validate_daily_data` 自己的 `missing_count >= MISSING_THRESHOLD` 分支
+
+      而聚合已经把"缺 ≥3 维"整类截走了：能走到 `validate_daily_data` 的
+      `missing_count` 恒 ≤ 2（原始缺 ≤2 维 → 填充后只会更少）。也就是说第 2 条
+      分支**在生产链路里进不去**，`QUALITY_OFFLINE` 全仓只有单测直接构造
+      `missing_count=3` 时才产得出来。
+
+      实测（睡眠轨 8 维全缺，连跑 7 天）：7 天全是 `insufficient`，从不升 offline。
+      四态设计事实上退化成三态，`get_quality_summary` 的 `offline_days` 恒为 0，
+      正好破在"长期降级和长期正常必须可区分"这条原则上——与
+      `daily_job._get_recent_quality` 注释里记的是同一个缺陷的**第二个入口**
+      （上次修的是"三条来自不相邻的日子"，这次是"这段代码执行不到"）。
+
+      两份会漂的离线判据比没有更危险（见 imputer.py 删除 `check_offline_status`
+      的说明），所以两个产出点必须调同一个函数，而不是各写一份。
+
+    ★ "连续 3 天"数的是**日历日**，缺日算在内。
+
+      `recent_quality` 由 `daily_job._get_recent_quality` 按自然日补齐，压根没跑过的
+      日子按 `insufficient` 计（那里的注释：缺日"确实没有可信数据，与跑过但缺 ≥3 维
+      在运维含义上是同一件事"）。所以一个**刚接入、从没成功上报过**的老人，
+      第 2 天就会判 offline——历史起点之前的日历日也被算成了不足。
+      这是对的：从没报过数就是离线。但别把这条读成"要先攒够 3 个真实的失败日"。
+
+    ★ `< -100` 的传感器故障值也走这条升级。
+
+      那条分支同样产出 insufficient，语义是"今天收到了数，但是垃圾"。它叠加在
+      前 3 天没有可信数据之上时，结论仍然是"这台设备已经连着几天不可用"，
+      判 offline 是合适的；不升级反而会让同一段离线期在标签上断成两截。
+
+    Args:
+        quality: 本日初判的质量档；非 insufficient 时原样返回
+        recent_quality: **今天之前**最近几天的质量列表（按 day_key 升序，
+            缺日按 insufficient 计，见 daily_job._get_recent_quality）
+    """
+    if quality != QUALITY_INSUFFICIENT:
+        return quality
+    if recent_quality is None or len(recent_quality) < 3:
+        return quality
+    last_3 = recent_quality[-3:]
+    if all(q in (QUALITY_INSUFFICIENT, QUALITY_OFFLINE) for q in last_3):
+        return QUALITY_OFFLINE
+    return quality
 
 
 def missing_critical_features(track: str, missing_features: list[str]) -> list[str]:
