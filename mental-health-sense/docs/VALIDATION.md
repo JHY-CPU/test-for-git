@@ -29,7 +29,7 @@
 ```
 证据强度  弱 ─────────────────────────────────────────────► 强
 
-层次 A  ┌─ 单元测试（已有 475 个）
+层次 A  ┌─ 单元测试（已有 500 个）
 （代码）└─ 端到端链路冒烟测试（daily_job 单入口）
 
 层次 B  ┌─ 非循环仿真（打破"按答案出题"）
@@ -51,7 +51,7 @@
 
 ### 2.1 单元测试（已具备）
 
-当前 `tests/` 下 475 个用例覆盖聚合、填充、GRU、EWMA（含偏离日冻结）、健康门禁、
+当前 `tests/` 下 500 个用例覆盖聚合、填充、GRU、EWMA（含偏离日冻结）、健康门禁、
 风险规则与判定（含方向闸门）、
 指标计算、训练循环 early-stopping 等。运行：
 
@@ -876,3 +876,248 @@ D5  L3 → 冷却中，不发   ✗ 恶化被冷却窗吃掉
 > 本节的教训与 §8、§9 一脉相承：**绿色本身不构成证据**。这一轮的绿色里，
 > 有一条是靠"跑第一次"才成立的，有一条是靠"断言太宽"才成立的。
 > 两条都不是代码错了，是**测试没测到它声称在测的东西**。
+
+---
+
+## 11. 第三轮走查（2026-08-02）：预警事件与四态质量
+
+### 11.0 又是同一个病
+
+§8 的病因是"验证脚本数的是 status 流转而非能否出等级"，§9 是"补算这条路径
+从来没有测试进过"。这一轮 5 个缺陷，病因还是同一个，只是换了新的落点：
+
+| 缺陷 | 为什么 481 个用例够不到它 |
+|------|--------------------------|
+| 事件缓解后通道失忆 | `test_alert_events.py` 有 12 个类、32 条用例，几乎全部只测**事件活跃期**。唯一测到 RESOLVED 之后的那条（`test_缓解后再次恶化算新事件`）喂的是**更晚**的日期，走的是正常路径 |
+| 抑郁通道两个洞 | `_maybe_alert` 整个函数**零覆盖**（`grep _maybe_alert tests/` 无结果），而 TODO.md 写着"代码层的线已经接好" |
+| `offline` 不可达 | 只在 `validate_daily_data` 这个**辅助函数**上被直接构造过（`missing_count=3`），从没人问"生产链路走得到它吗" |
+| 阈值跨量纲复用 | `_load_prior_thresholds` 的幂等性被测过，但测的是"同一条路径重跑"，没测"换了一条路径" |
+
+一句话：**测了这个函数，没测这条路**。
+
+### 11.1 缓解之后，通道就失忆了
+
+`apply()` 对 `TRANSITION_RESOLVED` 直接 `return _empty_channel()`，把
+`last_seen_day` 和事件一起丢掉；而 `decide()` 第 0 条（挡乱序补算）的守卫写的是
+`if active and gap is not None and gap < 0`。两个条件叠加，事件一关闭守卫就整条失效。
+
+修复前实测（`repro_alert.py`，配置用仓库真实 `settings.yaml`）：
+
+```
+2026-08-10 L2 -> started   alerted=True  actions=['log_alert','push_to_children']
+2026-08-11 L2 -> cooldown  alerted=False
+2026-08-12 L0 -> resolved  alerted=True                    ← 事件关闭，通道失忆
+--- 补算 7 月漏跑的一天（那天判 L2）---
+2026-07-20 L2 -> started   alerted=True  actions=['log_alert','push_to_children']
+                                          active=True started=2026-07-20
+--- 次日正常跑 ---
+2026-08-13 L2 -> started   alerted=True                    ← 又开一个
+```
+
+一次"补算上个月漏跑的某天"换来**两条错误推送**，家属收到的是一条关于上个月的
+「提醒」。而 `docs/README.md` 明写"补算与重跑是安全的"——特征行与 EWMA 那两层
+确实安全，预警层不是。
+
+修法：拆出通道级游标 `last_processed_day`，跨事件保留、只增不减，`apply()` 的
+**每一条**返回路径都带出去；`decide` 第 0 条改读它并去掉 `active` 前提。
+与事件内的 `last_seen_day` 分开，是因为两者回答的是不同问题（"通道处理到哪天"
+vs "当前事件断没断"），在活跃事件内取值相同，所以既有行为一行不变。
+
+修复后同一条时间线：`2026-07-20 -> transition=none alerted=False`。
+
+### 11.2 抑郁通道：既不关事件，也没有去重
+
+`_maybe_alert` 第一个洞是 `if risk_level <= 0: return`——与 `daily_job` 第 7 步
+修过的那条**完全同型**（那里的注释白纸黑字写着"旧写法在 L0 那天直接跳过，
+事件永远停在最后一次 L2/L3 上"），在旁路上重犯了一遍。
+
+第二个洞更隐蔽：事件断段窗口沿用了 `risk.continuity.max_skip_days=3`，而抑郁
+评估是**稀疏事件驱动**的——要"有正脸 + 有连续语音"的片段，独居老人可能几周
+才有一次。任意两次相邻评估的间隔都 > 3+1 天，于是每次都判 `started`。
+
+修复前实测（打开 `depression.alert` 模拟 checkpoint 校准后）：
+
+```
+2026-08-01 评估=重度 -> active=True  level=2 started=2026-08-01 notify_count=1
+2026-08-08 评估=重度 -> active=True  level=2 started=2026-08-08 notify_count=1  ← 新事件
+2026-08-15 评估=正常 -> active=True  level=2 started=2026-08-08                 ← 没关
+2026-08-22 评估=正常 -> active=True  level=2 started=2026-08-08
+周报回执: ['depression']    ← 无限期显示"情绪状态评估 持续中"
+```
+
+修复后：
+
+```
+2026-08-01 评估=重度 -> active=True  started=2026-08-01 notify_count=1
+2026-08-08 评估=重度 -> active=True  started=2026-08-01 notify_count=1  ← 同一段事件
+2026-08-15 评估=正常 -> active=False started=None      notify_count=0  ← 关闭 + 缓解通知
+周报回执: []
+```
+
+断段窗口改按 channel 取（`alert._event_gap_days`）：`depression` 用
+`depression.assessment.valid_days=30`。语义自洽——评估还在有效期内，就是"它仍
+代表当前状况"，那两次评估描述的是同一段事件。刻意不新增配置键，免得同一个 30
+在两处漂开。
+
+`is_displayable == False`（评估失败/无片段/过期）仍然原地返回：那时"测不到"
+不等于"好转"，既不该开事件也**不该关**事件——同 `judge._has_adverse_movement`
+拿不到方向元数据时不压等级。
+
+### 11.3 `offline` 这一档，生产链路根本走不到
+
+`validator` 的四态里 `offline` 的定义是"连续 ≥3 天数据不足"，判据长在
+`validate_daily_data` 的 `missing_count >= MISSING_THRESHOLD` 分支里。问题是这条
+分支**从 `_process_track` 进不去**：
+
+- 聚合阶段 `aggregate_track_features` 就会在缺 ≥3 维时抛 `DataInsufficientError`，
+  `_process_track` 在 `except` 里直接落盘 + `return QUALITY_INSUFFICIENT`
+- 能走到 `validate_daily_data` 的，原始缺失必然 ≤2 维，填充后只会更少，
+  `missing_count` 恒 ≤2
+
+修复前实测（睡眠轨 8 维全缺，连跑 7 天）：
+
+```
+2026-08-01  quality=insufficient
+2026-08-02  quality=insufficient
+...
+2026-08-07  quality=insufficient          ← 七天，从不升级
+对照：直接调 validate_daily_data(missing_count=8, recent=[insufficient]*3) -> offline
+```
+
+也就是说 `QUALITY_OFFLINE` 全仓**只有单测直接构造时才产得出来**，四态实际是三态。
+与 `daily_job._get_recent_quality` 注释里记的是**同一个缺陷的第二个入口**
+（上次修的是"三条来自不相邻的日子"，这次是"这段代码执行不到"）。
+
+修法：判据抽成 `validator.escalate_if_offline`，两个 `insufficient` 产出点共用
+一份（两份会漂的离线判据比没有更危险，同 `imputer` 删掉 `check_offline_status`
+的理由）。修复后从第 2 天起即为 `offline` 并真的落进 CSV。
+
+**这个修复的收益要说清楚，别夸大**：`offline` 与 `insufficient` 在每一条判定路径上
+**行为完全相同**——`is_usable_for_inference` 都不放行、`counts_toward_consecutive`
+都不计入、`check_prolonged_degradation` 都算"非 valid"。`get_quality_summary`
+（唯一会分开数 `offline_days` 的函数）在 `src/` 与 `scripts/` 里**零调用**，只有单测用。
+所以这次修的是**标签与可排查性**，不是判定行为：CSV 上现在能看出"这几天是设备
+离线"而不只是"数据不足"，运维告警的语义也和四态设计对上了。真正扛"长期降级
+可区分"这件事的仍然是 `daily_job` 里那条 `check_prolonged_degradation`（5 天）。
+
+> 缺日按 `insufficient` 计（`_get_recent_quality` 已有的语义），所以"设备从一开始
+> 就没上报过"第 2 天就会升到 offline——历史起点之前的日历日也算在内。
+> 这是对的：从没报过数就是离线。但别把 docstring 里的"连续 3 天"读成
+> "要先攒够 3 个真实的失败日"。
+
+### 11.4 兜底轨的阈值被当成了 GRU 轨的阈值
+
+`_load_prior_thresholds` 为"重跑幂等"而生，但它只校验三个键是不是数字，
+不看那份日志是**哪条路径**写的。建档期的日子走 `cold_start_fallback`，落盘的三个
+阈值都等于 `fallback_sigma=3.0`（稳健加权 |z| 量纲）；GRU 轨是加权归一化残差
+（正常 0.5~1.0、阈值 1.3~1.6）。
+
+建档完成后补算一个建档期内的日子会同时满足两个条件——基线文件已存在（走 GRU
+路径）、`day_key <= ewma.last_day_key`（判为重跑）——于是 3.0 被当成 GRU 轨的
+`dynamic_threshold`，`is_deviation` 恒为 False。而该字段驱动 consecutive /
+`risk_type_qualifies` / 微调排除集 / 周报统计。
+
+与 `judge._severity` 那段"同一个绝对常数对两者不是同一件事"是同一条量纲不可比：
+**幂等复用也不该跨尺度**。修法是加一条同源守卫（`status in COLD_START_STATUSES`
+则不复用），回归用例打在 `infer_track` 这个真入口上，不打在 helper 上。
+
+### 11.5 回归测试：先证明它们会红
+
+`tests/test_regression_2026_08_02.py`，19 条。**已实测：回退到修复前的代码后
+11 条变红**（下列 9 条 + §11.6 补的 2 条）：
+
+```
+FAILED ...::TestChannelCursorSurvivesResolve::test_缓解后补算历史日不得开出新事件
+FAILED ...::TestChannelCursorSurvivesResolve::test_通道游标跨事件保留且不被补算回拨
+FAILED ...::TestChannelCursorSurvivesResolve::test_正常日也推进游标
+FAILED ...::TestDepressionChannel::test_评估回到正常要关闭事件
+FAILED ...::TestDepressionChannel::test_稀疏评估属于同一事件不重复推送
+FAILED ...::TestOfflineReachableInPipeline::test_连续数据不足升级为offline
+FAILED ...::TestOfflineReachableInPipeline::test_两个产出点共用同一判据
+FAILED ...::TestThresholdReuseIsMethodScoped::test_兜底期阈值不得被复用到GRU轨
+FAILED ...::test_兜底路径连续天数按基准日截断
+========================= 9 failed, 7 passed
+```
+
+剩下 8 条是刻意写的**"守住反向"**用例，修复前后都该绿：缓解后真正的新事件仍要
+通知、baseline 的断段窗口不被抑郁那条的 30 天带跑、偶发一天数据不足不得升级
+offline、同源重跑仍要复用阈值、评估失败不得关闭已有事件……它们守的是
+"别把缺陷修过头"，前后都绿正是它们该有的样子。
+
+写这批用例时踩到一条**脆断言**并改掉了：原本用 `status == "success"` 表示
+"走了 GRU 路径"，但重跑不喂 EWMA，`inferences_since_train` 停在 0，而
+`cold_start_observation_days=0` 时 `0 <= 0` 成立，status 落在 `observation`。
+两者都在 `EVALUABLE_STATUSES` 里、判定链不受影响，所以这不是缺陷；
+但断死一个具体 status 来表达"走了哪条路"本身就是错的落点——改成断言
+只有 GRU 路径才写的字段 `ewma_n`。这与 §10.5 里那条
+`assert r["transition"] != TRANSITION_NEW_TYPE` 的假通过是同一类错误。
+
+### 11.6 修第 1 条时差点造出一个更严重的回归
+
+这一段单独记，因为它是本轮最有价值的一条——**它不是走查查出来的，是提交前
+让另一个 agent 复审时查出来的**，而且性质比原缺陷更严重。
+
+改动把守卫判据从 `last_seen_day` 换成新增的 `last_processed_day`，并去掉了
+`active` 前提。两处都对，但漏了第三件事：`load_state` 对老状态文件里**缺失的
+新字段**按 `None` 补齐，而 `_days_between(day, None)` 返回 `None` → 守卫被跳过。
+旧代码那版守卫读的是 `last_seen_day`，在同一批文件上恰恰是**挡得住**的。
+
+也就是说：对已经在跑的老人，这次"修复"的净效果是**回归**。
+
+仓库里就有这样一个真实文件——`data/logs/alert_state/E001.json`：
+
+```json
+{"active": true, "level": 1, "started_day": "2026-08-08",
+ "last_seen_day": "2026-08-29", "last_notified_level": 3,
+ "notify_count": 5, "acknowledged": true}      ← 无 last_processed_day
+```
+
+照 README 文档化的用法跑 `run_daily_pipeline.py --date 2026-08-15`（判 L3）：
+
+| | transition | 实际动作 |
+|---|---|---|
+| 改动前 | `none` | 不通知 |
+| 只加新字段、不兜底 | `escalated` | **push_to_children + push_to_community_worker + force_ring**；还把 `last_seen_day` 从 8-29 拨回 8-15、`notify_count` 5→6、并因 escalated 清掉 `acknowledged`（家属已确认过，仍被强制响铃） |
+| 兜底后 | `none` | 不通知 ✔ |
+
+L0 变体同样坏：补算一个历史正常日 → `resolved` → 抹掉活跃事件（`started_day`
+归 null、`notify_count` 归 0）并推一条"缓解"——正是 `decide` 第 0 条注释里
+写明"绝不能发生"的那条。
+
+**当时那 16 条新用例一条都覆盖不到它**（本节的 2 条就是为它补的，补完共 19 条）：
+`conftest.py` 的 autouse fixture 让每个用例都从
+**空状态目录**起跑，永远遇不到"老格式的存量文件"。这个隔离本身是对的（§10.5
+就是为它写的），但它同时也让"存量数据长什么样"这一整类问题在测试里不可见。
+
+修法：`load_state` 逐键合并时，若 `last_processed_day` 缺失/为空就回落到
+`last_seen_day`。安全性来自一个不变量——新代码保证事件关闭后该字段非空，
+所以"本字段空而 `last_seen_day` 非空"只可能来自老文件，不会误伤。
+`SCHEMA_VERSION` 同步升到 `1.1.0`。
+
+复审同时揪出的另外两条（都已修）：
+
+- `_LEVEL_TO_RISK.get(level_name, 0)`：删掉 `risk_level<=0 就 return` 之后，
+  `0` 的语义变成了"缓解"，于是一个**认不出的**等级名会去关闭活跃事件并推一条
+  「已回到个人常态范围」——与同一函数里刚补的"测不到不等于好转"自相矛盾。
+  `level` 直接取自 checkpoint 的 `probabilities` 键名，换 checkpoint 就会踩到。
+- `_max_day` 用字典序比较、`_days_between` 用 `strptime`：一个不可解析的
+  `day_key` 若写进游标，此后 `_days_between` 恒返回 `None`，该通道的守卫
+  **永久静默失效**且无任何报错线索。已加 `_is_day_key` 过滤。
+
+> **教训**：加字段改判据时，"**老数据读进来长什么样**"是判据的一部分。
+> 新字段的默认值不是随便填的——它决定存量数据走哪条分支。
+> 这与本仓一贯的"绿色本身不构成证据"是同一件事的另一面：
+> **测试环境永远是干净的，生产环境永远不是。**
+
+### 11.7 修复后的验证状态
+
+| 项 | 修复前 | 修复后 |
+|----|--------|--------|
+| 单元测试 | 481 | **500**（+19 回归） |
+| 范围 1（链路正确性 + 双轨隔离） | 20/20 | **20/20** |
+| 范围 2（判别力，10 场景） | 9/9 | **9/9** |
+
+> 三轮走查下来，本仓最稳定的失效模式已经很清楚了：**代码是对的，测试也是绿的，
+> 但绿的不是那条路。** §8 是"数的是 status 而非等级"，§9 是"补算路径从没测过"，
+> §11 是"测了函数没测路"。下次加防线时先问一句：**这条防线所在的分支，
+> 生产链路走得到吗？**

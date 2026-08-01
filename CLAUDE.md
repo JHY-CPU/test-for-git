@@ -19,9 +19,14 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 
 > 核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest；`anthropic` 只用于周报正文，未装则自动回落规则模板。`funasr` / `modelscope` / `pyaudio` / `scipy` / `opencv-python` / `APScheduler` 已于 2026-07-31 从 `requirements.txt` 移除（零引用；其中 `pyaudio` 缺 portaudio 头文件会让整条 pip install 中止，torch 一个都装不上）。
 
+> ⚠️ 本机跑 pytest 必须剔除系统 `PYTHONPATH`：`/opt/ros/humble` 会被 pytest 的
+> 收集阶段导进来，直接 `python -m pytest` 会崩在 `ModuleNotFoundError: lark`，
+> 一条用例都跑不到。用 `env -u PYTHONPATH python -m pytest`。
+> 这与"MPDD 子进程必须剔除系统 `PYTHONPATH`"是同一个污染源（见抑郁旁路一节）。
+
 ```bash
-# 测试（22 文件 / 475 用例）
-python -m pytest                                   # pytest.ini 已设 testpaths=tests 与 -v
+# 测试（23 文件 / 500 用例）
+env -u PYTHONPATH python -m pytest                 # pytest.ini 已设 testpaths=tests 与 -v
 python -m pytest tests/test_risk_judge.py
 python -m pytest tests/test_risk_judge.py::TestJudgeRiskLevel::test_xxx
 python -m pytest -m "not slow"                     # 已注册 marker: slow / integration
@@ -73,6 +78,7 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 - `static_threshold = 加权(abs_mean) + sigma·加权(abs_std)`；`dynamic_threshold = min(static, ewma)`，取 min 是为了防老人缓慢衰退后系统"习以为常"。
 - **幅度门槛的单位是 `severity = anomaly_score / 当日 dynamic_threshold`，不是绝对分**。GRU 轨（归一化残差，阈值 1.3~1.6）与冷启动兜底轨（稳健加权 |z|，阈值 = `fallback_sigma` = 3.0，正常天可达 1.77）量纲根本不同，同一个绝对常数对两者不是同一件事。门槛必须 > 1：偏离日按定义 `severity > 1`，取 1.0 等于恒真，防线会静默失效。
 - **`cold_start_fallback` 是可评估状态**，与 `success`/`observation` 一起由 `src/utils/status.py` 统一定义。曾因三处白名单漏了它，导致整个 35 天建档期一条预警都发不出（`VALIDATION.md` §8.2）。加新状态时改那一个文件。
+- **重跑复用首跑阈值只在同源路径之间**（`inference._load_prior_thresholds`）。兜底轨落盘的三个阈值都等于 `fallback_sigma`（稳健 |z| 量纲），GRU 轨是归一化残差；建档完成后补算建档期内某天会同时满足"基线已就绪"与"已喂过 → 判为重跑"，把 3.0 当成 GRU 阈值 → `is_deviation` 恒 False。与"幅度门槛必须用 severity 而非绝对分"是同一条量纲不可比。
 - EWMA **偏离日冻结**（上限 `ewma.max_freeze_days`，默认 14）：判为偏离的当天不喂给基线，否则持续性异常两三天就被自己的历史掩盖。社交轨分 weekday/weekend 两池（周末子女探访效应），周末池样本稀疏，`min_samples_for_dynamic_weekend=8`。喂入按 `day_key` 去重（`day_key <= last_day_key` 拒收），补算/重跑同一天不会把分喂进基线两次。
 - L2/L3 除连续天数外还要过**幅度门槛**（连续偏离段的平均 `severity > sustained_severity`）与**方向闸门**（`judge.py:_has_adverse_movement`：驱动升级的那段连续偏离里至少一半天数朝坏方向，否则封顶 L1）。拿不到方向元数据或 `signed_available=False` 时不压等级——"测不到"不等于"好转"。
 
@@ -88,6 +94,14 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 
 `validator.py` 的四态 `valid / degraded / insufficient / offline` 贯穿全链路。degraded/insufficient 的日子在持续性统计中被**跳过**（既不累加也不打断，见 `rules._counts_toward_consecutive`），**缺日同理**（两轨全不可用那天不生成日志）；但连续跳过超过 `risk.continuity.max_skip_days`（默认 3）即打断，否则一次长时间离线会把两段无关的偏离粘成一段。质量标记按轨判定：`data_quality` 随推理结果逐轨落盘，单一顶层值会让睡眠轨降级压住社交轨的计数。`copresence_min` 禁止前向填充（"今天有没有人来"取决于子女安排，用昨天填等于伪造社会接触）。单轨失败是正常降级场景，两轨同时不可用才算整体失败。
 
+**`insufficient` 有两个产出点，离线升级判据必须共用一份**：`_process_track` 的
+`except DataInsufficientError` 分支（聚合阶段就缺 ≥3 维，**走不到**
+`validate_daily_data`）与 `validate_daily_data` 自己那条。判据统一在
+`validator.escalate_if_offline`，两边都调它。只写在后者里的后果是
+`QUALITY_OFFLINE` **在生产链路里不可达**——实测连跑 7 天全缺仍只记
+`insufficient`，四态退化成三态（VALIDATION §11.3）。两份会漂的离线判据比没有
+更危险，同 `imputer` 删掉 `check_offline_status` 的理由。
+
 ### 预警是事件驱动的，不是每日状态
 
 `judge` 每天判等级，但 `alert.trigger_alert` **只在状态变化时通知**：
@@ -97,19 +111,31 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 修复前：E001 60 天 12 次推送对应 4 个真实事件；`PERM_step` 91 天 91 次。
 修复后：4 次 / 4 次。事件模型在 `src/risk/alert_state.py`。
 
-改动这一层时必须守住三条：
+改动这一层时必须守住四条：
 
 - **★ 升级穿透一切抑制**（冷却、已确认、同日幂等分支）。纯粹按"同一等级 X 天内
   最多一次"做冷却会在 L2 的冷却窗内吃掉 L3——拿误报换漏报，比没有冷却更糟。
   `decide()` 里升级判定排在所有抑制判据**之前**，
   `tests/test_alert_events.py::TestEscalationBypassesEverything` 是守门员。
+- **★ 通道观测游标 `last_processed_day` 跨事件保留**：`apply()` 的**每一条**返回
+  路径（含 `RESOLVED`）都要把它带出去，且只增不减。它与事件内的 `last_seen_day`
+  是两个东西——前者回答"这条通道处理到哪天了"（据此挡住往回补算），后者回答
+  "当前事件断没断"。两者合并过一次，代价是事件一关闭通道就失忆，此后
+  **补算任何一个历史高危日都会真的推送给子女**，还把 `started_day` 锚在过去
+  （2026-08-02 实测，见 VALIDATION §11.1）。
 - **两条事件流独立**：`baseline`（GRU 双轨）与 `depression`（MPDD）各自计数、
   各自冷却、互不压制——理由同"绝不跨轨比较绝对分"。
 - **`trigger_alert` 必须收到 `day_key`**。不传会把"今天"盖到历史判定上，
   冷却窗与事件边界全算错——同 `judge_risk_level` 被迫加 `today_key`。
 
-事件边界复用 `risk.continuity.max_skip_days`，与 `continuity.walk_back_days`
-的断段语义一致。状态落在 `data/logs/alert_state/{id}.json`（原子写）——
+事件边界（隔多久没观测就算两段无关的事件）**按 channel 取**，由
+`alert._event_gap_days` 决定，刻意不给独立配置键：
+`baseline` 用 `risk.continuity.max_skip_days`（与 `continuity.walk_back_days`
+的断段语义一致）；`depression` 用 `depression.assessment.valid_days`——那条通道是
+稀疏事件驱动的，几周才有一次合格片段，套用 3 天会让**每次评估都判成新事件、
+去重完全失效**。
+
+状态落在 `data/logs/alert_state/{id}.json`（原子写）——
 每日批处理的内存态活不过今天，同 `ewma` 的 `freeze_streak`。
 
 新增 `alert:` 段的配置键时必须同步扩 `alert.py:_actions_for` 的**白名单元组**，
@@ -144,8 +170,15 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 - **MPDD 仓不可移动/改名**：OpenFace 的 RUNPATH 是编译进去的绝对路径。
 - 子进程必须钉死 `HF_HUB_OFFLINE` / `TORCH_HOME` / `TMPDIR` / `NUMBA_CACHE_DIR`，
   并剔除系统 `PYTHONPATH`（本机 `/opt/ros/humble` 会污染 MPDD 解释器）。
-- `depression.alert` 刻意为 `false`：`alert.py` 还没有冷却/去重，且当前 checkpoint
-  在其验证集上对全部样本预测同一类别（Macro-F1 0.286），未在本机位校准。
+- **★ `_maybe_alert` 对"评估判正常"（`risk_level == 0`）也必须调 `trigger_alert`**，
+  不能提前 return——那是**缓解**，要靠它关掉活跃事件并发"过去了"。提前返回的
+  后果与 `daily_job` 修过的那条完全同型：事件永远停在最后一次 L2/L3 上，周报的
+  「预警回执」无限期显示"情绪状态评估 持续中，第 N 天"。
+  只有 `is_displayable == False`（评估失败/无片段/过期）才该原地返回：
+  那时"测不到"不等于"好转"，既不开事件也**不关**事件。
+- `depression.alert` 刻意为 `false`：当前 checkpoint 在其验证集上对全部样本
+  预测同一类别（Macro-F1 0.286），未在本机位校准。**冷却/去重那条阻塞理由
+  已解除**（2026-07-31 事件模型 + 2026-08-02 补齐本通道的缓解与断段窗口）。
 
 ### 持续性统计的日历回溯是共用的
 
