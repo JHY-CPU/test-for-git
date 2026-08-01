@@ -44,6 +44,8 @@ class AlertLevel(IntEnum):
 # 配置里 level_1.notify 写的是 false（布尔），代码里是 []（列表）。
 ALERT_ACTIONS = {
     AlertLevel.NORMAL: {
+        # 正常的一天什么都不做——这是对的，不要改。缓解通知走的是下面的
+        # RESOLVE_ACTIONS，因为它是**状态迁移**的通知，不是"L0 这个等级"的动作。
         "action": "none",
         "notify": [],
         "log": True,
@@ -68,6 +70,35 @@ ALERT_ACTIONS = {
         "include_in_report": True,
         "highlight_in_report": True,
     },
+}
+
+
+# 缓解（回到 L0）的通知动作。
+#
+# ★ 为什么不能沿用 ALERT_ACTIONS[NORMAL]
+#
+#   `notify_on_resolve: true` 配了却**完全无效**：decide 正确返回
+#   (RESOLVED, True)，但 trigger_alert 拿 AlertLevel.NORMAL 去查动作表，
+#   得到 action="none"，`_execute_alert_actions` 第一行就 return []；
+#   `_build_alert_message` 对 NORMAL 也直接返回 ""。实测：
+#       D1 L3 → started   alerted=True  actions=[log_alert, push_to_children,
+#                                                push_to_community_worker, force_ring]
+#       D5 L0 → resolved  alerted=False actions=[]  message=''
+#   三层各自都"对"，合起来这个配置项静默失效——而它承担的是"家属同样想知道
+#   '过去了'"这件事。test_alert_events 只断言了 transition == RESOLVED，
+#   没断言 alerted，所以测不到（又一次"断言打错了层"）。
+#
+#   根因是把"等级"与"状态迁移"混成了一件事：缓解不是"L0 这个等级要做什么"，
+#   而是"从有事件变成没事件要通知谁"。所以它需要自己的动作表。
+#
+#   刻意用 push_notification 而非 force_notification：缓解是好消息，
+#   不该强制响铃、也不该惊动社区网格员。收件人取"曾经被通知过的那些人"，
+#   见 _resolve_actions_for。
+RESOLVE_ACTIONS = {
+    "action": "push_notification",
+    "notify": ["children"],
+    "log": True,
+    "include_in_report": True,
 }
 
 
@@ -111,6 +142,37 @@ def _actions_for(level: AlertLevel, config: dict | None) -> dict:
     for key in ("log", "include_in_report", "highlight_in_report", "repeat_days"):
         if key in section:
             merged[key] = section[key]
+    return merged
+
+
+def _resolve_actions_for(config: dict | None, prev_level: int) -> dict:
+    """缓解通知的动作配置。
+
+    收件人跟着**事件曾经达到过的最高等级**走：只有 L3 惊动过社区网格员，
+    那就也该告诉他们"过去了"；只推送过子女的事件不必因为缓解去打扰网格员。
+    否则会出现"网格员被叫来过但没人告诉他结束了"，或反过来"从没参与的人
+    收到一条莫名其妙的缓解通知"。
+
+    配置入口是 `alert.events.resolve`（可选）；不写则用 RESOLVE_ACTIONS。
+    """
+    merged = dict(RESOLVE_ACTIONS)
+
+    if prev_level >= int(AlertLevel.SEVERE):
+        # 沿用 L3 的收件人名单，但**不**沿用 force_notification 与 force_ring
+        severe = ALERT_ACTIONS[AlertLevel.SEVERE]
+        merged["notify"] = _normalize_notify(severe.get("notify", []))
+
+    section = ((config or {}).get("alert") or {}).get("events") or {}
+    resolve_cfg = section.get("resolve")
+    if isinstance(resolve_cfg, dict):
+        if "action" in resolve_cfg:
+            merged["action"] = resolve_cfg["action"]
+        if "notify" in resolve_cfg:
+            merged["notify"] = _normalize_notify(resolve_cfg["notify"])
+        # 白名单式合并，同 _actions_for：新增键必须加进这个元组
+        for key in ("log", "include_in_report"):
+            if key in resolve_cfg:
+                merged[key] = resolve_cfg[key]
     return merged
 
 
@@ -194,18 +256,34 @@ def trigger_alert(
     channel_state = state["channels"].get(channel) or {}
     risk_keys = _risk_keys_of(risk_types)
 
+    # 事件曾达到过的最高等级，用于决定缓解通知发给谁（见 _resolve_actions_for）。
+    # 必须在 decide/apply 之前读：apply 对 RESOLVED 会把 channel 清空。
+    prev_level = int(channel_state.get("last_notified_level") or 0)
+
     transition, should_notify = alert_state.decide(
         channel_state, day_key, normalized_level, risk_keys,
         events_cfg, repeat_days, max_skip_days,
     )
+
+    # ★ 缓解走独立的动作表：它是**状态迁移**的通知，不是"L0 这个等级"的动作。
+    #   沿用 ALERT_ACTIONS[NORMAL] 会让 action="none" 把整条通知吃掉，
+    #   notify_on_resolve 这个配置项静默失效。见 RESOLVE_ACTIONS 的说明。
+    is_resolve = transition == alert_state.TRANSITION_RESOLVED
+    if is_resolve:
+        actions_config = _resolve_actions_for(config, prev_level)
 
     # 2. 只在需要通知时才真正执行动作
     #
     #    被抑制时仍然记一条 log_alert：日志是排查用的，不该跟着通知一起消失。
     #    消失的只有推送与响铃。
     if should_notify:
+        # 缓解按 WARNING 的强度执行（推送、不响铃），而不是按 level_enum
+        # ——此刻 level_enum 是 NORMAL，会一个动作都不执行。
         actions = _execute_alert_actions(
-            elder_id, level_enum, actions_config, risk_types
+            elder_id,
+            AlertLevel.WARNING if is_resolve else level_enum,
+            actions_config,
+            risk_types,
         )
     else:
         actions = ["log_alert"] if actions_config.get("action") != "none" else []
@@ -240,7 +318,14 @@ def trigger_alert(
         # {"alerted": True, "level": "NORMAL", ...}——上层据此以为发过预警，
         # 实际一个动作都没执行。
         # 现在还要再与 should_notify 取与：被事件去重抑制时没有真的发出去。
-        "alerted": bool(level_enum >= AlertLevel.WARNING and should_notify),
+        #
+        # 缓解单独放行：它的 level_enum 是 NORMAL（< WARNING），但确实推送了。
+        # 不放行的话 alerted 恒 False，上层（run_daily_pipeline 的打印、
+        # 周报回执、测试）都会以为缓解通知没发出去。
+        "alerted": bool(
+            should_notify
+            and (level_enum >= AlertLevel.WARNING or is_resolve)
+        ),
         "suppressed": suppressed,
         "transition": transition,
         "event": {
@@ -257,7 +342,13 @@ def trigger_alert(
         "level": level_enum.name,
         "label": _get_level_label(risk_level),
         "actions": actions,
-        "message": _build_alert_message(elder_id, level_enum, risk_types),
+        # 缓解要有自己的文案：_build_alert_message 对 NORMAL 返回 ""，
+        # 于是家属会收到一条空推送。
+        "message": (
+            _build_resolve_message(elder_id, event, prev_level)
+            if is_resolve
+            else _build_alert_message(elder_id, level_enum, risk_types)
+        ),
     }
 
     # 记录日志
@@ -305,6 +396,19 @@ def _build_alert_message(
     }
 
     return templates.get(level, "")
+
+
+def _build_resolve_message(elder_id: str, event: dict, prev_level: int) -> str:
+    """缓解通知的文案。
+
+    措辞约束同 judge._generate_recommendation：只说行为观察，不下诊断，
+    也不说"已康复"——回到个人基线不等于问题解决，只是当前不再偏离。
+    """
+    label = _get_level_label(prev_level) if prev_level else "异常"
+    return (
+        f"【缓解】{elder_id}老人此前的{label}状态已回到个人常态范围，"
+        f"系统将继续日常监测"
+    )
 
 
 def _execute_alert_actions(

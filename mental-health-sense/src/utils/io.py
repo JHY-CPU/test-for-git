@@ -290,6 +290,82 @@ def get_feature_vectors(
     return df_filtered[names].to_numpy(dtype=np.float64)
 
 
+def get_feature_window(
+    elder_id: str,
+    start_date: str,
+    end_date: str,
+    track: str,
+) -> tuple[np.ndarray, list[str]]:
+    """
+    按**自然日对齐**取某轨的特征窗口，缺日以全 NaN 行占位。
+
+    Returns:
+        (matrix, missing_days)
+        matrix: (n_calendar_days, feature_dim)，行序 = start_date..end_date 逐日
+        missing_days: CSV 里压根没有对应行的那些 day_key
+
+    ★ 为什么必须有这个函数（`get_feature_vectors` 不够用）
+
+      `get_feature_vectors` 返回的是"这个日期区间里**存在**的行"，行数取决于
+      磁盘上有几行，与日历无关。而 GRU 的输入窗口 `data_norm[i-window:i]`
+      隐含"这 window 行是相邻的 window 天"——同 trainer._last_contiguous_span
+      的理由。调用方拿到 6 行时无从知道是"缺了哪一天"还是"区间本来就只有 6 天"。
+
+      实测后果（infer_track 旧实现按 `len(past) < window` 整体放弃）：
+      **漏跑一天，之后连续 7 天彻底出不了分**。删掉 2026-08-15 一行后，
+      08-16~08-22 全部 `data_insufficient`、score=0.0，到 08-23 才恢复——
+      那一天滑出窗口为止。而 `track_quality` 两轨都是 valid（今天的数据是好的），
+      于是 daily_job 判 `status="success"`、脚本 exit 0，cron 与监控全绿，
+      老人连续 8 天零监测。
+
+      更要紧的是它只在"那天压根没跑"时发作：跑过但数据不足的日子，
+      `daily_job._process_track` 会写一行全 NaN 占位（那里的注释明写
+      "留下痕迹比什么都不写好"），窗口行数是齐的，一切正常。而宕机 /
+      cron 漏触发 / 补算漏一天恰恰是真实运维里最常见的缺日成因，全都落进
+      "没跑过"这一类。两种缺日的后果差这么远，本身就说明缺口在这里。
+
+      对齐到日历后，缺日与"跑过但全维缺测"在结构上变成同一件事（都是 NaN 行），
+      由调用方按同一套规则处理——这与 validator 四态里"缺日与降级日走同一条
+      路径"、continuity.walk_back_days 的注释是同一条原则。
+    """
+    from datetime import datetime, timedelta
+
+    names = get_feature_names(track)
+    dim = len(names)
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError as e:
+        raise ValueError(f"Invalid date range {start_date}..{end_date}: {e}") from e
+    if end_dt < start_dt:
+        raise ValueError(f"end_date {end_date} 早于 start_date {start_date}")
+
+    df = load_features_csv(elder_id, track)
+    # 同日重复行取最后一条：save_daily_features 做了幂等覆盖，正常不会出现，
+    # 但手工编辑过的 CSV 可能有——静默取第一条会用上被覆盖前的旧值。
+    by_day = {
+        str(row[DAY_KEY_COL]): row for _, row in df.sort_values(DAY_KEY_COL).iterrows()
+    }
+
+    rows: list[np.ndarray] = []
+    missing_days: list[str] = []
+    cursor = start_dt
+    while cursor <= end_dt:
+        key = cursor.strftime("%Y-%m-%d")
+        row = by_day.get(key)
+        if row is None:
+            missing_days.append(key)
+            rows.append(np.full(dim, np.nan, dtype=np.float64))
+        else:
+            rows.append(
+                np.asarray([row[n] for n in names], dtype=np.float64)
+            )
+        cursor += timedelta(days=1)
+
+    return np.array(rows, dtype=np.float64), missing_days
+
+
 def get_daily_vector(elder_id: str, day_key: str, track: str) -> np.ndarray:
     """获取某轨指定 day_key 的单条特征向量 (feature_dim,)"""
     vectors = get_feature_vectors(elder_id, day_key, day_key, track)

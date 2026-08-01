@@ -175,14 +175,40 @@ def run_daily_pipeline(
                 f"需运维介入并向家属明示『当前数据不足』"
             )
 
+    # ★ status 必须反映"今天到底有没有产出判定"，不能只看数据质量与异常。
+    #
+    #   旧写法有三个分支：failure / 无可用轨 / success。缺的是第四种情形——
+    #   **两轨数据质量都正常，但都没能出分**。它真实存在：输入窗口缺日时
+    #   infer_track 返回 data_insufficient，而 track_quality 是 valid
+    #   （今天的数据是好的），于是 usable_tracks 非空、failure 为 None
+    #   → 判 success → run_daily_pipeline.py 的非零退出码防线也不触发。
+    #
+    #   实测（删掉一天的特征行后）：
+    #       2026-08-16  管道status=success  error=None  risk_result=无(未判定)
+    #       2026-08-17  管道status=success  error=None  risk_result=无(未判定)
+    #       2026-08-20  管道status=success  error=None  risk_result=无(未判定)
+    #   cron 全绿、监控全绿，而这几天连推理日志里都没有可用的分。
+    #
+    #   这与 TODO.md 已修的"异常被吞后 status 仍 success"是同一条失效链的
+    #   第二个入口：上次修的是异常路径，这次是"没抛异常但也没结论"的路径。
+    #   判据落在 risk_result 上——它是这条链路的**最终产物**，
+    #   有它才说明聚合→推理→判定整条链真的走完了。
     if failure is not None:
         status = "inference_failed"
     elif not usable_tracks:
         status = "skipped_inference"
+    elif risk_result is None:
+        status = "no_verdict"
+        logger.error(
+            f"  └─ 两轨数据质量正常（{track_quality}）但均未产出可评估结果，"
+            f"当日无风险判定。轨状态: "
+            f"{(inference_result or {}).get('track_statuses')}；"
+            f"这不是'一切正常'，需运维介入"
+        )
     else:
         status = "success"
 
-    log = logger.error if failure else logger.info
+    log = logger.error if status != "success" else logger.info
     log(f"=== 每日管道完成: {elder_id}, status={status} ===")
 
     return {
@@ -328,15 +354,48 @@ def _get_recent_quality(
               → validator 判 **offline**
       同一份输入因为跑了几次而落到不同的质量档，`check_prolonged_degradation`
       的运维告警也跟着变。补算与重跑必须是幂等的（README 明写这一点）。
+
+    ★ 按**自然日**取，缺日补 `QUALITY_INSUFFICIENT`。
+
+      旧实现取"最近 N 条记录"，与日历无关。而"那天压根没跑"（宕机 / cron 漏
+      触发）根本不写 CSV 行，于是那些日子在这个列表里**不存在**——
+      `validate_daily_data` 的离线判据看的是"末尾 3 条是否全部非 valid"，
+      三条来自三个不相邻的日子，`QUALITY_OFFLINE` 在生产链路里因此不可达
+      （全仓只有单测构造过它）。设备连着几天没上报，界面上仍是"一切正常"，
+      正好破在"长期降级和长期正常必须可区分"这条原则上。
+
+      缺日按 insufficient 计：那天确实没有可信数据，与"跑过但缺 ≥3 维"
+      在运维含义上是同一件事——都需要有人去看设备。
     """
+    from datetime import datetime, timedelta
+
     try:
         df = load_features_csv(elder_id, track)
     except FileNotFoundError:
         return []
     if before_day_key is not None:
         df = df[df[DAY_KEY_COL] < before_day_key]
-    recent = df.sort_values(DAY_KEY_COL, ascending=False).head(n_days)
-    return recent.sort_values(DAY_KEY_COL)["data_quality"].tolist()
+    if len(df) == 0:
+        return []
+
+    by_day = dict(zip(df[DAY_KEY_COL].astype(str), df["data_quality"]))
+
+    # 基准日：给了 before_day_key 就以它的前一天为终点，否则以表里最后一天为终点
+    try:
+        if before_day_key is not None:
+            end_dt = datetime.strptime(before_day_key, "%Y-%m-%d") - timedelta(days=1)
+        else:
+            end_dt = datetime.strptime(str(df[DAY_KEY_COL].max()), "%Y-%m-%d")
+    except ValueError:
+        # 日期解析不了就退回旧的按条数取法，不因为一个脏 day_key 让整条链路失败
+        recent = df.sort_values(DAY_KEY_COL, ascending=False).head(n_days)
+        return recent.sort_values(DAY_KEY_COL)["data_quality"].tolist()
+
+    out: list[str] = []
+    for offset in range(n_days - 1, -1, -1):
+        key = (end_dt - timedelta(days=offset)).strftime("%Y-%m-%d")
+        out.append(by_day.get(key, QUALITY_INSUFFICIENT))
+    return out
 
 
 def _apply_cold_start_fallbacks(

@@ -41,8 +41,8 @@ from src.baseline.scaler_utils import (
 from src.utils.io import (
     get_baseline_dir,
     get_daily_vector,
-    get_feature_vectors,
     get_feature_weight_array,
+    get_feature_window,
     get_model_filename,
     get_scaler_path,
     get_track_meta,
@@ -220,6 +220,19 @@ def infer_track(
     )
 
     # 2. 获取今日特征与过去 window 天特征
+    #
+    # ★ 输入窗口按**自然日对齐**取，缺日以全 NaN 行占位（get_feature_window）。
+    #
+    #   旧实现用 get_feature_vectors + `len(past) < window` 整体放弃。那个判据
+    #   数的是"这个区间里磁盘上有几行"，与日历无关，于是**漏跑一天会让之后连续
+    #   7 天彻底出不了分**：实测删掉 2026-08-15 一行后，08-16~08-22 全部
+    #   data_insufficient、score=0.0，直到那天滑出窗口才恢复。而这几天的
+    #   track_quality 两轨都是 valid（今天的数据是好的），daily_job 于是判
+    #   status="success"、脚本 exit 0——cron 全绿而老人连续 8 天零监测。
+    #
+    #   缺日行的 NaN 与"跑过但某维缺测"的 NaN 在下面走**完全同一条**处理路径
+    #   （用冻结 scaler 的训练均值补进 GRU 输入、排除出打分），不需要新增分支。
+    #   这与 validator 四态里"缺日与降级日走同一条路径"是同一条原则。
     try:
         today_vec = get_daily_vector(elder_id, day_key, track)
 
@@ -227,7 +240,7 @@ def infer_track(
         start_dt = today_dt - timedelta(days=window)
         end_dt = today_dt - timedelta(days=1)
 
-        past = get_feature_vectors(
+        past, missing_days = get_feature_window(
             elder_id,
             start_dt.strftime("%Y-%m-%d"),
             end_dt.strftime("%Y-%m-%d"),
@@ -237,11 +250,27 @@ def infer_track(
         logger.warning(f"  └─ [{track}] 特征数据获取失败: {e}")
         return {**base, "status": STATUS_DATA_INSUFFICIENT, "error": str(e)}
 
-    if len(past) < window:
-        logger.warning(f"  └─ [{track}] 历史数据不足（{len(past)}/{window}天）")
-        return {**base, "status": STATUS_DATA_INSUFFICIENT}
-
-    past = past[-window:]
+    # ★ 但不能无上限地容忍缺日：窗口里缺得太多，GRU 的输入基本是训练均值，
+    #   预测退化成"平均的一天"，残差随之失去意义。上限复用
+    #   risk.continuity.max_skip_days（默认 3）——"超过三天没有可信数据，
+    #   就不该再假装这是同一段状态"，与 continuity.walk_back_days 的断段语义
+    #   保持一致，判级/判型/推理三处对"缺多久算断"给出同一个答案。
+    max_gap = risk_cfg.get("continuity", {}).get("max_skip_days", 3)
+    if len(missing_days) > max_gap:
+        logger.warning(
+            f"  └─ [{track}] 输入窗口缺 {len(missing_days)}/{window} 天 "
+            f"（上限 {max_gap}）: {missing_days}，无法可靠预测"
+        )
+        return {
+            **base,
+            "status": STATUS_DATA_INSUFFICIENT,
+            "missing_window_days": missing_days,
+        }
+    if missing_days:
+        logger.info(
+            f"  └─ [{track}] 输入窗口缺 {len(missing_days)} 天（以训练均值占位）: "
+            f"{missing_days}"
+        )
 
     # ★ 缺测维的处理：填不上的维在 imputer 里保持 NaN（绝不填 0——原始量纲的 0
     #   会变成 −15σ 的假偏离，见 imputer 里的实测数据）。到这里必须做两件事：
@@ -378,6 +407,9 @@ def infer_track(
         "signed_available": residual_stats["signed_available"],
         "valid_features": [names[i] for i in valid_idx],
         "skipped_features": [names[i] for i in range(dim) if missing_mask[i]],
+        # 输入窗口里有几天是缺日占位的。落盘是为了让"这天的分是在多少缺日之上
+        # 算出来的"可查——预测质量随缺日增多而下降，排查时必须看得见。
+        "missing_window_days": missing_days,
         # 只有真正喂进去了才 +1：冻结日与重跑日的池样本数不变，
         # 旧写法无条件 +1 会让日志里的 ewma_n 与磁盘上的池对不上。
         "ewma_n": pool_n + (1 if ewma_updated else 0),

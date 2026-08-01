@@ -203,6 +203,34 @@ def decide(
     notify_on_resolve = events_cfg.get("notify_on_resolve", True)
     new_type_cooldown = int(events_cfg.get("new_type_cooldown_days", 3))
 
+    gap = _days_between(day_key, channel_state.get("last_seen_day"))
+
+    # 0. ★ 补算**早于**当前事件已观测区间的历史日：一律不动状态、不通知。
+    #
+    #    这条必须排在最前面，连"回到正常"都要让位。理由：事件状态描述的是
+    #    "此刻这个老人处于什么状况"，而一条更早的历史判定不携带任何关于"此刻"
+    #    的信息——它既不能宣布缓解，也不能宣布恶化。
+    #
+    #    实测（补算一个 7 月的正常日，而 8 月正有活跃 L3）：
+    #        2026-08-10 L3 → started (通知)
+    #        2026-08-11/12 L3 → cooldown
+    #        补算 2026-07-15 L0 → resolved，active=False
+    #        状态被清空：started_day=null、notify_count=0
+    #        2026-08-13 L3 → started (**又发一次通知**)
+    #    一次"补算上个月漏掉的某天"就把正在持续的 L3 事件整个抹掉：周报的
+    #    「预警回执」不再显示它、事件年龄归零、次日重发"开始"通知。
+    #
+    #    反方向同样坏：补算一个更早的高等级日会被判成 escalated 并**真的发出
+    #    强制响铃 + 惊动网格员**，而事件的 started_day 仍指向 8 月，
+    #    落盘后 last_seen_day(7/21) < started_day(8/10)，状态自相矛盾。
+    #
+    #    `decide` 的第 3 条说"同一天重算出更高等级是真实的升级"——那个论证只对
+    #    gap == 0 成立（同一天的判定结果变了），gap < 0 是搭了便车。
+    #    这与 ewma.update 用 `day_key <= last_day_key` 拒收乱序补算是同一条原则：
+    #    "往回补一天会把早已过去的分当成最新观测"。
+    if active and gap is not None and gap < 0:
+        return TRANSITION_NONE, False
+
     # 1. 回到正常：事件结束
     if risk_level <= 0:
         if active:
@@ -214,7 +242,6 @@ def decide(
     #    断开判据复用 max_skip_days（与 continuity.walk_back_days 一致）：
     #    设备离线一段时间后，不该把两段无关的风险期粘成同一个事件——
     #    那正是"5 条日志跨 22 个日历日仍数出 consecutive=5"的同型错误。
-    gap = _days_between(day_key, channel_state.get("last_seen_day"))
     if not active or gap is None or gap > max_skip_days + 1:
         return TRANSITION_STARTED, True
 

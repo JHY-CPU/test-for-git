@@ -4,6 +4,25 @@ venv/
 env/
 
 # ===== 大模型权重（可下载，勿入库）=====
+# 这一段此前是空的——标题在、规则没写。而仓库根躺着 3 GB 未跟踪权重
+# （funasr_models/ 2.1G + models/iic--SenseVoiceSmall/ 897M），是 2026-07-29
+# 移除 SenseVoice 声学子系统时的残留，代码里零引用。一次 `git add .` 就会
+# 灌进仓库，而 git 里的大文件事后清不掉（要重写历史）。
+funasr_models/
+models/
+
+# ===== 验证脚本残留 =====
+# 两个验证脚本用独立 elder_id（V001 / D_*）跑完自动清理，但清理白名单曾漏掉
+# alert_state（文件名无日期后缀、不匹配 {elder}_* 通配），10 个 D_*.json
+# 因此被提交进过仓库。这里兜第二道：验证产物不该进 git。
+mental-health-sense/data/logs/*/V001*
+mental-health-sense/data/logs/*/D_*
+mental-health-sense/data/features/V001/
+mental-health-sense/data/features/D_*/
+mental-health-sense/data/baselines/V001/
+mental-health-sense/data/baselines/D_*/
+mental-health-sense/data/raw/*/V001/
+mental-health-sense/data/raw/*/D_*/
 
 # ===== Python 缓存 =====
 __pycache__/

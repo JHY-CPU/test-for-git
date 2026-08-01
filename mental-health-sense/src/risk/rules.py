@@ -345,6 +345,25 @@ def _counts_toward_consecutive(day_result: dict, tracks: frozenset[str] = frozen
     degraded / insufficient / offline 的日子被**跳过**（既不累加也不打断）——
     传感器抖一下不该让攒了 4 天的偏离段清零，也不该凭空算成偏离。
 
+    ★ 判据必须同时看 status 与 data_quality，两者缺一不可。
+
+      只看 data_quality 会漏掉一整类日子：`status="data_insufficient"` 而
+      `data_quality="valid"`。这不是臆想的组合，它正是"输入窗口缺日"产生的
+      结构——今天的 CSV 行是好的（quality=valid），但窗口凑不齐、推理出不了分。
+      这种日子被判成"质量正常但不达标"，于是**打断**连续段。
+
+      实测（D0-D3 真实睡眠恶化，D4 漏跑，D5-D6 继续恶化）：
+          judge  consecutive = 6   risk_level = 3
+          rules  sleep_stability consecutive_days = 2 / 门槛 3   is_active = False
+      同一段数据，judge 报 L3（短信 + 强制响铃 + 网格员），rules 说无风险类型，
+      周报写"本周风险类型：无"。把 D4 换成 degraded 日则一切正常（数到 6、激活）
+      ——差别只在于走了哪条判据。
+
+      judge._counts 那侧一直是 `is_evaluable(status) and quality in (None,"valid")`，
+      两侧不一致的后果与 continuity.py 开头记录的那组误报/漏报**完全同型**，
+      只是当年修的是 degraded 日，data_insufficient 日走的是另一条路进来。
+      改动持续性语义时必须两侧一起看（CLAUDE.md 明写）。
+
     ★ 按轨判定，不看单一顶层值。质量本来就是按轨的：睡眠轨降级不该压住社交轨的
     持续性计数，那会把双轨的故障隔离在判定层又粘回去。只看**该规则必需的那些轨**，
     全部 valid 才计入。
@@ -375,6 +394,15 @@ def _counts_toward_consecutive(day_result: dict, tracks: frozenset[str] = frozen
 
     for t in tracks:
         track_result = day_result.get(t)
+
+        # ★ 该轨跑了推理但**没能出分**（status 不可评估）→ 跳过这天。
+        #   排在质量判据之前：data_insufficient 日的 data_quality 可能是 valid
+        #   （今天的数据好，只是输入窗口凑不齐），只看质量会把它当成"正常但不达标"
+        #   而打断连续段。见本函数 docstring 里那组 judge/rules 分叉的实测。
+        if isinstance(track_result, dict) and track_result.get("status") is not None:
+            if not is_evaluable(track_result["status"]):
+                return False
+
         if isinstance(track_result, dict) and track_result.get("data_quality") is not None:
             qualities.append(track_result["data_quality"])
         elif isinstance(track_quality_map, dict) and t in track_quality_map:
