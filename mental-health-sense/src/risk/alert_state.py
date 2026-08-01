@@ -502,6 +502,17 @@ def active_events(elder_id: str) -> dict[str, dict]:
 
 
 def event_age_days(channel_state: dict, as_of: str) -> int | None:
-    """事件已持续几天（含首日）。"""
+    """事件已持续几天（含首日）。
+
+    ★ `as_of` 早于 `started_day` 时返回 None，而不是一个负数。
+
+      补生成历史周报时会真的走到这条路：周报的基准日是那一周的周末，
+      而活跃事件可能是**之后**才开始的。实测（2026-08-03 端到端验证时看到）：
+          周报基准日 2026-07-31、事件起于 2026-08-08
+          → 「预警回执」渲染出"持续中，第 **-7 天**（2026-08-08 起）"
+      负天数对家属没有任何意义，而 None 是本函数已有的"算不出来"表示，
+      展示层（weekly_report._format_alert_receipts 的 `if age else ""`）
+      本来就会把它整段略去，只保留"持续中（X 起）"。
+    """
     gap = _days_between(as_of, channel_state.get("started_day"))
-    return None if gap is None else gap + 1
+    return None if gap is None or gap < 0 else gap + 1

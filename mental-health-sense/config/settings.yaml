@@ -223,8 +223,21 @@ alert:
     #   与"长期降级和长期正常必须可区分"是同一条原则。
     weekly_receipt: true
     # 缓解（回到 L0）通知的动作（可选）。不写则用 alert.py 的 RESOLVE_ACTIONS
-    # 默认（push_to_children）。要覆盖时写全 action / notify——_resolve_actions_for
-    # 是白名单式合并，只认 action 与 notify 两个键（+ log/include_in_report）。
+    # 默认（push_to_children）。_resolve_actions_for 是白名单式合并，
+    # 只认 action 与 notify 两个键（+ log/include_in_report）。
+    #
+    # ⚠️ notify 在这里是**基线收件人**，不是最终名单：事件曾达到过的最高等级
+    #   的收件人会被**并进来**，且不可被这里删掉。也就是说 L3 事件缓解时
+    #   community_worker 一定会收到，哪怕这里只写了 children——
+    #   "网格员被叫来过，就必须有人告诉他结束了"是义务，不是可选项。
+    #
+    #   这一行原先会**整个覆盖**峰值名单（配置合并排在峰值判定之后），于是
+    #   L3 缓解时网格员收不到通知，正好破在 _resolve_actions_for 注释明写要防的
+    #   那个场景上；而守门用例 test_regression_2026_08_01.py:88 不传 config、
+    #   只测到内置默认，一直是绿的。现在的守门用例见
+    #   tests/test_regression_2026_08_03.py。
+    #
+    #   要完全不发缓解通知，开关是上面的 notify_on_resolve，不是把这里写空。
     resolve:
       action: "push_notification"
       notify: ["children"]

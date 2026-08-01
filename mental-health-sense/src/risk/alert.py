@@ -154,13 +154,29 @@ def _resolve_actions_for(config: dict | None, prev_level: int) -> dict:
     收到一条莫名其妙的缓解通知"。
 
     配置入口是 `alert.events.resolve`（可选）；不写则用 RESOLVE_ACTIONS。
+
+    ★ 峰值收件人必须**并在配置之后**，而且是并集、不是替换。
+
+      旧写法先按 peak 设好名单，再让 `alert.events.resolve.notify` 无条件覆盖，
+      而 settings.yaml 里恰好写了一份和默认相同的 `["children"]`
+      （照配置注释"要覆盖时写全 action / notify"抄的，显然不是有意压掉网格员）。
+      实测 prev_level=3：
+          config=None          → ['children', 'community_worker']
+          config=load_config() → ['children']          ← 本函数注释要防的场景
+      而生产侧两个调用方（daily_job / depression.runner）都传真实 config，
+      所以**线上跑的一定是有缺陷的那条分支**，守门用例
+      （test_regression_2026_08_01.py:88）却因为不传 config 而一直是绿的。
+
+      改成并集之后，`resolve.notify` 的语义是"缓解通知的**基线**收件人"，
+      峰值等级的收件人不可被它删掉——"告诉被惊动过的人事情结束了"是义务，
+      不是可选项。真要完全不发缓解通知，开关是 `alert.events.notify_on_resolve`。
+
+    ★ 名单来源用 `_actions_for(峰值等级, config)` 而不是硬取 ALERT_ACTIONS[SEVERE]：
+      这样运营方对 `level_3.notify` 的定制（比如加 family_doctor）同样会被带到
+      缓解通知里。只取 notify 一项——整个 merge 会把 force_notification 与
+      repeat_days 一起带进来，而缓解刻意降一档强度、绝不响铃。
     """
     merged = dict(RESOLVE_ACTIONS)
-
-    if prev_level >= int(AlertLevel.SEVERE):
-        # 沿用 L3 的收件人名单，但**不**沿用 force_notification 与 force_ring
-        severe = ALERT_ACTIONS[AlertLevel.SEVERE]
-        merged["notify"] = _normalize_notify(severe.get("notify", []))
 
     section = ((config or {}).get("alert") or {}).get("events") or {}
     resolve_cfg = section.get("resolve")
@@ -173,6 +189,25 @@ def _resolve_actions_for(config: dict | None, prev_level: int) -> dict:
         for key in ("log", "include_in_report"):
             if key in resolve_cfg:
                 merged[key] = resolve_cfg[key]
+
+    # ★ 钳位后再构造枚举。`alert_state.load_state` 的合并只过滤键名、不校验值域
+    #   （alert_state.py:186 与 209-210 的兜底都不校验），手改过或别的版本写下的
+    #   状态文件里出现 `"peak_level": 7` 时，`AlertLevel(7)` 会抛 ValueError——
+    #   而调用处（trigger_alert 里读 peak_level 那行）没有第二层 try，
+    #   一个脏状态文件会让整条日管道当天失败。宁可按 L3 处理。
+    peak = min(max(int(prev_level or 0), 0), int(AlertLevel.SEVERE))
+    if peak >= int(AlertLevel.WARNING):
+        peak_notify = _normalize_notify(
+            _actions_for(AlertLevel(peak), config).get("notify", [])
+        )
+        # 保序去重：配置名单在前，峰值名单补在后。不用 set——本仓"确定性优先"，
+        # 收件人顺序会出现在日志与测试断言里，不该依赖哈希顺序。
+        combined = list(merged.get("notify") or [])
+        for recipient in peak_notify:
+            if recipient not in combined:
+                combined.append(recipient)
+        merged["notify"] = combined
+
     return merged
 
 

@@ -25,7 +25,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 > 这与"MPDD 子进程必须剔除系统 `PYTHONPATH`"是同一个污染源（见抑郁旁路一节）。
 
 ```bash
-# 测试（24 文件 / 501 用例）
+# 测试（25 文件 / 511 用例）
 env -u PYTHONPATH python -m pytest                 # pytest.ini 已设 testpaths=tests 与 -v
 python -m pytest tests/test_risk_judge.py
 python -m pytest tests/test_risk_judge.py::TestJudgeRiskLevel::test_xxx

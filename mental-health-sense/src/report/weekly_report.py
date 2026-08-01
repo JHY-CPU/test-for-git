@@ -44,11 +44,36 @@ def generate_weekly_report(
         week_start: 周起始日期 "YYYY-MM-DD"，默认计算最近7天
         week_end: 周结束日期 "YYYY-MM-DD"
         use_llm: 是否使用LLM生成（False时使用规则模板）
-        config: 全局配置（report.model / report.max_tokens）
+        config: 全局配置。**不传就在这里自己加载**，见下方注释。
 
     Returns:
         Markdown格式的周报文本
     """
+    # ★ config 兜底必须在这里做，而不是指望每个调用方都记得传。
+    #
+    #   `scripts/run_weekly_pipeline.py` 就没传，于是一路 None 传到
+    #   `_format_depression_section`，它第一行 `(config or {}).get("depression")`
+    #   取空后**整节 return ""** —— 抑郁小节连同 contract.py 明令"字段在就必须
+    #   渲染"的那句校准警示语一起静默消失。实测：
+    #       config=load_config() → '## 情绪状态评估（研究性，未校准）…'
+    #       config=None          → ''
+    #   而 settings.yaml 里 depression.enabled / show_in_report 都是 true。
+    #
+    #   修在这里而不是脚本里：保护**所有**调用方（脚本、weekly_job、将来的补算
+    #   工具），与 daily_job.run_daily_pipeline 自己 load_config 是同一条惯例。
+    #   下方 `_generate_with_llm` 原有的同款自救已删除——兜底只留这一处，
+    #   两份会漂的兜底比没有更危险（同 imputer 删掉 check_offline_status 的理由）。
+    #
+    #   读不出配置时回落空字典而不是抛：周报是给家属看的产物，
+    #   配置坏了应当出一份缺章节的周报，而不是整周没有周报。
+    if config is None:
+        from src.utils.io import load_config
+        try:
+            config = load_config()
+        except Exception as e:
+            logger.error(f"周报读取配置失败，部分章节将缺失: {e}")
+            config = {}
+
     # 计算日期范围
     if week_end is None:
         week_end_dt = datetime.now()
@@ -138,7 +163,7 @@ def generate_weekly_report(
             risk_types=risk_type_names,
             deviation_days=sum(1 for r in week_results if r.get("is_deviation", False)),
             # trends 的键就是 generate_rule_based_report 的形参名
-            # （social_trend / sleep_trend / social_week_change ...），
+            # （social_trend / sleep_trend / social_vs_baseline ...），
             # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
             **trends,
         )
@@ -160,11 +185,11 @@ def generate_weekly_report(
 
 ## 监测详情
 
-| 维度 | 本周趋势 | 上周对比 |
+| 维度 | 周内走向 | 相对个人常态 |
 | :--- | :--- | :--- |
-| 社交互动 | {trends.get('social_trend', '平稳')} | 社交方面与上周相比{trends.get('social_week_change', '无明显变化')} |
-| 睡眠质量 | {trends.get('sleep_trend', '平稳')} | 睡眠方面与上周相比{trends.get('sleep_week_change', '无明显变化')} |
-| 日常活动 | {trends.get('activity_trend', '平稳')} | 活动方面与上周相比{trends.get('activity_week_change', '无明显变化')} |
+| 社交互动 | {trends.get('social_trend', '平稳')} | 社交方面本周整体{trends.get('social_vs_baseline', '无明显差异')} |
+| 睡眠质量 | {trends.get('sleep_trend', '平稳')} | 睡眠方面本周整体{trends.get('sleep_vs_baseline', '无明显差异')} |
+| 日常活动 | {trends.get('activity_trend', '平稳')} | 活动方面本周整体{trends.get('activity_vs_baseline', '无明显差异')} |
 
 ## 统计指标
 
@@ -377,7 +402,7 @@ _TREND_SOURCES = {
 _FLAT_TRENDS = {
     f"{name}_trend": "平稳" for name in _TREND_SOURCES
 } | {
-    f"{name}_week_change": "无明显变化" for name in _TREND_SOURCES
+    f"{name}_vs_baseline": "无明显差异" for name in _TREND_SOURCES
 }
 
 
@@ -386,7 +411,16 @@ def _compute_weekly_trends(week_results: list[dict]) -> dict:
     从一周的双轨推理结果计算各维度趋势。
 
     取每条趋势线代表特征的 signed_z 序列（observed − predicted，负值=低于个人基线），
-    比较前后半周的均值判方向。
+    产出两组互不相同的结论：
+
+        {name}_trend        **周内**走向：前半周均值 vs 后半周均值
+        {name}_vs_baseline  本周整体相对**个人基线**的高低（signed_z 均值 vs ±1.0）
+
+    ★ 两者都**不是周环比**——本函数只拿得到 week_results 这一周的数据，
+      从没加载过上一周。键名此前叫 `{name}_week_change`，而它同时是
+      LLM 提示词的占位符名与 templates.generate_rule_based_report 的形参名，
+      于是那句谎从键名一路传染到系统提示词（"指出本周相比上周的变化趋势"）
+      和周报表格列名。改名是为了让下一个人读到键名就知道它到底是什么。
     """
     if len(week_results) < 2:
         return dict(_FLAT_TRENDS)
@@ -405,7 +439,7 @@ def _compute_weekly_trends(week_results: list[dict]) -> dict:
                 series[name].append(float(signed_z[feature]))
 
     def _judge_trend(values: list[float], threshold: float = 0.3) -> str:
-        """前后半周均值之差：正=上升，负=下降"""
+        """**周内**前后半周均值之差：正=上升，负=下降。与上一周无关。"""
         if len(values) < 2:
             return "平稳"
         mid = len(values) // 2
@@ -416,21 +450,21 @@ def _compute_weekly_trends(week_results: list[dict]) -> dict:
             return "下降"
         return "平稳"
 
-    def _judge_week_change(values: list[float]) -> str:
-        """整周相对个人基线的位置"""
+    def _judge_vs_baseline(values: list[float]) -> str:
+        """整周相对**个人基线**的位置（不是相对上一周）"""
         if not values:
-            return "无明显变化"
+            return "无明显差异"
         avg = float(np.mean(values))
         if avg > 1.0:
-            return "有明显增加"
+            return "明显高于常态"
         if avg < -1.0:
-            return "有明显减少"
-        return "无明显变化"
+            return "明显低于常态"
+        return "无明显差异"
 
     result = {}
     for name, values in series.items():
         result[f"{name}_trend"] = _judge_trend(values)
-        result[f"{name}_week_change"] = _judge_week_change(values)
+        result[f"{name}_vs_baseline"] = _judge_vs_baseline(values)
     return result
 
 
@@ -450,20 +484,18 @@ def _generate_with_llm(
         risk_result: 风险判定结果
         risk_types_str: 风险类型字符串
         config: 全局配置；report.model / report.max_tokens 从这里取
-            （此前两项写死在函数体里，settings.yaml 的 report 段无人读取）
+            （此前两项写死在函数体里，settings.yaml 的 report 段无人读取）。
+            调用方 generate_weekly_report 已保证它非 None——本函数此前自己也
+            兜了一次底，而**只兜这一处**正是缺陷所在：它让"config 会是 None"
+            成为已知事实，却把同一份 config 喂给抑郁小节时漏掉了。
+            兜底已上移，这里不再重复。
 
     Returns:
         周报正文
     """
     deviation_days = risk_result.get("consecutive_deviation", 0)
 
-    if config is None:
-        from src.utils.io import load_config
-        try:
-            config = load_config()
-        except Exception:
-            config = {}
-    report_cfg = config.get("report", {}) or {}
+    report_cfg = (config or {}).get("report", {}) or {}
     model = report_cfg.get("model", "claude-sonnet-5")
     max_tokens = report_cfg.get("max_tokens", 400)
 
@@ -475,9 +507,9 @@ def _generate_with_llm(
         deviation_days=deviation_days,
         risk_label=risk_result.get("risk_label", "正常"),
         risk_types=risk_types_str,
-        social_week_change=trends.get("social_week_change", "无明显变化"),
-        sleep_week_change=trends.get("sleep_week_change", "无明显变化"),
-        activity_week_change=trends.get("activity_week_change", "无明显变化"),
+        social_vs_baseline=trends.get("social_vs_baseline", "无明显差异"),
+        sleep_vs_baseline=trends.get("sleep_vs_baseline", "无明显差异"),
+        activity_vs_baseline=trends.get("activity_vs_baseline", "无明显差异"),
     )
 
     try:
@@ -505,7 +537,7 @@ def _generate_with_llm(
             risk_types=[risk_types_str] if risk_types_str != "无" else [],
             deviation_days=deviation_days,
             # trends 的键就是 generate_rule_based_report 的形参名
-            # （social_trend / sleep_trend / social_week_change ...），
+            # （social_trend / sleep_trend / social_vs_baseline ...），
             # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
             **trends,
         )
@@ -519,7 +551,7 @@ def _generate_with_llm(
             risk_types=[risk_types_str] if risk_types_str != "无" else [],
             deviation_days=deviation_days,
             # trends 的键就是 generate_rule_based_report 的形参名
-            # （social_trend / sleep_trend / social_week_change ...），
+            # （social_trend / sleep_trend / social_vs_baseline ...），
             # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
             **trends,
         )
