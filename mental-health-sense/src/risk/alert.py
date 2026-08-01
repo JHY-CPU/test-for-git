@@ -187,9 +187,9 @@ def _event_gap_days(config: dict | None, channel: str) -> int:
 
       depression 是**稀疏事件驱动**：要"有正脸 + 有连续语音"的片段，独居老人
       可能几周才有一次（见 run_depression_assessment.py 的模块 docstring）。
-      套用 3 天的话，任何两次相邻评估都 > 3+1 天 → 每次都判 TRANSITION_STARTED
-      → **去重完全失效**，而去重正是 alert_state 存在的理由。实测两次间隔 7 天
-      的"重度"评估各推送一次、notify_count 各自归 1。
+      套用 baseline 的 4 天（max_skip_days+1）的话，任何两次相邻评估都 > 4 天
+      → 每次都判 TRANSITION_STARTED → **去重完全失效**，而去重正是 alert_state
+      存在的理由。实测两次间隔 7 天的"重度"评估各推送一次、notify_count 各自归 1。
 
       改用评估有效期 `depression.assessment.valid_days`：评估还在有效期内，
       就是"它仍代表当前状况"，那两次评估描述的就是同一段事件。语义自洽，
@@ -197,10 +197,15 @@ def _event_gap_days(config: dict | None, channel: str) -> int:
     """
     cfg = config or {}
     if channel == alert_state.CHANNEL_DEPRESSION:
+        # 评估有效期就是完整 gap 阈值：超过它，评估不再代表当前状况 → 新事件。
         return int(
             ((cfg.get("depression") or {}).get("assessment") or {}).get("valid_days", 30)
         )
-    return int(((cfg.get("risk") or {}).get("continuity") or {}).get("max_skip_days", 3))
+    # baseline 是每日批处理，相邻两次观测的 gap 天然是 1 天；max_skip_days 的
+    # 语义是"可连续跳过 N 天"，所以完整 gap 阈值 = max_skip_days + 1（间隔超过
+    # 它才算断段）。★ +1 在这里做掉，decide 统一用 `gap > event_gap_days`——
+    # 不能让每日轨的换算逻辑污染 depression（否则 valid_days=30 变成 31）。
+    return int(((cfg.get("risk") or {}).get("continuity") or {}).get("max_skip_days", 3)) + 1
 
 
 def _risk_keys_of(risk_types: list[dict]) -> list[str]:
@@ -284,8 +289,11 @@ def trigger_alert(
     risk_keys = _risk_keys_of(risk_types)
 
     # 事件曾达到过的最高等级，用于决定缓解通知发给谁（见 _resolve_actions_for）。
-    # 必须在 decide/apply 之前读：apply 对 RESOLVED 会把 channel 清空。
-    prev_level = int(channel_state.get("last_notified_level") or 0)
+    # ★ 必须用 peak_level 而非 last_notified_level——后者被每个通知性 transition
+    #   覆盖：L3 峰值后降到 L2 再报一次新类型，峰值就被覆盖成 2，社区网格员
+    #   收不到"L3 已结束"。必须在 decide/apply 之前读：apply 对 RESOLVED
+    #   会把 channel 清空。
+    prev_level = int(channel_state.get("peak_level") or channel_state.get("level") or 0)
 
     transition, should_notify = alert_state.decide(
         channel_state, day_key, normalized_level, risk_keys,

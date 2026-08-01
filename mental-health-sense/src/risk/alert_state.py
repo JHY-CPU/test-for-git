@@ -68,9 +68,10 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 1.2.0：channel 增加 peak_level（事件曾达到的最高等级，供缓解通知选收件人）。
 # 1.1.0：channel 增加 last_processed_day（通道级观测游标）。
-# 老文件（1.0.0，无该字段）由 load_state 用 last_seen_day 兜底，见那里的说明。
-SCHEMA_VERSION = "1.1.0"
+# 老文件由 load_state 兜底：last_processed_day 用 last_seen_day，peak_level 用 level。
+SCHEMA_VERSION = "1.2.0"
 LOG_TYPE = "alert_state"
 DATE_FMT = "%Y-%m-%d"
 
@@ -124,6 +125,11 @@ def _empty_channel() -> dict:
         "notify_count": 0,
         "acknowledged": False,
         "acknowledged_at": None,
+        # ★ 事件曾达到过的最高等级。决定缓解通知的收件人（alert._resolve_actions_for
+        #   只把 community_worker 加给"曾经惊动过 L3"的事件）。不能用
+        #   last_notified_level——它被每个通知性 transition 覆盖：L3 峰值后降到
+        #   L2 再报一次新类型，峰值就被覆盖成低等级，网格员收不到"L3 已结束"。
+        "peak_level": 0,
         # ★ 通道级游标：这条通道**总共**处理到哪一天，跨事件保留、只增不减。
         #
         #   与 last_seen_day 分开，因为两者回答的是不同问题：
@@ -198,6 +204,10 @@ def load_state(elder_id: str) -> dict:
                 #   last_seen_day 非空"只可能来自老文件。
                 if not merged.get("last_processed_day"):
                     merged["last_processed_day"] = merged.get("last_seen_day")
+                # ★ peak_level 兜底到当前等级：老状态文件没有该字段时，活跃事件
+                #   的峰值至少是当前等级（apply 会随后 max 上去）。
+                if not merged.get("peak_level"):
+                    merged["peak_level"] = int(merged.get("level", 0) or 0)
 
                 state["channels"][name] = merged
             elif ch is not None:
@@ -269,10 +279,11 @@ def decide(
       而"要不要发通知"这件事的全部逻辑都集中在一处可审查的地方。
 
     Args:
-        event_gap_days: 隔多久没有观测就算两段无关的事件。**按 channel 取**，
-            由 alert._event_gap_days 决定：baseline 是每日批处理，复用
-            risk.continuity.max_skip_days；depression 是稀疏事件驱动（几周才有
-            一次合格片段），用同一个 3 天会让每次评估都判成新事件、去重完全失效。
+        event_gap_days: 两次可信观测之间允许的最大间隔（天），超过它就算两段
+            无关的事件。**按 channel 取**，由 alert._event_gap_days 决定：
+            baseline 返回 max_skip_days + 1（每日观测 gap 天然为 1，+1 的换算在
+            调用方做掉）；depression 返回 depression.assessment.valid_days
+            （稀疏事件驱动，评估还在有效期内 = 仍代表当前状况 = 同一段事件）。
 
     Returns:
         (transition, notify)
@@ -336,11 +347,13 @@ def decide(
 
     # 2. 事件开始：没有活跃事件，或与上次可信观测断开太久
     #
-    #    断开判据按 channel 取（见 event_gap_days 的说明）：baseline 复用
-    #    max_skip_days，与 continuity.walk_back_days 一致——设备离线一段时间后，
-    #    不该把两段无关的风险期粘成同一个事件，那正是"5 条日志跨 22 个日历日
-    #    仍数出 consecutive=5"的同型错误。
-    if not active or gap is None or gap > event_gap_days + 1:
+    #    断开判据按 channel 取（见 alert._event_gap_days 的说明），调用方已经
+    #    把 +1 的换算做掉（baseline 的 max_skip_days+1 = 完整 gap 阈值），所以
+    #    event_gap_days 就是"两次可信观测之间允许的最大间隔"——gap 超过它就算
+    #    断段。与 continuity.walk_back_days 一致：设备离线一段时间后，不该把
+    #    两段无关的风险期粘成同一个事件。★ 这条必须对 depression 也成立：
+    #    valid_days 是多少就是多少，不能套用每日轨的 +1（否则 31 天仍被合并）。
+    if not active or gap is None or gap > event_gap_days:
         return TRANSITION_STARTED, True
 
     # 3. ★ 升级：穿透冷却、穿透 acknowledged、也穿透下面的同日幂等分支
@@ -426,9 +439,19 @@ def apply(
     # 风险类型取并集：事件期内出现过的都记着，用于判断"有没有新类型"。
     # 用并集而非覆盖，是因为类型可能在门槛附近抖动，用覆盖会让同一个类型
     # 反复被当成"新出现"。
-    new["risk_keys"] = sorted(set(new.get("risk_keys") or []) | set(risk_keys or []))
+    #
+    # ★ COOLDOWN（含"新类型但冷却中"）不 union：decide 第 5 条在冷却窗内
+    #   检测到新类型会返回 COOLDOWN，若此刻把新类型吸进并集，冷却期过后
+    #   `cur_keys - prev_keys` 永远为空——"受一个短冷却约束"被实现成了
+    #   "永久吞掉"，该类型永远不再通知。让冷却期内的新类型保持"未进并集"，
+    #   等冷却期过它自然触发 NEW_TYPE（若只出现过一次已消失则不通知，
+    #   这正是防抖想要的）。
+    if transition != TRANSITION_COOLDOWN:
+        new["risk_keys"] = sorted(set(new.get("risk_keys") or []) | set(risk_keys or []))
     new["last_seen_day"] = day_key
     new["last_processed_day"] = cursor
+    # ★ 峰值等级只增不减：决定缓解通知的收件人，见 _empty_channel 的 peak_level。
+    new["peak_level"] = max(int(new.get("peak_level", 0)), int(risk_level))
 
     if notified:
         new["last_notified_day"] = day_key

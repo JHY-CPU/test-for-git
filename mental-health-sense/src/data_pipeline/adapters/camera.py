@@ -98,8 +98,13 @@ def compute_copresence_minutes(
     """
     counts = np.asarray(per_second_counts, dtype=np.float64).flatten()
     if counts.size == 0:
+        # ★ 空帧序列 = 当日零采样帧（摄像头没拍到）。copresence_min 必须返回 NaN
+        #   而非 0.0——0.0 的语义是"确实一个人都没来"（imputer.py 的契约），
+        #   而摄像头掉线时我们根本不知道。返回 0.0 会把"没拍到"静默伪装成
+        #   "确实没人来"，copresence 维进特征向量后质量仍判 valid，社会连接减弱
+        #   规则可能拿这个假 0 当真实证据。
         return {
-            "copresence_min": 0.0, "copresence_segments": 0,
+            "copresence_min": np.nan, "copresence_segments": 0,
             "max_persons": 0, "sampled_seconds": 0, "has_visitor": False,
         }
 

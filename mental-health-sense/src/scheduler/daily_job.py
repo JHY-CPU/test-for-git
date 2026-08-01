@@ -95,10 +95,21 @@ def run_daily_pipeline(
         ),
     }
 
+    # ★ 设备降级信号（T1C 低电量等）必须从原始数据透传到质量校验。
+    #   否则低电量掉线会被静默读成"活动量下降"——ezviz_events.py:55 的注释
+    #   （"静默漏报会被误读成'活动量下降'"）说的正是这条要防的失效链。
+    #   适配器可能写 `_device_degraded`（派生键）或 `device_degraded`（原始键），
+    #   都接受；取不到按 False 起算。
+    device_degraded = {
+        "sleep": False,
+        "social": _device_degraded_from(raw_data.get("activity")),
+    }
+
     track_quality: dict[str, str] = {}
     for track in TRACKS:
         track_quality[track] = _process_track(
-            elder_id, day_key, track, track_feature_values[track], config
+            elder_id, day_key, track, track_feature_values[track], config,
+            device_degraded=device_degraded[track],
         )
 
     logger.info(f"  └─ 数据质量: {track_quality}")
@@ -199,17 +210,31 @@ def run_daily_pipeline(
     elif not usable_tracks:
         status = "skipped_inference"
     elif risk_result is None:
-        status = "no_verdict"
-        logger.error(
-            f"  └─ 两轨数据质量正常（{track_quality}）但均未产出可评估结果，"
-            f"当日无风险判定。轨状态: "
-            f"{(inference_result or {}).get('track_statuses')}；"
-            f"这不是'一切正常'，需运维介入"
-        )
+        # ★ 区分两种"没出判定"：
+        #   - 建档期（GRU 未就绪、兜底历史也不足）：**预期的等待**，不是故障。
+        #     新老人部署的前几天必然经过这个状态，_cold_start_fallback_track 自己
+        #     也把它记为"暂不检测"（INFO）。此时若按 no_verdict 报 ERROR + 非零
+        #     退出码，cron 会对每次新装机报警——运维层面"预期状态"和"真故障"
+        #     必须可区分。
+        #   - 数据正常但推理没给结论（如输入窗口缺日）：才是需要运维介入的
+        #     no_verdict。
+        if (inference_result or {}).get("status") == STATUS_COLD_START:
+            status = "cold_start_waiting"
+            logger.info(
+                f"  └─ 建档期：GRU 基线未就绪、兜底历史不足，暂不出判定（预期）"
+            )
+        else:
+            status = "no_verdict"
+            logger.error(
+                f"  └─ 两轨数据质量正常（{track_quality}）但均未产出可评估结果，"
+                f"当日无风险判定。轨状态: "
+                f"{(inference_result or {}).get('track_statuses')}；"
+                f"这不是'一切正常'，需运维介入"
+            )
     else:
         status = "success"
 
-    log = logger.error if status != "success" else logger.info
+    log = logger.error if status not in ("success", "cold_start_waiting") else logger.info
     log(f"=== 每日管道完成: {elder_id}, status={status} ===")
 
     return {
@@ -264,12 +289,16 @@ def _process_track(
     track: str,
     feature_values: dict,
     config: dict,
+    device_degraded: bool = False,
 ) -> str:
     """
     单轨的聚合→填充→校验→保存。返回该轨的 data_quality。
 
     聚合失败（缺 ≥3 维）时仍写一行全 NaN 的记录并标 insufficient——
     留下痕迹比什么都不写好，否则特征表会出现无法解释的日期空洞。
+
+    device_degraded: 该轨设备的降级信号（如 T1C 电量 <20%）。由
+        run_daily_pipeline 从原始数据提取后透传，供 validator 判 degraded。
     """
     names = get_feature_names(track)
 
@@ -310,6 +339,7 @@ def _process_track(
     recent_quality = _get_recent_quality(elder_id, track, before_day_key=day_key)
     quality = validate_daily_data(
         filled_vec, missing_count, track, recent_quality,
+        device_degraded=device_degraded,
         missing_features=missing_names,
     )
 
@@ -548,7 +578,12 @@ def _cold_start_fallback_track(
         "signed_z": fb["feature_z"],
         # 兜底期的 z 分来自稳健基线而非 GRU 残差，方向可用（这正是修掉 np.abs 的收益）
         "signed_available": True,
-        "ewma_pool": "weekend" if (track == "social" and is_weekend) else "default",
+        # 池名与实际使用的池一致（同 inference.py）：社交轨工作日是 weekday 池，
+        # 不是 default（睡眠轨才是）。
+        "ewma_pool": (
+            "weekend" if (track == "social" and is_weekend)
+            else ("weekday" if track == "social" else "default")
+        ),
         "data_quality": data_quality,
         "valid_features": fb["valid_features"],
         "skipped_features": fb["skipped_features"],
@@ -556,6 +591,20 @@ def _cold_start_fallback_track(
         "status": STATUS_COLD_START_FALLBACK,
         "method": fb["method"],
     }
+
+
+def _device_degraded_from(raw: dict | None) -> bool:
+    """从某路原始数据里提取设备降级标志。
+
+    T1C 低电量（< LOW_BATTERY_THRESHOLD=20）时，适配器派生的 `_device_degraded`
+    为 True；也接受上游直接写 `device_degraded`。取不到一律按 False 起算——
+    "没报降级"不等于"设备正常"，只是没有信号可报；真实设备接入后由适配器/
+    采集端负责填这个字段。模拟数据不注入该字段（代表正常老人）。
+    """
+    if not raw:
+        return False
+    value = raw.get("device_degraded", raw.get("_device_degraded"))
+    return bool(value)
 
 
 def load_raw_sensors(elder_id: str, day_key: str) -> dict:

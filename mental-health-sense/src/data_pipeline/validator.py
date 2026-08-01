@@ -82,9 +82,18 @@ def validate_daily_data(
     if missing_count >= MISSING_THRESHOLD:
         return escalate_if_offline(QUALITY_INSUFFICIENT, recent_quality)
 
-    # 检查极端异常值（传感器故障特征）
-    if np.any(feature_vector < -100):
-        return escalate_if_offline(QUALITY_INSUFFICIENT, recent_quality)
+    # 检查极端异常值（传感器故障特征）。
+    #
+    # ★ 必须按特征逐个判，不能 `np.any(< -100)` 一刀切：睡眠轨的
+    #   sleep_onset_clock（距 20:00 的分钟偏移）**合法为负**——18:20 前入睡就小于
+    #   -100，把整轨一起判 < -100 会把正常早睡误判成"数据不足"并喂进离线升级。
+    #   其余特征的值域都 ≥ 0（分钟数/比例/计数），负到 -100 以下只可能是故障码。
+    names = get_feature_names(track)
+    for i, name in enumerate(names):
+        if name == "sleep_onset_clock":
+            continue
+        if feature_vector[i] < -100:
+            return escalate_if_offline(QUALITY_INSUFFICIENT, recent_quality)
 
     # ★ 关键特征缺失 → 至少降级（不看缺失个数，见 CRITICAL_FEATURES 的说明）
     if missing_features and missing_critical_features(track, missing_features):

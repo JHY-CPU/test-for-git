@@ -68,6 +68,13 @@ def main():
     logger.info("=" * 46)
     logger.info("每周流程完成")
 
+    # ★ 周报是每周的核心交付物，没生成必须非零退出——与日轨"全绿的退出码不该
+    #   盖住真实故障"是同一条原则。微调失败不算失败（report_path 仍在，降级
+    #   继续出周报，week_job 里微调异常被记 WARNING）；周报失败才要 cron 知道。
+    if not result.get("report_path"):
+        logger.error("  周报未生成，按失败退出（cron 会看到非零码）")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

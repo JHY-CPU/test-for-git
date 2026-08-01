@@ -118,39 +118,11 @@ def compute_rar_iv(hourly_counts) -> float:
     return float((n * numer) / ((n - 1) * denom))
 
 
-def compute_interdaily_stability(daily_hourly_counts) -> float:
-    """
-    IS（日间稳定性）= 跨日同一时刻活动的一致性，∈ [0, 1]。
-
-        IS = Σ_h (ā_h − ā)² · N / [n · Σ_i (a_i − ā)²]
-
-    ⚠️ 不入模，只进周报层。IS 定义在多日窗口上，喂进一个 7 天窗口的 GRU
-    会与输入序列强自相关，残差失去意义。原则：进 GRU 的必须是"当日可独立算出"的量。
-
-    Args:
-        daily_hourly_counts: (n_days, 24) 多日小时活动矩阵
-
-    Returns:
-        IS 值；数据不足 2 天或全序列无波动时返回 NaN
-    """
-    mat = np.asarray(daily_hourly_counts, dtype=np.float64)
-    if mat.ndim != 2 or mat.shape[1] != HOURS_PER_DAY:
-        raise ValueError(
-            f"daily_hourly_counts must be (n_days, {HOURS_PER_DAY}), got {mat.shape}"
-        )
-    n_days = mat.shape[0]
-    if n_days < 2:
-        return float("nan")
-
-    grand_mean = mat.mean()
-    total_var = np.sum((mat - grand_mean) ** 2)
-    if total_var <= 0:
-        return float("nan")
-
-    hourly_means = mat.mean(axis=0)
-    between_hour_var = np.sum((hourly_means - grand_mean) ** 2) * n_days
-
-    return float(between_hour_var / total_var)
+# 已删除（2026-08-02）：compute_interdaily_stability（IS 日间稳定性指标）。
+# 全仓零生产调用方——docstring 声称"只进周报层"，但 src/report/weekly_report.py
+# 从不 import/调用它。留着只是"一个测了但没接进任何链路的公式"。
+# 若未来周报要做节律一致性分析，可按同一公式从 compute_circadian_features 的
+# 多日窗口接回来，而不是保留一份"声称被消费却没人消费"的代码。
 
 
 def compute_circadian_features(hourly_counts) -> dict:

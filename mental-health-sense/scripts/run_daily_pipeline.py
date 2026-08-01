@@ -95,7 +95,10 @@ def main():
     # ★ 非 success 必须以非零码退出。
     # 推理/判定异常曾被 run_daily_pipeline 内部吞掉，脚本照样 exit 0，
     # cron 与监控全绿而老人当天零监测。全绿的退出码不该盖住真实故障。
-    if result["status"] != "success":
+    # 唯一豁免 cold_start_waiting：新老人建档期（GRU 未就绪、兜底历史不足）
+    # 是**预期的等待**，不该让 cron 在每次新装机时报警（与 daily_job 里
+    # "预期状态和真故障必须可区分"是同一条原则）。
+    if result["status"] not in ("success", "cold_start_waiting"):
         logger.error(f"  管道未正常完成: status={result['status']}, error={result.get('error')}")
         sys.exit(1)
 

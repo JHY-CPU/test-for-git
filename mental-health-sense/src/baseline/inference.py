@@ -133,7 +133,13 @@ def _load_prior_thresholds(elder_id: str, day_key: str, track: str) -> dict | No
     #
     #   与 judge._severity 的"同一个绝对常数对两者不是同一件事"是同一条
     #   量纲不可比；幂等复用也不该跨尺度。
-    if prior_track.get("status") in COLD_START_STATUSES:
+    #
+    #   data_insufficient 也必须排除：它的三档阈值都是 0.0 占位（infer_track 用
+    #   base 字典早退），而 0.0 能通过下方的 isinstance 检查。漏掉它会在建档期内
+    #   某数据不足日被补算/重跑时把 0.0 当 dynamic_threshold——is_deviation
+    #   (score > 0) 恒为 True，该字段驱动 consecutive / qualifies / 微调排除集。
+    if (prior_track.get("status") in COLD_START_STATUSES
+            or prior_track.get("status") == STATUS_DATA_INSUFFICIENT):
         return None
 
     keys = ("static_threshold", "ewma_threshold", "dynamic_threshold")
@@ -207,7 +213,13 @@ def infer_track(
         "abs_residuals": {},
         "signed_z": {},
         "signed_available": False,
-        "ewma_pool": "weekend" if (track == "social" and is_weekend) else "default",
+        # 池名与实际使用的池一致：社交轨分 weekday/weekend 两池，睡眠轨单池
+        # default。旧写法把社交轨工作日标成 "default"，排查者会去找并不存在的
+        # ewma_social.pkl（default 池），而磁盘上实际是 ewma_social_weekday.pkl。
+        "ewma_pool": (
+            "weekend" if (track == "social" and is_weekend)
+            else ("weekday" if track == "social" else "default")
+        ),
         "data_quality": data_quality,
     }
 
@@ -258,12 +270,24 @@ def infer_track(
         start_dt = today_dt - timedelta(days=window)
         end_dt = today_dt - timedelta(days=1)
 
-        past, missing_days = get_feature_window(
+        past, io_missing_days = get_feature_window(
             elder_id,
             start_dt.strftime("%Y-%m-%d"),
             end_dt.strftime("%Y-%m-%d"),
             track,
         )
+
+        # ★ 全 NaN 行也是缺日：daily_job._process_track 对聚合失败的日子会写一行
+        #   全 NaN 占位（"留下痕迹比什么都不写好"），这类行存在于 CSV、io 的
+        #   missing_days 数不到它。若只数"无行日"，设备连续离线 4~7 天（每天都有
+        #   占位行）后 max_gap 守卫形同虚设，GRU 输入被训练均值填满、照常出分——
+        #   预测退化成"平均的一天"，残差失去意义。与 io docstring"缺日与全维缺测
+        #   在结构上变成同一件事"一致，两者都应计入缺日预算。
+        all_nan_rows = np.isnan(past).all(axis=1) if past.size else np.zeros(0, dtype=bool)
+        missing_days = list(io_missing_days) + [
+            (start_dt + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(len(all_nan_rows)) if all_nan_rows[i]
+        ]
     except (FileNotFoundError, ValueError) as e:
         logger.warning(f"  └─ [{track}] 特征数据获取失败: {e}")
         return {**base, "status": STATUS_DATA_INSUFFICIENT, "error": str(e)}

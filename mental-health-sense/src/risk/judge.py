@@ -540,7 +540,9 @@ def build_mpdd_evidence(
         status = track_result.get("status")
         if is_evaluable(status) and status not in COLD_START_STATUSES:
             return "valid"
-        if status in COLD_START_STATUSES or status == STATUS_COLD_START:
+        # COLD_START_STATUSES 已含 STATUS_COLD_START 与 STATUS_COLD_START_FALLBACK，
+        # 不必再单独判 STATUS_COLD_START（那是手写字面量时代的残留，重复分支恒不触发）。
+        if status in COLD_START_STATUSES:
             return "cold_start"
         return "missing"
 

@@ -146,21 +146,8 @@ def transform_data(scaler: StandardScaler, data: np.ndarray, track: str) -> np.n
     return result.flatten() if was_1d else result
 
 
-def inverse_transform(scaler: StandardScaler, data: np.ndarray) -> np.ndarray:
-    """
-    反归一化（用于将预测值转回原始尺度）。
-
-    Args:
-        scaler: 已拟合的StandardScaler
-        data: 归一化后的数据
-
-    Returns:
-        原始尺度的数据
-    """
-    was_1d = data.ndim == 1
-    if was_1d:
-        data = data.reshape(1, -1)
-    return scaler.inverse_transform(data).flatten() if was_1d else scaler.inverse_transform(data)
+# 已删除（2026-08-02）：inverse_transform。全仓零调用方——本系统从不把预测值
+# 转回原始尺度（残差在归一化空间里算，方向与幅度都对归一化残差有意义）。
 
 
 def save_scaler(scaler: StandardScaler, filepath: str | Path) -> None:

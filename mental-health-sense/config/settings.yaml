@@ -72,8 +72,11 @@ ewma:
   alpha: 0.05
   min_samples_for_dynamic: 20
   # 周末样本只占 2/7，攒 20 个要 70 天。降到 8 需约 8 个周末≈56 天。
-  # ⚠️ 诚实说明：这意味着社交轨的周末动态阈值到第 8 周才真正上线，
-  # 在此之前周末只有静态阈值。这是周末样本稀疏的算术后果，调参消不掉。
+  # ⚠️ 诚实说明：建档期（35 天）会**预暖** EWMA 池——trainer 把建档期每个目标
+  # 天按 is_weekend 喂入，社交轨周末池恰好攒满 28×(2/7)=8 个样本。推理侧用
+  # `pool_n >= min_samples` 判定（inference.py），所以周末动态阈值在**建档完成
+  # 当天就已就绪**，不是要等第 8 周。8 这个数字的意义是"周末样本稀疏"的下限：
+  # 少于 8 个周末样本的时段（建档期早期）周末仍只有静态阈值。
   min_samples_for_dynamic_weekend: 8
   # 偏离日冻结的上限：连续冻结这么多天后强制恢复喂入，让基线重新学习。
   # 此前写死在 TrackEWMAPools.__init__，配置里根本没这个键——而它是
@@ -219,6 +222,12 @@ alert:
     # ★ 这不是可选装饰：彻底静默会让"系统安静"与"系统挂了"无法区分，
     #   与"长期降级和长期正常必须可区分"是同一条原则。
     weekly_receipt: true
+    # 缓解（回到 L0）通知的动作（可选）。不写则用 alert.py 的 RESOLVE_ACTIONS
+    # 默认（push_to_children）。要覆盖时写全 action / notify——_resolve_actions_for
+    # 是白名单式合并，只认 action 与 notify 两个键（+ log/include_in_report）。
+    resolve:
+      action: "push_notification"
+      notify: ["children"]
 
   # 事件边界（隔多久没观测就算两段无关的事件）**按 channel 取**，
   # 由 alert._event_gap_days 决定，没有独立配置键：
@@ -271,6 +280,10 @@ depression:
   batch_size: 64
   frame_sample_rate: 1
   timeout_sec: 1800
+  # MPDD 子进程的 TORCH_HOME（HF 权重缓存目录）。mpdd_process.build_env 读这个
+  # 键，缺省回落 ~/.cache/torch。显式声明是为了让"该钉死的环境变量"在配置里有
+  # 据可查（CLAUDE.md 约定子进程必须钉死 TORCH_HOME），而不是只活在代码默认里。
+  torch_home: null             # null = 用缺省 ~/.cache/torch
 
   clip:
     top_k: 3                 # 一次评估最多取几段
@@ -283,11 +296,11 @@ depression:
     max_spread_phq9: 6.0     # 段间 PHQ-9 极差超过它标 low_confidence（模型自己在打架）
     valid_days: 30           # 有效期；过期一律显示"暂无最新评估"，绝不拿旧分顶今天
 
-  # ⚠️ 刻意关闭，两个独立原因，任一成立都不该开：
-  #   1. alert.py 至今没有冷却 / 去重 / 抑制机制（PERM_step 实测连续 91 天每天
-  #      报 L3 = 91 次短信 + 强制响铃 + 网格员）。再加一个预警源只会加速家属
-  #      关掉通知，而通知一关，真正的新变化也收不到了。见 VALIDATION §7.3。
-  #   2. 当前 checkpoint 在其验证集上对全部 9 个样本预测同一类别
+  # ⚠️ 刻意关闭，唯一阻塞理由：
+  #   1. 当前 checkpoint 在其验证集上对全部 9 个样本预测同一类别
   #      （混淆矩阵 [[6,0,0],[2,0,0],[0,1,0]]，Macro-F1 0.286，Kappa 0.129），
-  #      且未在本机位 / 本人身上校准。
+  #      且未在本机位 / 本人身上校准——数值本身不可信。
+  #   （"alert 层没有冷却/去重"那条理由已于 2026-07-31 事件模型落地后解除：
+  #     抑郁事件流独立冷却、按 assessment.valid_days 断段、升级穿透一切抑制，
+  #     见 src/risk/alert_state.py 与 src/depression/runner.py 的 docstring。）
   alert: false
