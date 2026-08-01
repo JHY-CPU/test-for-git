@@ -196,9 +196,16 @@ class TestTrackIsolation:
 
     @pytest.fixture
     def run_timeline(self, simulated_data):
+        import torch
+
         from src.baseline.trainer import train_all_tracks
         from src.scheduler.daily_job import run_daily_pipeline
 
+        # ★ 固定 GRU 随机初始化：trainer 内部不设种子，验证脚本在训练前
+        #   manual_seed（CLAUDE.md 的确定性约定），这里漏了会让每次训练出不同
+        #   模型——恢复期（Day59-60）的分数恰好在动态阈值附近，偶尔越过 → flaky。
+        #   本仓"不可复现的绿/红比红色更危险"，测试必须可复现。
+        torch.manual_seed(42)
         train_all_tracks(ELDER)
 
         timeline = {}
@@ -455,6 +462,20 @@ class TestMPDDContract:
         assert "copresence_min" not in payload["circadian_evidence"]["signed_z"]
         assert "copresence_min" in payload["social_evidence"]["signed_z"]
 
+        # ★ 磁盘交付物必须真实存在：daily_job 第 8 步 _emit_mpdd_evidence 会落盘。
+        #   修复前 build_mpdd_evidence "定义了、单测覆盖了，但没有任何链路真正
+        #   产出过它"（daily_job.py 的注释）——本用例此前只断言 in-memory 形状，
+        #   从没验证磁盘上到底有没有这份契约文件。这恰恰是那个 bug 的形态。
+        from src.utils.io import get_log_dir
+        import json as _json
+
+        disk_path = get_log_dir("mpdd_evidence") / f"{ELDER}_{dk}.json"
+        assert disk_path.exists(), f"MPDD 证据契约未落盘: {disk_path}"
+        with open(disk_path, "r", encoding="utf-8") as f:
+            disk_payload = _json.load(f)
+        assert disk_payload["day_key"] == dk
+        assert disk_payload["schema_version"] == payload["schema_version"]
+
     def test_signed_z_sign_convention(self, simulated_data):
         """★ signed_z = observed − predicted：社交退缩期 copresence 应为负"""
         from src.baseline.trainer import train_all_tracks
@@ -470,11 +491,49 @@ class TestMPDDContract:
 
 
 class TestReportAndAlert:
+    def test_weekly_report_generated_from_real_logs(self, simulated_data):
+        """★ 周报整条链路必须真跑一次：generate_weekly_report 在 tests/ 里零覆盖
+        （test_regression_2026_07_31.py 的 docstring 声称"从真入口进"，但全仓 grep
+        从不 import/调用它）。周报是家属唯一会看的产物，它的"空周不借别的周"
+        守卫不能没有测试。"""
+        import torch
+
+        from src.baseline.trainer import train_all_tracks
+        from src.report.weekly_report import generate_weekly_report
+        from src.scheduler.daily_job import run_daily_pipeline
+        from src.utils.io import load_config
+
+        torch.manual_seed(42)
+        train_all_tracks(ELDER)
+        for day in range(44, 51):            # 完整一周的推理日志
+            run_daily_pipeline(ELDER, day_key_of(day))
+
+        report = generate_weekly_report(
+            ELDER, week_start=day_key_of(44), week_end=day_key_of(50),
+            use_llm=False, config=load_config(),
+        )
+        assert ELDER in report, "周报应包含老人标识"
+        assert "风险等级" in report
+        # 本周有 7 天真实日志，不该落到"数据不足"周报（那是对空周的降级路径）
+        assert "数据不足" not in report
+
     def test_alert_levels(self):
         from src.risk.alert import trigger_alert
+        from src.utils.io import load_config
 
-        assert not trigger_alert(ELDER, 1, [{"risk_type": "睡眠稳定性偏离"}])["alerted"]
-        assert trigger_alert(ELDER, 2, [{"risk_type": "睡眠稳定性偏离"}])["alerted"]
+        # ★ 必须传 day_key 与 config：不传 day_key 会退回 datetime.now()，把
+        #   "今天"盖到一条历史判定上（trigger_alert 会打警告，TestDayKeyRequired
+        #   专门守这条）；不传 config 走的是 alert.py 内置默认，测不到 shipped
+        #   settings.yaml 的 alert 段。
+        config = load_config()
+        assert not trigger_alert(
+            ELDER, 1, [{"risk_type": "睡眠稳定性偏离"}],
+            config=config, day_key="2026-08-01",
+        )["alerted"]
+        assert trigger_alert(
+            ELDER, 2, [{"risk_type": "睡眠稳定性偏离"}],
+            config=config, day_key="2026-08-01",
+        )["alerted"]
 
     def test_rule_based_report(self):
         from src.report.templates import generate_rule_based_report

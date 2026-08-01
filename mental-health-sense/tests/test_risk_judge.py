@@ -19,6 +19,8 @@ def day(
     social_score: float = 0.5,
     social_dev: bool = False,
     quality: str = "valid",
+    sleep_threshold: float = 1.0,
+    social_threshold: float = 1.0,
 ) -> dict:
     """构造一天的双轨推理结果"""
     return {
@@ -31,6 +33,13 @@ def day(
             "status": "success",
             "signed_available": True,
             "anomaly_score": sleep_score,
+            # ★ 必须带动态阈值：_severity 在 threshold=0 时退回绝对分（score），
+            #   幅度门槛测试就永远跑不到真实的 severity = score/threshold 除法——
+            #   这正是 test_regression_2026_07_31.py:33-35 记过的陷阱
+            #   ("手搓字典时漏字段正是上一轮'绿得没有意义'的成因")。
+            "dynamic_threshold": sleep_threshold,
+            "static_threshold": sleep_threshold,
+            "ewma_threshold": sleep_threshold,
             "is_deviation": sleep_dev,
             "signed_z": {},
         },
@@ -39,6 +48,9 @@ def day(
             "status": "success",
             "signed_available": True,
             "anomaly_score": social_score,
+            "dynamic_threshold": social_threshold,
+            "static_threshold": social_threshold,
+            "ewma_threshold": social_threshold,
             "is_deviation": social_dev,
             "signed_z": {},
         },

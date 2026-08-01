@@ -19,7 +19,6 @@ from src.data_pipeline.adapters.camera import (
 )
 from src.data_pipeline.adapters.circadian import (
     build_hourly_counts,
-    compute_interdaily_stability,
     compute_m10_l5,
     compute_rar_amplitude,
     compute_rar_iv,
@@ -384,12 +383,6 @@ class TestCircadian:
         counts = build_hourly_counts(["2026-08-02T09:00:00", "2026-08-02T10:00:00"])
         assert counts[9] == 1.0 and counts[10] == 1.0
 
-    def test_is_needs_two_days(self):
-        assert np.isnan(compute_interdaily_stability(np.zeros((1, 24))))
-
-    def test_is_identical_days_is_one(self):
-        day = np.array([0, 0, 5, 10, 8, 3] * 4, dtype=float)
-        assert abs(compute_interdaily_stability(np.tile(day, (3, 1))) - 1.0) < 1e-9
 
 
 class TestCopresence:
@@ -415,7 +408,10 @@ class TestCopresence:
 
     def test_empty_input(self):
         result = compute_copresence_minutes([])
-        assert result["copresence_min"] == 0.0
+        # ★ 空帧 = 摄像头没拍到，语义是"不知道"，不是"确实没人来"。
+        #   返回 0.0 会把设备掉线静默伪装成"共处 0 分钟"。
+        assert np.isnan(result["copresence_min"])
+        assert result["sampled_seconds"] == 0
         assert result["has_visitor"] is False
 
     def test_visitor_flag(self):
