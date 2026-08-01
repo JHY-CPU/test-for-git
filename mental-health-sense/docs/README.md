@@ -11,7 +11,7 @@
 - **多传感器融合**：小贝壳无感睡眠监测仪 + 萤石 T1C 人体移动传感器 + C6c 摄像机（边缘侧人形检测）
 - **三线并行监测**：睡眠障碍 / 孤独（GRU 个人基线，两条独立轨） + 抑郁（MPDD 群体基线，旁路只读通道）
 - **趋势判定**：连续3-5天偏离才触发预警，避免单日波动误报
-- **文件驱动数据流**：各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,social}/`，每日管道从此累积读取
+- **文件驱动数据流**：各传感器适配器把原始数据落盘到 `data/raw/{sleep,activity,camera}/`，每日管道从此累积读取
 
 ---
 
@@ -19,7 +19,7 @@
 
 > 一张表看清"哪些已扎实、哪些还在路上"，避免把"代码跑通"误读成"临床有效"。
 
-**核心算法层已完工并验证**：500 个单元测试全部通过；范围 1（链路正确性）20/20、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
+**核心算法层已完工并验证**：501 个单元测试（488 通过 + 13 因 MPDD 环境未到位跳过）；范围 1（链路正确性）20/20、范围 2（判别力）9/9。每日趋势管道（批处理：读取 `data/raw/` → 双轨特征聚合（睡眠 8 维 / 社交 5 维）→ 每轨独立 GRU 残差推理 → EWMA（偏离日冻结）→ 连续偏离判定 → 风险判定（含方向闸门，每轨各自算等级取较高者）→ 预警 → 周报）已端到端打通，不依赖任何实时运行时。
 
 > ⚠️ **实现成熟度：算法是真的，硬件对接与外部服务大多还是"桩/模拟"。** 这是科研原型阶段的正常状态，但必须讲清楚，避免误以为"能上真机"：
 
@@ -67,7 +67,7 @@
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 500 单测（23 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 501 单测（24 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
 | **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 判别力脚本 `validate_discriminative.py`（10 场景，含 4 项混淆 + 1 项已知漏报），当前 **9/9**（KM 场景不计分）；已借此修复 5 个真实缺陷，仍有 2 项已知局限（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
@@ -114,7 +114,7 @@ python scripts/run_daily_pipeline.py --date 2026-08-15
 # 5. 周轨：双轨微调 + 周报（--no-retrain 只出周报，不动基线）
 python scripts/run_weekly_pipeline.py
 
-# 6. 运行测试（23 个测试文件 / 500 用例）
+# 6. 运行测试（24 个测试文件 / 501 用例）
 python -m pytest
 ```
 
@@ -216,7 +216,7 @@ mental-health-sense/
 │   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
 │   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（10场景+混淆项，层次B）
 │
-├── tests/                           # 单元测试（23 个测试文件 / 500 用例，确定性可复现）
+├── tests/                           # 单元测试（24 个测试文件 / 501 用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -225,6 +225,8 @@ mental-health-sense/
 │   ├── test_imputer.py              # 缺失值处理（前向填充）测试
 │   ├── test_validator.py            # 数据质量校验测试
 │   ├── test_regression_2026_07_31.py # ★ 第二轮走查缺陷回归（全部打在真实链路输出上）
+│   ├── test_regression_2026_08_01.py # 漏跑日/预警事件回归（VALIDATION §11）
+│   ├── test_regression_2026_08_02.py # 第三轮走查 5 缺陷回归（19 条）
 │   ├── test_depression_*.py         # 抑郁通道：状态/契约/聚合/存储/隔离守卫/编排
 │   ├── test_risk_judge.py           # 风险判定测试（含低/高幅度连续偏离回归）
 │   ├── test_risk_rules.py           # 风险规则测试
@@ -606,7 +608,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 python scripts/generate_simulation_data.py
 
 # 双轨建档（建档期 35 天；两轨各训一个 GRU，互不共享权重与 scaler）
-python scripts/train_all_baselines.py      # 或：python -m src.baseline.trainer
+python scripts/train_all_baselines.py
 
 # 每日推理（默认老人 E001）
 python scripts/run_daily_pipeline.py --date 2026-08-15
@@ -662,7 +664,7 @@ python scripts/validate_discriminative.py --only TN_sleep_improved   # 只跑单
 ### 3. 运行测试
 
 ```bash
-# 所有单元测试（23 个测试文件 / 500 用例）
+# 所有单元测试（24 个测试文件 / 501 用例）
 python -m pytest
 
 # 更详细输出

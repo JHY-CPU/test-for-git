@@ -158,9 +158,9 @@ validation set，也没有 test set（`trainer.py` 里不存在 train/val split�
 
 | | 冷启动 `train_initial_baseline` | 每周微调 `weekly_retrain` |
 |---|---|---|
-| 触发时机 | 建档期结束（默认第 35 天），一次性 | 每周日 03:00（`weekly_job`） |
-| 数据 | 前 `build_days` 天（默认 21）有效特征 | 最近 30 天有效特征 |
-| 样本数 | ~14 | ~23 |
+| 触发时机 | 建档期结束（默认第 35 天），一次性 | 每周日 04:00（`weekly_job`） |
+| 数据 | 前 `build_days` 天（默认 35）有效特征 | 最近 30 天有效特征 |
+| 样本数 | ~21 | ~23 |
 | epochs | 150 | 50 |
 | 学习率 | 0.001 | 0.0003（低，防灾难性遗忘） |
 | patience | 20 | 10 |
