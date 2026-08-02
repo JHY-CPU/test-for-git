@@ -254,11 +254,15 @@ alert:
   #
   # 不给 depression 单独配一个数字，是为了不让同一个 30 在两处漂开。
 
-# ===== LLM 周报 =====
+# ===== LLM 周报（DeepSeek，OpenAI 兼容格式）=====
 report:
-  model: "claude-sonnet-5"
+  model: "deepseek-v4-pro"
+  # DeepSeek 官方推荐 openai SDK 直连其 base_url；模型可换成 deepseek-chat 等。
+  base_url: "https://api.deepseek.com"
   max_tokens: 400
-  # 已删除 template:：weekly_report.py 只读 model / max_tokens，
+  # ⚠️ API key 不写在这里（配置文件会进 git）：weekly_report.py 从环境变量
+  #   DEEPSEEK_API_KEY 读，未设置时自动回落规则模板，周报照常出。
+  # 已删除 template:：weekly_report.py 只读 model / base_url / max_tokens，
   # 模板是 templates.py 的模块级常量，不按名查表。
 
 # ===== 抑郁评估（MPDD 旁路通道）=====

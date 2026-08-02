@@ -17,7 +17,7 @@ cd mental-health-sense
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 ```
 
-> 核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest；`anthropic` 只用于周报正文，未装则自动回落规则模板。`funasr` / `modelscope` / `pyaudio` / `scipy` / `opencv-python` / `APScheduler` 已于 2026-07-31 从 `requirements.txt` 移除（零引用；其中 `pyaudio` 缺 portaudio 头文件会让整条 pip install 中止，torch 一个都装不上）。
+> 核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest；`openai`（周报正文走 DeepSeek，OpenAI 兼容格式）只用于周报正文，未装或未设 `DEEPSEEK_API_KEY` 则自动回落规则模板。`funasr` / `modelscope` / `pyaudio` / `scipy` / `opencv-python` / `APScheduler` 已于 2026-07-31 从 `requirements.txt` 移除（零引用；其中 `pyaudio` 缺 portaudio 头文件会让整条 pip install 中止，torch 一个都装不上）。
 
 > ⚠️ 本机跑 pytest 必须剔除系统 `PYTHONPATH`：`/opt/ros/humble` 会被 pytest 的
 > 收集阶段导进来，直接 `python -m pytest` 会崩在 `ModuleNotFoundError: lark`，
@@ -25,7 +25,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 > 这与"MPDD 子进程必须剔除系统 `PYTHONPATH`"是同一个污染源（见抑郁旁路一节）。
 
 ```bash
-# 测试（25 文件 / 511 用例）
+# 测试（26 文件 / 517 用例）
 env -u PYTHONPATH python -m pytest                 # pytest.ini 已设 testpaths=tests 与 -v
 python -m pytest tests/test_risk_judge.py
 python -m pytest tests/test_risk_judge.py::TestJudgeRiskLevel::test_xxx

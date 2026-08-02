@@ -31,7 +31,7 @@
 | GRU 基线 / EWMA / 风险判定 / 数据管道 | ✅ 真实可用 | 有算法、有测试，是系统的核心 |
 | 传感器**真实采集**（小贝壳 / 萤石 C6c+T1C 的 `_read_raw`） | ⚠️ **未实现（桩）** | 均抛 `NotImplementedError`，只有 mock/模拟数据能跑 |
 | 预警**推送**（子女App/短信/网格员） | ⚠️ 模拟 | `alert.py` 按 `settings.yaml` 的 `alert` 段决定动作，**按事件去重**（见下方「预警按事件去重」），但只写日志字符串，未接真实推送服务 |
-| 周报 LLM | ✅ 可用（可选依赖） | 模型与 token 上限从 `report.model` / `report.max_tokens` 读；`anthropic` 未安装时自动回落规则模板 |
+| 周报 LLM | ✅ 可用（可选依赖） | 模型 / base_url / token 上限从 `report.model` / `report.base_url` / `report.max_tokens` 读；DeepSeek（OpenAI 兼容格式），未设 `DEEPSEEK_API_KEY` 或 `openai` 未安装时自动回落规则模板 |
 
 **一句话**：现在能端到端跑通、能验证算法逻辑，靠的是**模拟/文件数据**；接真实设备与推送服务是后续工作。
 
@@ -70,7 +70,7 @@
 
 | 层次 | 回答的问题 | 状态 | 说明 |
 |------|-----------|------|------|
-| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 511 单测（25 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
+| **A 代码对不对** | 算法有没有被正确实现 | ✅ 已完成 | 517 单测（26 文件）+ 端到端冒烟（`validate_synthetic.py` 20/20，含双轨信号隔离），每日管道链路已打通 |
 | **B 设计好不好** | 个人基线 / EWMA / 连续判定是否优于朴素替代 | 🚧 进行中（当前重点） | 判别力脚本 `validate_discriminative.py`（10 场景，含 4 项混淆 + 1 项已知漏报），当前 **9/9**（KM 场景不计分）；已借此修复 5 个真实缺陷，仍有 2 项已知局限（见 `docs/VALIDATION.md §7`） |
 | **C 真的有用吗** | 能否测出真实老人的心理下滑 | ⏳ 待真实数据 | 需公开数据集 + 临床金标准，仿真无法回答 |
 
@@ -92,7 +92,8 @@
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 #    核心链路只需 numpy / pandas / scikit-learn / torch / joblib / PyYAML / loguru / pytest。
-#    anthropic 只用于周报正文，未安装时自动回落到规则模板。
+#    openai（DeepSeek 走 OpenAI 兼容格式）只用于周报正文，未安装或未设
+#    DEEPSEEK_API_KEY 时自动回落到规则模板。
 #    2026-07-31 已移除 funasr / modelscope / pyaudio / scipy / opencv-python /
 #    APScheduler 六项零引用依赖——其中 pyaudio 需要 portaudio 头文件，
 #    在干净的 Linux 上会让整条 pip install 中止，torch 一个都装不上。
@@ -117,7 +118,7 @@ python scripts/run_daily_pipeline.py --date 2026-08-15
 # 5. 周轨：双轨微调 + 周报（--no-retrain 只出周报，不动基线）
 python scripts/run_weekly_pipeline.py
 
-# 6. 运行测试（25 个测试文件 / 511 用例）
+# 6. 运行测试（26 个测试文件 / 517 用例）
 python -m pytest
 ```
 
@@ -195,7 +196,7 @@ mental-health-sense/
 │   │
 │   ├── report/                      # 周报生成
 │   │   ├── templates.py             # LLM提示词模板
-│   │   └── weekly_report.py         # Claude API集成
+│   │   └── weekly_report.py         # DeepSeek（OpenAI 兼容格式）集成
 │   │
 │   ├── scheduler/                   # 定时任务（由 cron/systemd 触发脚本调用）
 │   │   ├── daily_job.py             # 常态轨（每日03:00）
@@ -219,7 +220,7 @@ mental-health-sense/
 │   ├── validate_synthetic.py        # 【范围1】合成数据端到端跑通验证（60天，层次A）
 │   └── validate_discriminative.py   # 【范围2】合成数据判别力验证（10场景+混淆项，层次B）
 │
-├── tests/                           # 单元测试（25 个测试文件 / 511 用例，确定性可复现）
+├── tests/                           # 单元测试（26 个测试文件 / 517 用例，确定性可复现）
 │   ├── conftest.py                  # 共享 fixture
 │   ├── test_aggregator.py           # 数据聚合测试
 │   ├── test_data_health.py          # 训练数据健康门禁（MAD 离群筛查）测试
@@ -581,7 +582,7 @@ anomaly_score = Σ(residual[i] × weight[i]) / Σweight
 | **数据处理** | NumPy, pandas, scikit-learn |
 | **调度** | cron / systemd 触发脚本 |
 | **日志** | loguru |
-| **周报** | Claude API（fallback: 规则模板） |
+| **周报** | DeepSeek API（OpenAI 兼容格式，fallback: 规则模板） |
 | **测试** | pytest |
 
 ---
@@ -668,7 +669,7 @@ python scripts/validate_discriminative.py --only TN_sleep_improved   # 只跑单
 ### 3. 运行测试
 
 ```bash
-# 所有单元测试（25 个测试文件 / 511 用例）
+# 所有单元测试（26 个测试文件 / 517 用例）
 python -m pytest
 
 # 更详细输出
@@ -1164,8 +1165,10 @@ alert:                     # 由 alert.trigger_alert 读取，缺项回落内置
     #    "网格员被叫来过就必须有人告诉他结束了"是义务，不是配置项。
 
 report:
-  model: "claude-sonnet-5" # 周报正文的 LLM；anthropic 未安装时自动回落规则模板
-  max_tokens: 400
+  model: "deepseek-v4-pro"           # 周报正文的 LLM（DeepSeek，OpenAI 兼容格式）
+  base_url: "https://api.deepseek.com"
+  max_tokens: 400                    # API key 走环境变量 DEEPSEEK_API_KEY；
+                                     # 未设置或 openai 未安装时自动回落规则模板
 ```
 
 #### 为什么幅度门槛的单位是 severity 而不是绝对分

@@ -285,7 +285,7 @@ class TestReportDoesNotClaimWeekOverWeek:
             assert word not in report, f"周报声称做了周环比（出现『{word}』），但系统从没加载过上一周"
 
     def test_LLM提示词不得命令模型做周环比(self):
-        """规则模板是 fallback，装了 anthropic 时走的是 LLM 那条路——
+        """规则模板是 fallback，设了 DEEPSEEK_API_KEY 时走的是 LLM 那条路——
         提示词里的谎言不会出现在本仓的测试产物里，但会出现在**用户的周报**里。"""
         from src.report.templates import (
             WEEKLY_REPORT_SYSTEM_PROMPT,

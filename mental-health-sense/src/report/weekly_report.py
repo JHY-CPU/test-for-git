@@ -8,6 +8,7 @@
     4. 保存Markdown周报
 """
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -476,15 +477,16 @@ def _generate_with_llm(
     config: dict | None = None,
 ) -> str:
     """
-    调用LLM生成周报正文。
+    调用LLM生成周报正文（DeepSeek，OpenAI 兼容格式）。
 
     Args:
         elder_id: 老人ID
         trends: 趋势数据字典
         risk_result: 风险判定结果
         risk_types_str: 风险类型字符串
-        config: 全局配置；report.model / report.max_tokens 从这里取
-            （此前两项写死在函数体里，settings.yaml 的 report 段无人读取）。
+        config: 全局配置；report.model / report.base_url / report.max_tokens
+            从这里取（此前 model / max_tokens 写死在函数体里，settings.yaml 的
+            report 段无人读取；改 DeepSeek 时又加了 base_url）。
             调用方 generate_weekly_report 已保证它非 None——本函数此前自己也
             兜了一次底，而**只兜这一处**正是缺陷所在：它让"config 会是 None"
             成为已知事实，却把同一份 config 喂给抑郁小节时漏掉了。
@@ -496,8 +498,36 @@ def _generate_with_llm(
     deviation_days = risk_result.get("consecutive_deviation", 0)
 
     report_cfg = (config or {}).get("report", {}) or {}
-    model = report_cfg.get("model", "claude-sonnet-5")
+    model = report_cfg.get("model", "deepseek-v4-pro")
+    base_url = report_cfg.get("base_url", "https://api.deepseek.com")
     max_tokens = report_cfg.get("max_tokens", 400)
+
+    # ★ API key 只从环境变量读，绝不写进 settings.yaml——配置文件会进 git，
+    #   把 key 写进去等于公开密钥。
+    #   DeepSeek 与 OpenAI 兼容，官方推荐 openai SDK 直连其 base_url。
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
+    def _fallback() -> str:
+        # 回落统一收口在一处：三条失败路径（无 key / SDK 未装 / 调用失败）
+        # 拼的是同一份模板，散开三份会在改模板形参时漏改（同本仓"两份会漂的
+        # 兜底比没有更危险"的原则）。周报不能因为外部服务配置没到位就出不来。
+        return generate_rule_based_report(
+            elder_id=elder_id,
+            week_start="",
+            week_end="",
+            risk_label=risk_result.get("risk_label", "正常"),
+            risk_types=[risk_types_str] if risk_types_str != "无" else [],
+            deviation_days=deviation_days,
+            # trends 的键就是 generate_rule_based_report 的形参名
+            # （social_trend / sleep_trend / social_vs_baseline ...），
+            # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
+            **trends,
+        )
+
+    # 没设 key 就直接回落模板，不白打一次 API 等 401。
+    if not api_key:
+        logger.warning("DEEPSEEK_API_KEY 未设置，使用规则模板生成周报")
+        return _fallback()
 
     prompt = fill_prompt(
         WEEKLY_REPORT_USER_TEMPLATE,
@@ -513,48 +543,26 @@ def _generate_with_llm(
     )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic()
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=base_url)
 
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=model,
             max_tokens=max_tokens,
-            system=WEEKLY_REPORT_SYSTEM_PROMPT,
             messages=[
+                {"role": "system", "content": WEEKLY_REPORT_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
         )
 
-        return response.content[0].text
+        return response.choices[0].message.content
 
     except ImportError:
-        logger.warning("anthropic SDK未安装，使用规则模板生成周报")
-        return generate_rule_based_report(
-            elder_id=elder_id,
-            week_start="",
-            week_end="",
-            risk_label=risk_result.get("risk_label", "正常"),
-            risk_types=[risk_types_str] if risk_types_str != "无" else [],
-            deviation_days=deviation_days,
-            # trends 的键就是 generate_rule_based_report 的形参名
-            # （social_trend / sleep_trend / social_vs_baseline ...），
-            # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
-            **trends,
-        )
+        logger.warning("openai SDK未安装，使用规则模板生成周报")
+        return _fallback()
     except Exception as e:
         logger.error(f"LLM调用失败: {e}，回退到规则模板")
-        return generate_rule_based_report(
-            elder_id=elder_id,
-            week_start="",
-            week_end="",
-            risk_label=risk_result.get("risk_label", "正常"),
-            risk_types=[risk_types_str] if risk_types_str != "无" else [],
-            deviation_days=deviation_days,
-            # trends 的键就是 generate_rule_based_report 的形参名
-            # （social_trend / sleep_trend / social_vs_baseline ...），
-            # 旧写法再补一个 _trend 后缀会拼出 social_trend_trend，直接 TypeError。
-            **trends,
-        )
+        return _fallback()
 
 
 def _save_report(elder_id: str, week_start: str, report: str) -> None:

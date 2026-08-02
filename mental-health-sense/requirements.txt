@@ -12,8 +12,9 @@ joblib>=1.3.0
 # Configuration
 PyYAML>=6.0
 
-# LLM API (周报正文；未安装时 weekly_report 自动回落到规则模板)
-anthropic>=0.30.0
+# LLM API (周报正文，OpenAI 兼容格式，当前用于 DeepSeek；
+# 未安装或未设 DEEPSEEK_API_KEY 时 weekly_report 自动回落到规则模板)
+openai>=1.40.0
 
 # Logging & Monitoring
 loguru>=0.7.0
