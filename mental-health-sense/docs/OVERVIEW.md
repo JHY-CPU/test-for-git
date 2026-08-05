@@ -871,27 +871,15 @@ data/
 
 ## 怎么把它跑起来
 
-> 以下是操作命令，不是源码。所有命令都在 `mental-health-sense/` 目录下执行。
-
-| 我想做什么 | 命令 |
-|-----------|------|
-| 造一份 60 天的模拟数据（没有真设备时用） | `python scripts/generate_simulation_data.py` |
-| 给老人建档（跑一次就行，需要 35 天数据） | `python scripts/train_all_baselines.py` |
-| 处理某一天 | `python scripts/run_daily_pipeline.py --date 2026-08-15` |
-| 跑一次周轨（微调 + 周报） | `python scripts/run_weekly_pipeline.py` |
-| 只出周报，不动模型 | `python scripts/run_weekly_pipeline.py --no-retrain` |
-| 看当前有没有开着的预警事件 | `python scripts/ack_alert.py --elder E001 --show` |
-| 点"我知道了"，转静默追踪 | `python scripts/ack_alert.py --elder E001` |
-| 跑一次抑郁评估 | `python scripts/run_depression_assessment.py --elder E001 --date ... --video ...` |
-
-两个验证脚本（改了算法或配置**必须重跑**，单元测试覆盖不到判定链）：
-
-| 脚本 | 回答什么问题 |
-|------|-------------|
-| `python scripts/validate_synthetic.py` | **链路对不对**：60 天能不能完整跑通，一轨报警时另一轨是否保持安静（20 项断言） |
-| `python scripts/validate_discriminative.py` | **设计好不好**：10 个场景（真异常、假异常、边界情况）能不能被正确区分 |
-
-还有 24 个测试文件、501 个用例的单元测试。
+> 运行命令（生成模拟数据 / 建档 / 每日推理 / 周轨 / 确认预警 / 抑郁评估 / 两个
+> 验证脚本）都列在 `docs/README.md`「快速开始」与「使用指南」里，这里不重复维护——
+> 同一份命令表两处各写一份必然会漂（曾发生过一处用裸 `python`、另一处用
+> `env -u PYTHONPATH python` 的分叉）。想看命令去 README。
+>
+> 只有一点必须在这里强调：**改了算法或配置后必须重跑两个验证脚本**——
+> `validate_synthetic.py` 回答"链路对不对"（20 项断言）、`validate_discriminative.py`
+> 回答"设计好不好"（10 场景含混淆项），单元测试覆盖不到判定链。
+> 当前单元测试为 **26 个测试文件 / 517 条用例**，全部通过。
 
 > **关于"全绿"的一条重要提醒**（这是本项目学到的教训）：
 > 全绿不等于没问题，要看**绿的是什么**。曾经有一组真实缺陷活在"全绿"之下，

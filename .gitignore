@@ -4,10 +4,10 @@ venv/
 env/
 
 # ===== 大模型权重（可下载，勿入库）=====
-# 这一段此前是空的——标题在、规则没写。而仓库根躺着 3 GB 未跟踪权重
-# （funasr_models/ 2.1G + models/iic--SenseVoiceSmall/ 897M），是 2026-07-29
-# 移除 SenseVoice 声学子系统时的残留，代码里零引用。一次 `git add .` 就会
-# 灌进仓库，而 git 里的大文件事后清不掉（要重写历史）。
+# 规则必须留：2026-07-29 移除 SenseVoice 声学子系统后，仓库根曾躺着 3 GB 未跟踪权重
+# （funasr_models/ + models/iic--SenseVoiceSmall/），代码里零引用、已于 2026-08-05
+# 从磁盘删除。若日后重新下载任何模型权重，必须放这些目录里且不得入库——
+# git 里的大文件事后清不掉（要重写历史）。
 funasr_models/
 models/
 

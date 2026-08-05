@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 仓库结构
 
-Git 仓库根是 `test-for-git/`，项目实际在子目录 `mental-health-sense/`——**所有命令都从该子目录执行**（脚本用 `sys.path.insert` 挂项目根，`data/` 路径由 `src/utils/io.py:get_project_root()` 推出，均以它为基准）。
+Git 仓库根是 `TestforPycharm/`（即本 CLAUDE.md 所在目录，文件夹历史曾用名 `test-for-git`），项目实际在子目录 `mental-health-sense/`——**所有命令都从该子目录执行**（脚本用 `sys.path.insert` 挂项目根，`data/` 路径由 `src/utils/io.py:get_project_root()` 推出，均以它为基准）。
 
-- 主文档是 `mental-health-sense/docs/README.md`（不在项目根），另有 `docs/TRAINING.md`（GRU 训练详解）、`docs/VALIDATION.md`（三层验证框架 + §7 执行记录 + §8 代码走查，代码里的"缺陷④⑤⑥"指 §7）、`docs/TODO.md`（已知未解决问题）。
+- 主文档是 `mental-health-sense/docs/README.md`（不在项目根），另有 `docs/OVERVIEW.md`（通俗讲解，面向不写代码的读者）、`docs/TRAINING.md`（GRU 训练详解）、`docs/VALIDATION.md`（三层验证框架 + §7 执行记录 + §8 代码走查，代码里的"缺陷④⑤⑥"指 §7）。已知未解决问题收口在 `docs/README.md` 的「已知局限」表与「抑郁评估旁路通道 · 当前模型未校准」节。
 
 ## 常用命令
 
@@ -197,4 +197,4 @@ python scripts/validate_discriminative.py --drift  # 长周期慢坡诊断 4×80
 - **注释写"为什么"**：本仓库的注释与 docstring 大量记录"这行代码是被哪条失效链逼出来的"（配置文件里也是）。改动这些区域时保持同样密度，并在文档里同步结论。全仓库文档/注释/提交信息均为中文。
 - 提交信息格式：`类型：描述`（修复/文档/重构/测试/新增/配置/数据/脚本/删除）。
 - 文档与代码的一致性：`docs/README.md` 的"项目结构"章节已于 2026-07-31 校准到实际文件树；若再次改动目录结构，同步更新该章节。
-- 已知未解决（`docs/TODO.md`）：①**MPDD checkpoint 未在本机位校准**（在其验证集上对全部样本预测同一类别，Macro-F1 0.286），故 `depression.alert` 仍置 false，设备到货后必须做域验证；②残差统计未按周内分池，有周末效应的维 z 分被系统性压小；③GRU 固定 7 天窗对持续性变化钝感，异常持续到第 3 天后输入窗被异常日填满、残差收缩。
+- 已知未解决（收口在 `docs/README.md`「已知局限」表与「抑郁评估旁路通道 · ⚠️ 当前模型未校准」节，原 `docs/TODO.md` 已删除、内容并入 README/VALIDATION）：①**MPDD checkpoint 未在本机位校准**（在其验证集上对全部样本预测同一类别，Macro-F1 0.286），故 `depression.alert` 仍置 false，设备到货后必须做域验证；②残差统计未按周内分池，有周末效应的维 z 分被系统性压小；③GRU 固定 7 天窗对持续性变化钝感，异常持续到第 3 天后输入窗被异常日填满、残差收缩。

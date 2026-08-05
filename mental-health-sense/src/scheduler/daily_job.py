@@ -201,7 +201,7 @@ def run_daily_pipeline(
     #       2026-08-20  管道status=success  error=None  risk_result=无(未判定)
     #   cron 全绿、监控全绿，而这几天连推理日志里都没有可用的分。
     #
-    #   这与 TODO.md 已修的"异常被吞后 status 仍 success"是同一条失效链的
+    #   这与 VALIDATION §9 已修的"异常被吞后 status 仍 success"是同一条失效链的
     #   第二个入口：上次修的是异常路径，这次是"没抛异常但也没结论"的路径。
     #   判据落在 risk_result 上——它是这条链路的**最终产物**，
     #   有它才说明聚合→推理→判定整条链真的走完了。
