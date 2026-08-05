@@ -1,11 +1,9 @@
 # 双轨特征字典（睡眠轨 8 维 + 社交轨 5 维）
 
 > 人话版特征说明：每一维是什么、怎么算出来的、数值往哪个方向变算"不好"、权重多少、
-> 前端展示给家属看的中文叫什么。面向"看得懂业务但不想读代码"的读者；实现细节见
-> `l4_core/psychology/ingest/adapters/`（`xiaobeike.py` 睡眠轨、`ezviz_events.py` +
-> `circadian.py` + `camera.py` 社交轨），权重原始配置在
-> `configs/psychology/feature_weights.json`，前端展示名配置在
-> `l_gateway/services/modules/psychology_service.py:_FEATURE_LABELS`。
+> 中文展示名叫什么。面向"看得懂业务但不想读代码"的读者；实现细节见
+> `src/data_pipeline/adapters/`（`xiaobeike.py` 睡眠轨、`ezviz_events.py` +
+> `circadian.py` + `camera.py` 社交轨），权重原始配置在 `config/feature_weights.json`。
 
 ## 先说清楚三件事
 
@@ -20,10 +18,10 @@
    - `up`：数值**上升**才算异常（数值越低越好，比如清醒时长、离床次数）
    - `any`：**双向偏离都算异常**，只有 `sleep_onset_clock` 是这个类型
      ——入睡时刻只看"是否偏离自己的常态"，不评判早睡早起孰优孰劣
-4. **前端"维度归因"图表里的中文名是纯展示映射，不是另一套指标**。心理算法链路
-   全程用英文字段名做向量下标（`SLEEP_FEATURES` / `SOCIAL_FEATURES` 的顺序即下标），
-   中文名只在网关服务层加了一层 `_FEATURE_LABELS` 翻译给家属看，一个英文字段名
-   对应且仅对应一个中文展示名，下面每张表都补了这一列。
+4. **中文展示名是纯展示映射，不是另一套指标**。心理算法链路全程用英文字段名做
+   向量下标（`SLEEP_FEATURES` / `SOCIAL_FEATURES` 的顺序即下标），中文名只是给
+   家属/周报看的展示名，一个英文字段名对应且仅对应一个中文展示名，下面每张表都
+   补了这一列。
 
 ---
 
@@ -141,36 +139,16 @@
 | 4 | 日内变异性 / Intradaily Variability | `rar_iv` | 节律碎片化 | 2.5 | ↑ 上升算异常 | 比例 | 强 |
 | 5 | 日间活动事件总数 / Daytime Activity Counts | `activity_counts` | 活动量 | 2.5 | ↓ 下降算异常 | 次数 | 强 |
 
-### 前端"维度归因"里那 5 个中文名，实际对应哪个指标
+### 社交轨 5 个中文名的翻译原则
 
-`l5_web/frontend/index.html` 的"维度归因"面板（社交轨柱状图）显示的是**同处时长 /
-疑似外出时长 / 活动节律振幅 / 节律碎片化 / 活动量**这 5 个中文名。它们不是独立于
-上面 5 维之外的东西，而是**同一套字段的展示层翻译**，唯一权威映射在
-`l_gateway/services/modules/psychology_service.py:_FEATURE_LABELS`（第 91~95 行）：
-
-```python
-"copresence_min":   "同处时长",
-"out_of_home_min":  "疑似外出时长",
-"rar_amplitude":    "活动节律振幅",
-"rar_iv":           "节律碎片化",
-"activity_counts":  "活动量",
-```
-
-逐个对应关系：
-
-| 前端显示的中文 | 实际字段 | 为什么这么翻译 |
-|---|---|---|
-| **同处时长** | `copresence_min` | 直译"共处"为更口语的"同处"，突出"和谁在一起待了多久" |
-| **疑似外出时长** | `out_of_home_min` | 保留"疑似"二字未删——`feature_weights.json` 里明确写着这维"测量为推断"（PIR+摄像头同时静默≠一定出门了），前端措辞不能说死成"外出时长" |
-| **活动节律振幅** | `rar_amplitude` | 把英文缩写 RA（Relative Amplitude）展开成人话，"活动节律"点出这是昼夜活动量的节律指标，"振幅"对应公式里的振幅含义 |
-| **节律碎片化** | `rar_iv` | IV（Intradaily Variability，日内变异性）翻成"碎片化"更贴近它实际衡量的东西——活动量忽高忽低、不成块 |
-| **活动量** | `activity_counts` | 直译，日间活动事件计数 |
-
-这层映射是**纯展示**，两侧没有算法逻辑差异：心理模块内部从聚合到 GRU 推理到风险
-判定全程只认英文字段名（`SOCIAL_FEATURES` 列表顺序即向量下标），中文名单独在
-网关服务层加了一层翻译再吐给前端，图表读的 `f.label` 字段就是这张表翻出来的值
-（前端自己另有一份写死的 demo/mock 数据在离线预览时使用，字面量与这份映射完全一致，
-不是另一套口径）。
+- **同处时长**（`copresence_min`）：直译"共处"为更口语的"同处"，突出"和谁在一起待了多久"。
+- **疑似外出时长**（`out_of_home_min`）：保留"疑似"二字未删——这维"测量为推断"
+  （PIR+摄像头同时静默≠一定出门了），措辞不能说死成"外出时长"。
+- **活动节律振幅**（`rar_amplitude`）：把英文缩写 RA（Relative Amplitude）展开成人话，
+  "活动节律"点出这是昼夜活动量的节律指标。
+- **节律碎片化**（`rar_iv`）：IV（Intradaily Variability）翻成"碎片化"更贴近它实际
+  衡量的东西——活动量忽高忽低、不成块。
+- **活动量**（`activity_counts`）：直译，日间活动事件计数。
 
 ### 1. 人形共处时长 Co-presence Minutes（`copresence_min`）
 
